@@ -1,14 +1,14 @@
 """Utility helpers for InventoryLite."""
 from __future__ import annotations
 
-import logging
-from logging.handlers import RotatingFileHandler
-import os
-import sys
-import shutil
 import datetime
-from tkinter import messagebox, TclError
+import logging
+import os
+import shutil
+import sys
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from tkinter import TclError, messagebox
 
 try:
     import fcntl  # type: ignore

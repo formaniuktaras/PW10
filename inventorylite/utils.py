@@ -21,7 +21,8 @@ except ImportError:  # POSIX fallback
     msvcrt = None  # type: ignore
 
 APP_NAME = "InventoryLite"
-VERSION = "0.2.0"
+# v0.3 adds cash-basis accounting, moving-average inventory costing and direct-costing reports.
+VERSION = "0.3.0"
 
 
 def get_data_dir() -> Path:

@@ -1,13 +1,20 @@
-"""InventoryLite minimal Tkinter app."""
+"""InventoryLite GUI with cash-basis accounting and moving-average inventory.
+
+The app focuses on a lightweight workflow for a trading business:
+- Cash basis only: income/expense are registered when money changes hands.
+- Inventory cost uses moving-average per product and warehouse.
+- Direct-costing: only variable costs (purchase price) are included into COGS; fixed
+  expenses are tracked separately via cash transactions.
+"""
 from __future__ import annotations
 
 import logging
+import traceback
 from datetime import datetime
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
 import sqlite3
-import traceback
 
 import db
 from utils import (
@@ -29,7 +36,7 @@ class InventoryApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title(APP_NAME)
-        self.geometry("1020x680")
+        self.geometry("1180x720")
         self.iconbitmap(default="icons/app.ico") if Path("icons/app.ico").exists() else None
         self.create_menu()
 
@@ -40,8 +47,13 @@ class InventoryApp(tk.Tk):
         self.categories_frame = ttk.Frame(notebook)
         self.products_frame = ttk.Frame(notebook)
         self.counterparties_frame = ttk.Frame(notebook)
-        self.documents_frame = ttk.Frame(notebook)
+        self.warehouses_frame = ttk.Frame(notebook)
+        self.channels_frame = ttk.Frame(notebook)
+        self.purchases_frame = ttk.Frame(notebook)
+        self.sales_frame = ttk.Frame(notebook)
+        self.cash_frame = ttk.Frame(notebook)
         self.stock_frame = ttk.Frame(notebook)
+        self.reports_frame = ttk.Frame(notebook)
         self.export_frame = ttk.Frame(notebook)
         self.about_frame = ttk.Frame(notebook)
 
@@ -49,8 +61,13 @@ class InventoryApp(tk.Tk):
         notebook.add(self.categories_frame, text="Категорії")
         notebook.add(self.products_frame, text="Товари")
         notebook.add(self.counterparties_frame, text="Контрагенти")
-        notebook.add(self.documents_frame, text="Документи")
+        notebook.add(self.warehouses_frame, text="Склади")
+        notebook.add(self.channels_frame, text="Канали продажу")
+        notebook.add(self.purchases_frame, text="Закупівлі")
+        notebook.add(self.sales_frame, text="Продажі")
+        notebook.add(self.cash_frame, text="Каса")
         notebook.add(self.stock_frame, text="Залишки")
+        notebook.add(self.reports_frame, text="Звіти")
         notebook.add(self.export_frame, text="Експорт")
         notebook.add(self.about_frame, text="Про програму")
 
@@ -58,8 +75,13 @@ class InventoryApp(tk.Tk):
         self.create_categories_tab()
         self.create_products_tab()
         self.create_counterparties_tab()
-        self.create_documents_tab()
+        self.create_warehouses_tab()
+        self.create_channels_tab()
+        self.create_purchases_tab()
+        self.create_sales_tab()
+        self.create_cash_tab()
         self.create_stock_tab()
+        self.create_reports_tab()
         self.create_export_tab()
         self.create_about_tab()
 
@@ -205,16 +227,18 @@ class InventoryApp(tk.Tk):
     def create_products_tab(self) -> None:
         top = ttk.Frame(self.products_frame)
         top.pack(fill=tk.X, padx=8, pady=4)
-        ttk.Label(top, text="Пошук (SKU/назва):").pack(side=tk.LEFT)
-        self.search_var = tk.StringVar()
-        ttk.Entry(top, textvariable=self.search_var, width=30).pack(side=tk.LEFT, padx=4)
-        ttk.Button(top, text="Знайти", command=self.on_search).pack(side=tk.LEFT)
+        ttk.Label(top, text="Пошук:").pack(side=tk.LEFT)
+        self.product_search_var = tk.StringVar()
+        ttk.Entry(top, textvariable=self.product_search_var, width=30).pack(side=tk.LEFT, padx=4)
+        ttk.Button(top, text="Оновити", command=self.on_search_products).pack(side=tk.LEFT)
 
         columns = [
-            ("sku", "SKU", 140),
-            ("name", "Назва", 220),
+            ("sku", "SKU", 120),
+            ("name", "Назва", 230),
             ("brand", "Бренд", 140),
             ("category", "Категорія", 140),
+            ("unit", "Одиниця", 90),
+            ("is_active", "Активний", 90),
         ]
         self.product_table = TableFrame(self.products_frame, columns)
         self.product_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
@@ -225,27 +249,21 @@ class InventoryApp(tk.Tk):
         ttk.Button(btns, text="Змінити", command=self.edit_product).pack(side=tk.LEFT, padx=4)
         ttk.Button(btns, text="Видалити", command=self.delete_product).pack(side=tk.LEFT, padx=4)
 
-    def on_search(self) -> None:
-        self.refresh_products(self.search_var.get())
+    def on_search_products(self) -> None:
+        self.refresh_products(self.product_search_var.get())
 
     def add_product(self) -> None:
         brands = db.list_brands()
         categories = db.list_categories()
-        if not brands or not categories:
-            show_error("Товари", "Спочатку додайте бренд і категорію.")
-            return
-        values = product_prompt(brands, categories, title="Новий товар")
+        values = product_prompt(brands, categories, "Новий товар")
         if not values:
             return
-        sku, name, brand_id, category_id = values
+        sku, name, brand_id, category_id, unit, is_active = values
         try:
-            db.add_product(sku, name, brand_id, category_id)
+            db.add_product(sku, name, brand_id, category_id, unit, is_active)
             self.refresh_products()
-        except sqlite3.IntegrityError as exc:
-            if "sku" in str(exc).lower():
-                show_error("Товари", "SKU має бути унікальним.")
-            else:
-                show_error("Товари", "Назва повинна бути унікальною.")
+        except sqlite3.IntegrityError:
+            show_error("Товари", "SKU або назва вже існує.")
         except Exception:
             logging.exception("Add product error")
             show_error("Товари", "Не вдалося додати товар.")
@@ -255,25 +273,26 @@ class InventoryApp(tk.Tk):
         if not product_id:
             show_error("Товари", "Оберіть товар для редагування.")
             return
-        brands = db.list_brands()
-        categories = db.list_categories()
         rows = [p for p in db.list_products() if p["id"] == product_id]
         if not rows:
             return
-        row = rows[0]
-        initial = [row["sku"], row["name"], row["brand_id"], row["category_id"]]
-        values = product_prompt(brands, categories, title="Редагувати товар", initial=initial)
+        p = rows[0]
+        brands = db.list_brands()
+        categories = db.list_categories()
+        values = product_prompt(
+            brands,
+            categories,
+            "Редагувати товар",
+            (p["sku"], p["name"], p["brand_id"], p["category_id"], p["unit"], bool(p["is_active"])),
+        )
         if not values:
             return
-        sku, name, brand_id, category_id = values
+        sku, name, brand_id, category_id, unit, is_active = values
         try:
-            db.update_product(product_id, sku, name, brand_id, category_id)
+            db.update_product(product_id, sku, name, brand_id, category_id, unit, is_active)
             self.refresh_products()
-        except sqlite3.IntegrityError as exc:
-            if "sku" in str(exc).lower():
-                show_error("Товари", "SKU має бути унікальним.")
-            else:
-                show_error("Товари", "Назва повинна бути унікальною.")
+        except sqlite3.IntegrityError:
+            show_error("Товари", "SKU або назва вже існує.")
         except Exception:
             logging.exception("Edit product error")
             show_error("Товари", "Не вдалося змінити товар.")
@@ -294,25 +313,13 @@ class InventoryApp(tk.Tk):
 
     # Counterparties
     def create_counterparties_tab(self) -> None:
-        top = ttk.Frame(self.counterparties_frame)
-        top.pack(fill=tk.X, padx=8, pady=4)
-        ttk.Label(top, text="Тип:").pack(side=tk.LEFT)
-        self.counterparty_filter = tk.StringVar(value="")
-        type_combo = ttk.Combobox(
-            top,
-            textvariable=self.counterparty_filter,
-            values=["Усі", "Постачальник", "Покупець", "Інший"],
-            state="readonly",
-            width=15,
-        )
-        type_combo.pack(side=tk.LEFT, padx=4)
-        type_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh_counterparties())
-
         columns = [
             ("name", "Назва", 200),
             ("type", "Тип", 120),
-            ("phone", "Телефон", 140),
-            ("email", "Email", 200),
+            ("phone", "Телефон", 120),
+            ("email", "Email", 170),
+            ("address", "Адреса", 200),
+            ("note", "Нотатка", 200),
         ]
         self.counterparty_table = TableFrame(self.counterparties_frame, columns)
         self.counterparty_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
@@ -323,41 +330,6 @@ class InventoryApp(tk.Tk):
         ttk.Button(btns, text="Змінити", command=self.edit_counterparty).pack(side=tk.LEFT, padx=4)
         ttk.Button(btns, text="Видалити", command=self.delete_counterparty).pack(side=tk.LEFT, padx=4)
 
-    def _counterparty_type_label(self, value: str) -> str:
-        return {"supplier": "Постачальник", "customer": "Покупець", "other": "Інший"}.get(value, value)
-
-    def _counterparty_type_value(self, label: str) -> str:
-        mapping = {
-            "Постачальник": "supplier",
-            "Покупець": "customer",
-            "Інший": "other",
-        }
-        return mapping.get(label, "")
-
-    def refresh_counterparties(self) -> None:
-        type_value = self.counterparty_filter.get()
-        db_value = self._counterparty_type_value(type_value)
-        rows = db.list_counterparties(db_value if db_value else None)
-        self.counterparty_table.set_rows(
-            [
-                {
-                    "id": r["id"],
-                    "name": r["name"],
-                    "type": self._counterparty_type_label(r["type"]),
-                    "phone": r["phone"],
-                    "email": r["email"],
-                }
-                for r in rows
-            ]
-        )
-        # Update filters in documents tab
-        if hasattr(self, "doc_counterparty_var"):
-            current = self.doc_counterparty_var.get()
-            values = ["Усі"] + [r["name"] for r in rows]
-            self.doc_counterparty_combo["values"] = values
-            if current not in values:
-                self.doc_counterparty_var.set("Усі")
-
     def add_counterparty(self) -> None:
         values = counterparty_prompt()
         if not values:
@@ -366,7 +338,7 @@ class InventoryApp(tk.Tk):
             db.add_counterparty(*values)
             self.refresh_counterparties()
         except sqlite3.IntegrityError:
-            show_error("Контрагенти", "Контрагент з такою назвою вже існує для цього типу.")
+            show_error("Контрагенти", "Контрагент з такою назвою вже існує.")
         except Exception:
             logging.exception("Add counterparty error")
             show_error("Контрагенти", "Не вдалося додати контрагента.")
@@ -374,21 +346,20 @@ class InventoryApp(tk.Tk):
     def edit_counterparty(self) -> None:
         counterparty_id = self.counterparty_table.selected_id()
         if not counterparty_id:
-            show_error("Контрагенти", "Оберіть контрагента для редагування.")
+            show_error("Контрагенти", "Оберіть контрагента.")
             return
         rows = [c for c in db.list_counterparties() if c["id"] == counterparty_id]
         if not rows:
             return
-        row = rows[0]
-        initial = [row["name"], row["type"], row["phone"], row["email"], row["address"], row["note"]]
-        values = counterparty_prompt(initial=initial)
+        c = rows[0]
+        values = counterparty_prompt((c["name"], c["type"], c["phone"], c["email"], c["address"], c["note"]))
         if not values:
             return
         try:
             db.update_counterparty(counterparty_id, *values)
             self.refresh_counterparties()
         except sqlite3.IntegrityError:
-            show_error("Контрагенти", "Контрагент з такою назвою вже існує для цього типу.")
+            show_error("Контрагенти", "Контрагент з такою назвою вже існує.")
         except Exception:
             logging.exception("Edit counterparty error")
             show_error("Контрагенти", "Не вдалося змінити контрагента.")
@@ -409,187 +380,489 @@ class InventoryApp(tk.Tk):
             logging.exception("Delete counterparty error")
             show_error("Контрагенти", "Не вдалося видалити контрагента.")
 
-    # Documents
-    def create_documents_tab(self) -> None:
-        filters = ttk.Frame(self.documents_frame)
+    # Warehouses
+    def create_warehouses_tab(self) -> None:
+        columns = [("name", "Назва", 200), ("description", "Опис", 260), ("is_active", "Активний", 100)]
+        self.warehouse_table = TableFrame(self.warehouses_frame, columns)
+        self.warehouse_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        btns = ttk.Frame(self.warehouses_frame)
+        btns.pack(pady=4)
+        ttk.Button(btns, text="Додати", command=self.add_warehouse).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Змінити", command=self.edit_warehouse).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Видалити", command=self.delete_warehouse).pack(side=tk.LEFT, padx=4)
+
+    def add_warehouse(self) -> None:
+        values = warehouse_prompt()
+        if not values:
+            return
+        name, description, is_active = values
+        try:
+            db.add_warehouse(name, description, is_active)
+            self.refresh_warehouses()
+        except sqlite3.IntegrityError:
+            show_error("Склади", "Склад з такою назвою вже існує.")
+        except Exception:
+            logging.exception("Add warehouse error")
+            show_error("Склади", "Не вдалося додати склад.")
+
+    def edit_warehouse(self) -> None:
+        warehouse_id = self.warehouse_table.selected_id()
+        if not warehouse_id:
+            show_error("Склади", "Оберіть склад.")
+            return
+        rows = [w for w in db.list_warehouses() if w["id"] == warehouse_id]
+        if not rows:
+            return
+        w = rows[0]
+        values = warehouse_prompt((w["name"], w["description"] or "", bool(w["is_active"])))
+        if not values:
+            return
+        name, description, is_active = values
+        try:
+            db.update_warehouse(warehouse_id, name, description, is_active)
+            self.refresh_warehouses()
+        except sqlite3.IntegrityError:
+            show_error("Склади", "Склад з такою назвою вже існує.")
+        except Exception:
+            logging.exception("Edit warehouse error")
+            show_error("Склади", "Не вдалося змінити склад.")
+
+    def delete_warehouse(self) -> None:
+        warehouse_id = self.warehouse_table.selected_id()
+        if not warehouse_id:
+            show_error("Склади", "Оберіть склад для видалення.")
+            return
+        if not messagebox.askyesno("Підтвердження", "Видалити склад?"):
+            return
+        try:
+            db.delete_warehouse(warehouse_id)
+            self.refresh_warehouses()
+        except Exception as exc:
+            logging.exception("Delete warehouse error")
+            show_error("Склади", str(exc))
+
+    # Channels
+    def create_channels_tab(self) -> None:
+        columns = [("name", "Назва", 240), ("is_active", "Активний", 100)]
+        self.channel_table = TableFrame(self.channels_frame, columns)
+        self.channel_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        btns = ttk.Frame(self.channels_frame)
+        btns.pack(pady=4)
+        ttk.Button(btns, text="Додати", command=self.add_channel).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Змінити", command=self.edit_channel).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Видалити", command=self.delete_channel).pack(side=tk.LEFT, padx=4)
+
+    def add_channel(self) -> None:
+        values = channel_prompt()
+        if not values:
+            return
+        name, is_active = values
+        try:
+            db.add_channel(name, is_active)
+            self.refresh_channels()
+        except sqlite3.IntegrityError:
+            show_error("Канали", "Канал з такою назвою вже існує.")
+        except Exception:
+            logging.exception("Add channel error")
+            show_error("Канали", "Не вдалося додати канал.")
+
+    def edit_channel(self) -> None:
+        channel_id = self.channel_table.selected_id()
+        if not channel_id:
+            show_error("Канали", "Оберіть канал.")
+            return
+        rows = [c for c in db.list_channels() if c["id"] == channel_id]
+        if not rows:
+            return
+        c = rows[0]
+        values = channel_prompt((c["name"], bool(c["is_active"])))
+        if not values:
+            return
+        name, is_active = values
+        try:
+            db.update_channel(channel_id, name, is_active)
+            self.refresh_channels()
+        except sqlite3.IntegrityError:
+            show_error("Канали", "Канал з такою назвою вже існує.")
+        except Exception:
+            logging.exception("Edit channel error")
+            show_error("Канали", "Не вдалося змінити канал.")
+
+    def delete_channel(self) -> None:
+        channel_id = self.channel_table.selected_id()
+        if not channel_id:
+            show_error("Канали", "Оберіть канал для видалення.")
+            return
+        if not messagebox.askyesno("Підтвердження", "Видалити канал?"):
+            return
+        try:
+            db.delete_channel(channel_id)
+            self.refresh_channels()
+        except Exception as exc:
+            logging.exception("Delete channel error")
+            show_error("Канали", str(exc))
+
+    # Purchases
+    def create_purchases_tab(self) -> None:
+        filters = ttk.Frame(self.purchases_frame)
         filters.pack(fill=tk.X, padx=8, pady=4)
-
-        ttk.Label(filters, text="Тип:").pack(side=tk.LEFT)
-        self.doc_type_var = tk.StringVar(value="Усі")
-        type_combo = ttk.Combobox(
-            filters, textvariable=self.doc_type_var, values=["Усі", "Прихід", "Розхід"], state="readonly", width=12
-        )
-        type_combo.pack(side=tk.LEFT, padx=4)
-
         ttk.Label(filters, text="Статус:").pack(side=tk.LEFT)
-        self.doc_status_var = tk.StringVar(value="Усі")
-        status_combo = ttk.Combobox(
-            filters,
-            textvariable=self.doc_status_var,
-            values=["Усі", "Чернетка", "Проведений"],
-            state="readonly",
-            width=12,
-        )
+        self.purchase_status_var = tk.StringVar(value="Усі")
+        status_combo = ttk.Combobox(filters, textvariable=self.purchase_status_var, values=["Усі", "Чернетка", "Проведений"], state="readonly", width=14)
         status_combo.pack(side=tk.LEFT, padx=4)
-
-        ttk.Label(filters, text="Контрагент:").pack(side=tk.LEFT)
-        self.doc_counterparty_var = tk.StringVar(value="Усі")
-        self.doc_counterparty_combo = ttk.Combobox(filters, textvariable=self.doc_counterparty_var, state="readonly", width=20)
-        self.doc_counterparty_combo.pack(side=tk.LEFT, padx=4)
-
         ttk.Label(filters, text="Дата з:").pack(side=tk.LEFT)
-        self.date_from_var = tk.StringVar()
-        ttk.Entry(filters, textvariable=self.date_from_var, width=10).pack(side=tk.LEFT, padx=2)
+        self.purchase_date_from_var = tk.StringVar()
+        ttk.Entry(filters, textvariable=self.purchase_date_from_var, width=10).pack(side=tk.LEFT, padx=2)
         ttk.Label(filters, text="по:").pack(side=tk.LEFT)
-        self.date_to_var = tk.StringVar()
-        ttk.Entry(filters, textvariable=self.date_to_var, width=10).pack(side=tk.LEFT, padx=2)
-
-        ttk.Button(filters, text="Фільтр", command=self.refresh_documents).pack(side=tk.LEFT, padx=6)
+        self.purchase_date_to_var = tk.StringVar()
+        ttk.Entry(filters, textvariable=self.purchase_date_to_var, width=10).pack(side=tk.LEFT, padx=2)
+        ttk.Button(filters, text="Фільтр", command=self.refresh_purchases).pack(side=tk.LEFT, padx=6)
 
         columns = [
             ("doc_date", "Дата", 90),
-            ("doc_type", "Тип", 70),
-            ("number", "Номер", 90),
-            ("counterparty", "Контрагент", 180),
+            ("supplier", "Постачальник", 180),
+            ("warehouse", "Склад", 140),
+            ("channel", "Канал", 100),
             ("status", "Статус", 90),
             ("total", "Сума", 90),
             ("comment", "Коментар", 220),
         ]
-        self.documents_table = TableFrame(self.documents_frame, columns)
-        self.documents_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        self.purchase_table = TableFrame(self.purchases_frame, columns)
+        self.purchase_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
-        btns = ttk.Frame(self.documents_frame)
+        btns = ttk.Frame(self.purchases_frame)
         btns.pack(pady=4)
-        ttk.Button(btns, text="Новий прихід", command=lambda: self.new_document("IN")).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="Новий розхід", command=lambda: self.new_document("OUT")).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="Змінити", command=self.edit_document).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="Видалити", command=self.delete_document).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="Провести", command=self.post_document_action).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="Відмінити проведення", command=self.unpost_document_action).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Нова закупівля", command=self.new_purchase).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Змінити", command=self.edit_purchase).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Видалити", command=self.delete_purchase).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Провести", command=self.post_purchase_action).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Відмінити проведення", command=self.unpost_purchase_action).pack(side=tk.LEFT, padx=4)
 
-    def _doc_type_label(self, value: str) -> str:
-        return "Прихід" if value == "IN" else "Розхід"
+    def _selected_purchase(self):
+        doc_id = self.purchase_table.selected_id()
+        if not doc_id:
+            show_error("Закупівлі", "Оберіть документ")
+            return None
+        return doc_id
 
-    def _doc_status_label(self, value: str) -> str:
-        return "Чернетка" if value == "draft" else "Проведений"
-
-    def refresh_documents(self) -> None:
-        type_filter = self.doc_type_var.get()
-        status_filter = self.doc_status_var.get()
-        cparty_name = self.doc_counterparty_var.get()
-        rows_counterparties = db.list_counterparties()
-        counterparties_by_name = {r["name"]: r["id"] for r in rows_counterparties}
-        counterparty_id = counterparties_by_name.get(cparty_name) if cparty_name and cparty_name != "Усі" else None
-        type_value = "IN" if type_filter == "Прихід" else "OUT" if type_filter == "Розхід" else None
+    def refresh_purchases(self) -> None:
+        status_filter = self.purchase_status_var.get()
         status_value = "draft" if status_filter == "Чернетка" else "posted" if status_filter == "Проведений" else None
-        date_from = self.date_from_var.get().strip() or None
-        date_to = self.date_to_var.get().strip() or None
-        rows = db.list_documents(type_value, status_value, counterparty_id, date_from, date_to)
-        self.documents_table.set_rows(
+        rows = db.list_purchases(status_value, self.purchase_date_from_var.get().strip() or None, self.purchase_date_to_var.get().strip() or None)
+        self.purchase_table.set_rows(
             [
                 {
                     "id": r["id"],
                     "doc_date": r["doc_date"],
-                    "doc_type": self._doc_type_label(r["doc_type"]),
-                    "number": r["number"],
-                    "counterparty": r["counterparty"] or "-",
-                    "status": self._doc_status_label(r["status"]),
+                    "supplier": r["supplier"] or "-",
+                    "warehouse": r["warehouse"] or "-",
+                    "channel": r["channel"] or "-",
+                    "status": "Чернетка" if r["status"] == "draft" else "Проведений",
                     "total": f"{r['total']:.2f}",
                     "comment": r["comment"] or "",
                 }
                 for r in rows
             ]
         )
-        # refresh counterparty list options
-        values = ["Усі"] + [r["name"] for r in rows_counterparties]
-        self.doc_counterparty_combo["values"] = values
-        if self.doc_counterparty_var.get() not in values:
-            self.doc_counterparty_var.set("Усі")
 
-    def _selected_document(self):
-        doc_id = self.documents_table.selected_id()
-        if not doc_id:
-            show_error("Документи", "Оберіть документ у списку.")
-            return None
-        return doc_id
-
-    def new_document(self, doc_type: str) -> None:
+    def new_purchase(self) -> None:
         products = db.list_products()
-        if not products:
-            show_error("Документи", "Спочатку додайте товари.")
-            return
+        warehouses = db.list_warehouses(active_only=True)
+        channels = db.list_channels(active_only=True)
         counterparties = db.list_counterparties()
-        result = document_prompt(doc_type, products, counterparties)
+        result = document_prompt("purchase", products, counterparties, warehouses, channels)
         if not result:
             return
         info, lines = result
         try:
-            doc_id = db.create_document(info["doc_type"], info["doc_date"], info["number"], info["counterparty_id"], info["comment"])
-            db.replace_document_lines(doc_id, lines)
-            self.refresh_documents()
+            doc_id = db.create_purchase(info["doc_date"], info["counterparty_id"], info["warehouse_id"], info["channel"], info["comment"])
+            db.replace_purchase_lines(doc_id, lines)
+            self.refresh_purchases()
         except Exception:
-            logging.exception("Create document error")
-            show_error("Документи", "Не вдалося створити документ.")
+            logging.exception("Create purchase error")
+            show_error("Закупівлі", "Не вдалося створити документ")
 
-    def edit_document(self) -> None:
-        doc_id = self._selected_document()
+    def edit_purchase(self) -> None:
+        doc_id = self._selected_purchase()
         if not doc_id:
             return
-        doc = db.get_document(doc_id)
-        lines = db.list_document_lines(doc_id)
+        doc = db.get_purchase(doc_id)
+        if not doc:
+            return
+        lines = db.list_purchase_lines(doc_id)
         products = db.list_products()
+        warehouses = db.list_warehouses(active_only=False)
+        channels = db.list_channels(active_only=False)
         counterparties = db.list_counterparties()
-        result = document_prompt(doc["doc_type"], products, counterparties, doc=doc, lines=lines)
+        result = document_prompt("purchase", products, counterparties, warehouses, channels, doc=doc, lines=lines)
         if not result:
             return
         info, new_lines = result
         try:
             if doc["status"] == "draft":
-                db.update_document(doc_id, info["doc_type"], info["doc_date"], info["number"], info["counterparty_id"], info["comment"])
-                db.replace_document_lines(doc_id, new_lines)
+                db.update_purchase(doc_id, info["doc_date"], info["counterparty_id"], info["warehouse_id"], info["channel"], info["comment"])
+                db.replace_purchase_lines(doc_id, new_lines)
             else:
-                db.update_document_comment(doc_id, info["comment"])
-            self.refresh_documents()
+                db.update_purchase(doc_id, doc["doc_date"], doc["supplier_id"], doc["warehouse_id"], doc["channel"] or "", info["comment"])
+            self.refresh_purchases()
         except Exception:
-            logging.exception("Edit document error")
-            show_error("Документи", "Не вдалося змінити документ.")
+            logging.exception("Edit purchase error")
+            show_error("Закупівлі", "Не вдалося змінити документ")
 
-    def delete_document(self) -> None:
-        doc_id = self._selected_document()
+    def delete_purchase(self) -> None:
+        doc_id = self._selected_purchase()
         if not doc_id:
             return
         if not messagebox.askyesno("Підтвердження", "Видалити документ?"):
             return
         try:
-            db.delete_document(doc_id)
-            self.refresh_documents()
+            with db.get_connection() as conn:
+                status = conn.execute("SELECT status FROM PurchaseDocuments WHERE id=?", (doc_id,)).fetchone()
+                if status and status[0] != "draft":
+                    raise ValueError("Видаляти можна лише чернетки")
+                conn.execute("DELETE FROM PurchaseDocuments WHERE id=?", (doc_id,))
+                conn.commit()
+            self.refresh_purchases()
         except Exception as exc:
-            logging.exception("Delete document error")
-            show_error("Документи", str(exc))
+            logging.exception("Delete purchase error")
+            show_error("Закупівлі", str(exc))
 
-    def post_document_action(self) -> None:
-        doc_id = self._selected_document()
+    def post_purchase_action(self) -> None:
+        doc_id = self._selected_purchase()
         if not doc_id:
             return
         try:
-            db.post_document(doc_id)
-            self.refresh_documents()
+            db.post_purchase(doc_id)
+            self.refresh_purchases()
             self.refresh_stock()
         except Exception as exc:
-            logging.exception("Post document error")
-            show_error("Документи", str(exc))
+            logging.exception("Post purchase error")
+            show_error("Закупівлі", str(exc))
 
-    def unpost_document_action(self) -> None:
-        doc_id = self._selected_document()
+    def unpost_purchase_action(self) -> None:
+        doc_id = self._selected_purchase()
         if not doc_id:
             return
         try:
-            db.unpost_document(doc_id)
-            self.refresh_documents()
+            db.unpost_purchase(doc_id)
+            self.refresh_purchases()
             self.refresh_stock()
         except Exception as exc:
-            logging.exception("Unpost document error")
-            show_error("Документи", str(exc))
+            logging.exception("Unpost purchase error")
+            show_error("Закупівлі", str(exc))
+
+    # Sales
+    def create_sales_tab(self) -> None:
+        filters = ttk.Frame(self.sales_frame)
+        filters.pack(fill=tk.X, padx=8, pady=4)
+        ttk.Label(filters, text="Статус:").pack(side=tk.LEFT)
+        self.sales_status_var = tk.StringVar(value="Усі")
+        status_combo = ttk.Combobox(filters, textvariable=self.sales_status_var, values=["Усі", "Чернетка", "Проведений"], state="readonly", width=14)
+        status_combo.pack(side=tk.LEFT, padx=4)
+        ttk.Label(filters, text="Дата з:").pack(side=tk.LEFT)
+        self.sales_date_from_var = tk.StringVar()
+        ttk.Entry(filters, textvariable=self.sales_date_from_var, width=10).pack(side=tk.LEFT, padx=2)
+        ttk.Label(filters, text="по:").pack(side=tk.LEFT)
+        self.sales_date_to_var = tk.StringVar()
+        ttk.Entry(filters, textvariable=self.sales_date_to_var, width=10).pack(side=tk.LEFT, padx=2)
+        ttk.Button(filters, text="Фільтр", command=self.refresh_sales).pack(side=tk.LEFT, padx=6)
+
+        columns = [
+            ("doc_date", "Дата", 90),
+            ("customer", "Покупець", 180),
+            ("warehouse", "Склад", 140),
+            ("channel", "Канал", 100),
+            ("status", "Статус", 90),
+            ("total", "Сума", 90),
+            ("comment", "Коментар", 220),
+        ]
+        self.sales_table = TableFrame(self.sales_frame, columns)
+        self.sales_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+        btns = ttk.Frame(self.sales_frame)
+        btns.pack(pady=4)
+        ttk.Button(btns, text="Новий продаж", command=self.new_sale).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Змінити", command=self.edit_sale).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Видалити", command=self.delete_sale).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Провести", command=self.post_sale_action).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Відмінити проведення", command=self.unpost_sale_action).pack(side=tk.LEFT, padx=4)
+
+    def _selected_sale(self):
+        doc_id = self.sales_table.selected_id()
+        if not doc_id:
+            show_error("Продажі", "Оберіть документ")
+            return None
+        return doc_id
+
+    def refresh_sales(self) -> None:
+        status_filter = self.sales_status_var.get()
+        status_value = "draft" if status_filter == "Чернетка" else "posted" if status_filter == "Проведений" else None
+        rows = db.list_sales(status_value, self.sales_date_from_var.get().strip() or None, self.sales_date_to_var.get().strip() or None)
+        self.sales_table.set_rows(
+            [
+                {
+                    "id": r["id"],
+                    "doc_date": r["doc_date"],
+                    "customer": r["customer"] or "-",
+                    "warehouse": r["warehouse"] or "-",
+                    "channel": r["channel"] or "-",
+                    "status": "Чернетка" if r["status"] == "draft" else "Проведений",
+                    "total": f"{r['total']:.2f}",
+                    "comment": r["comment"] or "",
+                }
+                for r in rows
+            ]
+        )
+
+    def new_sale(self) -> None:
+        products = db.list_products()
+        warehouses = db.list_warehouses(active_only=True)
+        channels = db.list_channels(active_only=True)
+        counterparties = db.list_counterparties()
+        result = document_prompt("sale", products, counterparties, warehouses, channels)
+        if not result:
+            return
+        info, lines = result
+        try:
+            doc_id = db.create_sale(info["doc_date"], info["counterparty_id"], info["warehouse_id"], info["channel"], info["comment"])
+            db.replace_sale_lines(doc_id, lines)
+            self.refresh_sales()
+        except Exception:
+            logging.exception("Create sale error")
+            show_error("Продажі", "Не вдалося створити документ")
+
+    def edit_sale(self) -> None:
+        doc_id = self._selected_sale()
+        if not doc_id:
+            return
+        doc = db.get_sale(doc_id)
+        if not doc:
+            return
+        lines = db.list_sale_lines(doc_id)
+        products = db.list_products()
+        warehouses = db.list_warehouses(active_only=False)
+        channels = db.list_channels(active_only=False)
+        counterparties = db.list_counterparties()
+        result = document_prompt("sale", products, counterparties, warehouses, channels, doc=doc, lines=lines)
+        if not result:
+            return
+        info, new_lines = result
+        try:
+            if doc["status"] == "draft":
+                db.update_sale(doc_id, info["doc_date"], info["counterparty_id"], info["warehouse_id"], info["channel"], info["comment"])
+                db.replace_sale_lines(doc_id, new_lines)
+            else:
+                db.update_sale(doc_id, doc["doc_date"], doc["customer_id"], doc["warehouse_id"], doc["channel"] or "", info["comment"])
+            self.refresh_sales()
+        except Exception:
+            logging.exception("Edit sale error")
+            show_error("Продажі", "Не вдалося змінити документ")
+
+    def delete_sale(self) -> None:
+        doc_id = self._selected_sale()
+        if not doc_id:
+            return
+        if not messagebox.askyesno("Підтвердження", "Видалити документ?"):
+            return
+        try:
+            with db.get_connection() as conn:
+                status = conn.execute("SELECT status FROM SalesDocuments WHERE id=?", (doc_id,)).fetchone()
+                if status and status[0] != "draft":
+                    raise ValueError("Видаляти можна лише чернетки")
+                conn.execute("DELETE FROM SalesDocuments WHERE id=?", (doc_id,))
+                conn.commit()
+            self.refresh_sales()
+        except Exception as exc:
+            logging.exception("Delete sale error")
+            show_error("Продажі", str(exc))
+
+    def post_sale_action(self) -> None:
+        doc_id = self._selected_sale()
+        if not doc_id:
+            return
+        try:
+            db.post_sale(doc_id)
+            self.refresh_sales()
+            self.refresh_stock()
+        except Exception as exc:
+            logging.exception("Post sale error")
+            show_error("Продажі", str(exc))
+
+    def unpost_sale_action(self) -> None:
+        doc_id = self._selected_sale()
+        if not doc_id:
+            return
+        try:
+            db.unpost_sale(doc_id)
+            self.refresh_sales()
+            self.refresh_stock()
+        except Exception as exc:
+            logging.exception("Unpost sale error")
+            show_error("Продажі", str(exc))
+
+    # Cash
+    def create_cash_tab(self) -> None:
+        top = ttk.Frame(self.cash_frame)
+        top.pack(fill=tk.X, padx=8, pady=4)
+        ttk.Label(top, text="Дата з:").pack(side=tk.LEFT)
+        self.cash_date_from_var = tk.StringVar()
+        ttk.Entry(top, textvariable=self.cash_date_from_var, width=10).pack(side=tk.LEFT, padx=2)
+        ttk.Label(top, text="по:").pack(side=tk.LEFT)
+        self.cash_date_to_var = tk.StringVar()
+        ttk.Entry(top, textvariable=self.cash_date_to_var, width=10).pack(side=tk.LEFT, padx=2)
+        ttk.Button(top, text="Фільтр", command=self.refresh_cash).pack(side=tk.LEFT, padx=6)
+        ttk.Button(top, text="Додати рух", command=self.add_cash).pack(side=tk.LEFT, padx=6)
+
+        columns = [
+            ("date", "Дата", 90),
+            ("type", "Тип", 140),
+            ("amount", "Сума", 100),
+            ("counterparty", "Контрагент", 160),
+            ("channel", "Канал", 120),
+            ("related", "Документ", 120),
+            ("comment", "Коментар", 260),
+        ]
+        self.cash_table = TableFrame(self.cash_frame, columns)
+        self.cash_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+    def refresh_cash(self) -> None:
+        rows = db.list_cash(self.cash_date_from_var.get().strip() or None, self.cash_date_to_var.get().strip() or None)
+        type_labels = {
+            "sale_payment": "Оплата від клієнта",
+            "purchase_payment": "Оплата постачальнику",
+            "other_income": "Інший дохід",
+            "other_variable_expense": "Змінна витрата",
+            "fixed_expense": "Постійна витрата",
+        }
+        self.cash_table.set_rows(
+            [
+                {
+                    "id": r["id"],
+                    "date": r["date"],
+                    "type": type_labels.get(r["type"], r["type"]),
+                    "amount": f"{r['amount']:.2f}",
+                    "counterparty": r["counterparty"] or "-",
+                    "channel": r["channel"] or "-",
+                    "related": f"{r['related_doc_type'] or ''} #{r['related_doc_id'] or ''}",
+                    "comment": r["comment"] or "",
+                }
+                for r in rows
+            ]
+        )
+
+    def add_cash(self) -> None:
+        counterparties = db.list_counterparties()
+        channels = db.list_channels(active_only=True)
+        transactions = cash_prompt(counterparties, channels)
+        if not transactions:
+            return
+        try:
+            for tx in transactions:
+                db.add_cash_transaction(**tx)
+            self.refresh_cash()
+        except Exception:
+            logging.exception("Add cash error")
+            show_error("Каса", "Не вдалося зберегти рух коштів")
 
     # Stock
     def create_stock_tab(self) -> None:
@@ -601,7 +874,7 @@ class InventoryApp(tk.Tk):
         ttk.Button(top, text="Оновити", command=self.on_search_stock).pack(side=tk.LEFT)
         ttk.Button(top, text="Перерахувати залишки", command=self.recalc_stock).pack(side=tk.LEFT, padx=6)
 
-        columns = [("name", "Товар", 260), ("sku", "SKU", 120), ("quantity", "Кількість", 120)]
+        columns = [("name", "Товар", 240), ("sku", "SKU", 120), ("warehouse", "Склад", 160), ("quantity", "Кількість", 100), ("average_cost", "Сер. собівартість", 140)]
         self.stock_table = TableFrame(self.stock_frame, columns)
         self.stock_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
@@ -613,25 +886,74 @@ class InventoryApp(tk.Tk):
         self.stock_table.set_rows(
             [
                 {
-                    "id": r["id"],
+                    "id": f"{r['product_id']}-{r['warehouse_id'] if r['warehouse_id'] else '0'}",
                     "name": r["name"],
                     "sku": r["sku"],
+                    "warehouse": r["warehouse"] or "-",
                     "quantity": f"{r['quantity']:.2f}",
+                    "average_cost": f"{r['average_cost']:.2f}",
                 }
                 for r in rows
             ]
         )
 
     def recalc_stock(self) -> None:
-        if not messagebox.askyesno("Підтвердження", "Перерахувати усі залишки?"):
+        if not messagebox.askyesno("Підтвердження", "Перерахувати усі залишки? Це використовує рухи товарів"):
             return
         try:
-            db.recalc_balances()
+            db.recalc_stock()
             self.refresh_stock()
             messagebox.showinfo("Залишки", "Перерахунок виконано")
         except Exception as exc:
             logging.exception("Recalc stock error")
             show_error("Залишки", str(exc))
+
+    # Reports
+    def create_reports_tab(self) -> None:
+        frm = ttk.Frame(self.reports_frame)
+        frm.pack(fill=tk.X, padx=8, pady=6)
+        ttk.Label(frm, text="Дата з:").pack(side=tk.LEFT)
+        self.report_date_from_var = tk.StringVar()
+        ttk.Entry(frm, textvariable=self.report_date_from_var, width=10).pack(side=tk.LEFT, padx=2)
+        ttk.Label(frm, text="по:").pack(side=tk.LEFT)
+        self.report_date_to_var = tk.StringVar()
+        ttk.Entry(frm, textvariable=self.report_date_to_var, width=10).pack(side=tk.LEFT, padx=2)
+        ttk.Button(frm, text="Прибуток по товарам", command=self.show_profit_by_product).pack(side=tk.LEFT, padx=6)
+        ttk.Button(frm, text="Грошовий потік", command=self.show_cash_flow).pack(side=tk.LEFT, padx=6)
+
+        columns = [("name", "Назва", 260), ("metric1", "Значення 1", 160), ("metric2", "Значення 2", 160), ("metric3", "Значення 3", 160)]
+        self.report_table = TableFrame(self.reports_frame, columns)
+        self.report_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+    def show_profit_by_product(self) -> None:
+        rows = db.profit_by_product(self.report_date_from_var.get().strip() or None, self.report_date_to_var.get().strip() or None)
+        self.report_table.set_rows(
+            [
+                {
+                    "id": r["product_id"],
+                    "name": r["product"],
+                    "metric1": f"Дохід: {r['income']:.2f}",
+                    "metric2": f"Собівартість: {r['cogs']:.2f}",
+                    "metric3": f"Валовий прибуток: {r['gross_profit']:.2f}",
+                }
+                for r in rows
+            ]
+        )
+
+    def show_cash_flow(self) -> None:
+        rows = db.cash_flow_summary(self.report_date_from_var.get().strip() or None, self.report_date_to_var.get().strip() or None)
+        self.report_table.set_rows(
+            [
+                {
+                    "id": idx,
+                    "name": r["type"],
+                    "metric1": f"Сума: {r['total']:.2f}",
+                    "metric2": "",
+                    "metric3": "",
+                }
+                for idx, r in enumerate(rows, 1)
+            ]
+        )
 
     # Export
     def create_export_tab(self) -> None:
@@ -641,9 +963,15 @@ class InventoryApp(tk.Tk):
             ("Categories", "Категорії"),
             ("Products", "Товари"),
             ("Counterparties", "Контрагенти"),
-            ("Documents", "Документи"),
-            ("DocumentLines", "Рядки документів"),
+            ("Warehouses", "Склади"),
+            ("SalesChannels", "Канали"),
+            ("PurchaseDocuments", "Закупівлі"),
+            ("PurchaseLines", "Рядки закупівель"),
+            ("SalesDocuments", "Продажі"),
+            ("SalesLines", "Рядки продажів"),
             ("StockBalances", "Залишки"),
+            ("StockMoves", "Рухи товарів"),
+            ("CashTransactions", "Каса"),
         ]
         for table, label in tables:
             ttk.Button(self.export_frame, text=f"Експорт {label}", command=lambda t=table: self.export_csv(t)).pack(pady=4)
@@ -660,6 +988,7 @@ class InventoryApp(tk.Tk):
     # About
     def create_about_tab(self) -> None:
         ttk.Label(self.about_frame, text=f"{APP_NAME} v{VERSION}", font=("Segoe UI", 12, "bold")).pack(pady=10)
+        ttk.Label(self.about_frame, text="Облік лише за касовим методом. Собівартість за середньозваженим методом.").pack(pady=4)
         ttk.Label(self.about_frame, text=f"База даних: {get_db_path()}").pack(pady=4)
         ttk.Button(self.about_frame, text="Відкрити папку даних", command=lambda: open_data_folder(get_data_dir())).pack(pady=4)
 
@@ -682,6 +1011,58 @@ class InventoryApp(tk.Tk):
                     "name": r["name"],
                     "brand": r["brand"],
                     "category": r["category"],
+                    "unit": r["unit"],
+                    "is_active": "Так" if r["is_active"] else "Ні",
+                }
+                for r in rows
+            ]
+        )
+
+    def refresh_counterparties(self) -> None:
+        rows = db.list_counterparties()
+        type_labels = {
+            "supplier": "Постачальник",
+            "customer": "Покупець",
+            "both": "Постачальник/Покупець",
+            "other": "Інший",
+        }
+        self.counterparty_table.set_rows(
+            [
+                {
+                    "id": r["id"],
+                    "name": r["name"],
+                    "type": type_labels.get(r["type"], r["type"]),
+                    "phone": r["phone"] or "",
+                    "email": r["email"] or "",
+                    "address": r["address"] or "",
+                    "note": r["note"] or "",
+                }
+                for r in rows
+            ]
+        )
+
+    def refresh_warehouses(self) -> None:
+        rows = db.list_warehouses()
+        self.warehouse_table.set_rows(
+            [
+                {
+                    "id": r["id"],
+                    "name": r["name"],
+                    "description": r["description"] or "",
+                    "is_active": "Так" if r["is_active"] else "Ні",
+                }
+                for r in rows
+            ]
+        )
+
+    def refresh_channels(self) -> None:
+        rows = db.list_channels()
+        self.channel_table.set_rows(
+            [
+                {
+                    "id": r["id"],
+                    "name": r["name"],
+                    "is_active": "Так" if r["is_active"] else "Ні",
                 }
                 for r in rows
             ]
@@ -692,9 +1073,15 @@ class InventoryApp(tk.Tk):
         self.refresh_categories()
         self.refresh_products()
         self.refresh_counterparties()
-        self.refresh_documents()
+        self.refresh_warehouses()
+        self.refresh_channels()
+        self.refresh_purchases()
+        self.refresh_sales()
+        self.refresh_cash()
         self.refresh_stock()
 
+
+# Dialogs
 
 def product_prompt(brands, categories, title: str, initial=None):
     dlg = tk.Toplevel()
@@ -719,12 +1106,21 @@ def product_prompt(brands, categories, title: str, initial=None):
     category_combo = ttk.Combobox(dlg, textvariable=category_var, state="readonly", values=[c["name"] for c in categories])
     category_combo.grid(row=3, column=1, padx=6, pady=4)
 
+    ttk.Label(dlg, text="Одиниця").grid(row=4, column=0, padx=6, pady=4, sticky="w")
+    unit_var = tk.StringVar(value=initial[4] if initial else "pcs")
+    ttk.Entry(dlg, textvariable=unit_var, width=10).grid(row=4, column=1, padx=6, pady=4, sticky="w")
+
+    is_active_var = tk.BooleanVar(value=initial[5] if initial else True)
+    ttk.Checkbutton(dlg, text="Активний", variable=is_active_var).grid(row=5, column=1, padx=6, pady=4, sticky="w")
+
     if initial:
         brand_combo.current(next((i for i, b in enumerate(brands) if b["id"] == initial[2]), 0))
         category_combo.current(next((i for i, c in enumerate(categories) if c["id"] == initial[3]), 0))
     else:
-        brand_combo.current(0)
-        category_combo.current(0)
+        if brands:
+            brand_combo.current(0)
+        if categories:
+            category_combo.current(0)
 
     result = None
 
@@ -733,80 +1129,15 @@ def product_prompt(brands, categories, title: str, initial=None):
         sku = sku_var.get().strip()
         name = name_var.get().strip()
         if not sku or not name:
-            messagebox.showerror("Валідація", "Заповніть усі поля.")
+            messagebox.showerror("Валідація", "Заповніть SKU та назву")
             return
         try:
             brand_id = brands[brand_combo.current()]["id"]
             category_id = categories[category_combo.current()]["id"]
         except IndexError:
-            messagebox.showerror("Валідація", "Оберіть бренд і категорію.")
+            messagebox.showerror("Валідація", "Оберіть бренд і категорію")
             return
-        result = (sku, name, brand_id, category_id)
-        dlg.destroy()
-
-    def on_cancel():
-        dlg.destroy()
-
-    btns = ttk.Frame(dlg)
-    btns.grid(row=4, column=0, columnspan=2, pady=8)
-    ttk.Button(btns, text="OK", command=on_ok).pack(side=tk.LEFT, padx=4)
-    ttk.Button(btns, text="Скасувати", command=on_cancel).pack(side=tk.LEFT, padx=4)
-    dlg.bind("<Return>", lambda e: on_ok())
-    dlg.bind("<Escape>", lambda e: on_cancel())
-    dlg.wait_window()
-    return result
-
-
-def counterparty_prompt(initial=None):
-    dlg = tk.Toplevel()
-    dlg.title("Контрагент")
-    dlg.grab_set()
-
-    ttk.Label(dlg, text="Назва").grid(row=0, column=0, padx=6, pady=4, sticky="w")
-    name_var = tk.StringVar(value=initial[0] if initial else "")
-    ttk.Entry(dlg, textvariable=name_var, width=35).grid(row=0, column=1, padx=6, pady=4)
-
-    ttk.Label(dlg, text="Тип").grid(row=1, column=0, padx=6, pady=4, sticky="w")
-    type_var = tk.StringVar()
-    type_values = ["Постачальник", "Покупець", "Інший"]
-    type_combo = ttk.Combobox(dlg, textvariable=type_var, values=type_values, state="readonly", width=20)
-    type_combo.grid(row=1, column=1, padx=6, pady=4)
-    if initial:
-        type_map = {"supplier": "Постачальник", "customer": "Покупець", "other": "Інший"}
-        try:
-            type_combo.current(type_values.index(type_map.get(initial[1], "Постачальник")))
-        except ValueError:
-            type_combo.current(0)
-    else:
-        type_combo.current(0)
-
-    ttk.Label(dlg, text="Телефон").grid(row=2, column=0, padx=6, pady=4, sticky="w")
-    phone_var = tk.StringVar(value=initial[2] if initial else "")
-    ttk.Entry(dlg, textvariable=phone_var, width=35).grid(row=2, column=1, padx=6, pady=4)
-
-    ttk.Label(dlg, text="Email").grid(row=3, column=0, padx=6, pady=4, sticky="w")
-    email_var = tk.StringVar(value=initial[3] if initial else "")
-    ttk.Entry(dlg, textvariable=email_var, width=35).grid(row=3, column=1, padx=6, pady=4)
-
-    ttk.Label(dlg, text="Адреса").grid(row=4, column=0, padx=6, pady=4, sticky="w")
-    address_var = tk.StringVar(value=initial[4] if initial else "")
-    ttk.Entry(dlg, textvariable=address_var, width=35).grid(row=4, column=1, padx=6, pady=4)
-
-    ttk.Label(dlg, text="Коментар").grid(row=5, column=0, padx=6, pady=4, sticky="w")
-    note_var = tk.StringVar(value=initial[5] if initial else "")
-    ttk.Entry(dlg, textvariable=note_var, width=35).grid(row=5, column=1, padx=6, pady=4)
-
-    result = None
-
-    def on_ok():
-        nonlocal result
-        name = name_var.get().strip()
-        if not name:
-            messagebox.showerror("Валідація", "Назва обов'язкова")
-            return
-        ctype_label = type_var.get()
-        type_code = {"Постачальник": "supplier", "Покупець": "customer", "Інший": "other"}.get(ctype_label, "supplier")
-        result = (name, type_code, phone_var.get().strip(), email_var.get().strip(), address_var.get().strip(), note_var.get().strip())
+        result = (sku, name, brand_id, category_id, unit_var.get().strip() or "pcs", bool(is_active_var.get()))
         dlg.destroy()
 
     def on_cancel():
@@ -822,47 +1153,174 @@ def counterparty_prompt(initial=None):
     return result
 
 
-def document_prompt(doc_type: str, products, counterparties, doc=None, lines=None):
+def counterparty_prompt(initial=None):
+    dlg = tk.Toplevel()
+    dlg.title("Контрагент")
+    dlg.grab_set()
+
+    labels = ["Назва", "Телефон", "Email", "Адреса", "Нотатка"]
+    vars_ = [tk.StringVar(value=initial[i] if initial else "") for i in [0, 2, 3, 4, 5]]
+
+    ttk.Label(dlg, text="Назва").grid(row=0, column=0, padx=6, pady=4, sticky="w")
+    ttk.Entry(dlg, textvariable=vars_[0], width=30).grid(row=0, column=1, padx=6, pady=4)
+
+    ttk.Label(dlg, text="Тип").grid(row=1, column=0, padx=6, pady=4, sticky="w")
+    type_var = tk.StringVar()
+    types = ["Постачальник", "Покупець", "Постачальник/Покупець", "Інший"]
+    type_values = {"Постачальник": "supplier", "Покупець": "customer", "Постачальник/Покупець": "both", "Інший": "other"}
+    type_combo = ttk.Combobox(dlg, textvariable=type_var, values=types, state="readonly")
+    type_combo.grid(row=1, column=1, padx=6, pady=4)
+    if initial:
+        inv_map = {v: k for k, v in type_values.items()}
+        type_combo.set(inv_map.get(initial[1], types[0]))
+    else:
+        type_combo.current(0)
+
+    for i, label in enumerate(labels[1:], start=2):
+        ttk.Label(dlg, text=label).grid(row=i, column=0, padx=6, pady=4, sticky="w")
+        ttk.Entry(dlg, textvariable=vars_[i - 1], width=30).grid(row=i, column=1, padx=6, pady=4)
+
+    result = None
+
+    def on_ok():
+        nonlocal result
+        name = vars_[0].get().strip()
+        if not name:
+            messagebox.showerror("Валідація", "Заповніть назву")
+            return
+        ctype = type_values.get(type_var.get(), "supplier")
+        phone, email, address, note = [v.get().strip() for v in vars_[1:]]
+        result = (name, ctype, phone, email, address, note)
+        dlg.destroy()
+
+    def on_cancel():
+        dlg.destroy()
+
+    btns = ttk.Frame(dlg)
+    btns.grid(row=6, column=0, columnspan=2, pady=8)
+    ttk.Button(btns, text="OK", command=on_ok).pack(side=tk.LEFT, padx=4)
+    ttk.Button(btns, text="Скасувати", command=on_cancel).pack(side=tk.LEFT, padx=4)
+    dlg.bind("<Return>", lambda e: on_ok())
+    dlg.bind("<Escape>", lambda e: on_cancel())
+    dlg.wait_window()
+    return result
+
+
+def warehouse_prompt(initial=None):
+    dlg = tk.Toplevel()
+    dlg.title("Склад")
+    dlg.grab_set()
+
+    name_var = tk.StringVar(value=initial[0] if initial else "")
+    desc_var = tk.StringVar(value=initial[1] if initial else "")
+    active_var = tk.BooleanVar(value=initial[2] if initial else True)
+
+    ttk.Label(dlg, text="Назва").grid(row=0, column=0, padx=6, pady=4, sticky="w")
+    ttk.Entry(dlg, textvariable=name_var, width=30).grid(row=0, column=1, padx=6, pady=4)
+    ttk.Label(dlg, text="Опис").grid(row=1, column=0, padx=6, pady=4, sticky="w")
+    ttk.Entry(dlg, textvariable=desc_var, width=40).grid(row=1, column=1, padx=6, pady=4)
+    ttk.Checkbutton(dlg, text="Активний", variable=active_var).grid(row=2, column=1, padx=6, pady=4, sticky="w")
+
+    result = None
+
+    def on_ok():
+        nonlocal result
+        name = name_var.get().strip()
+        if not name:
+            messagebox.showerror("Валідація", "Заповніть назву")
+            return
+        result = (name, desc_var.get().strip(), bool(active_var.get()))
+        dlg.destroy()
+
+    def on_cancel():
+        dlg.destroy()
+
+    btns = ttk.Frame(dlg)
+    btns.grid(row=3, column=0, columnspan=2, pady=8)
+    ttk.Button(btns, text="OK", command=on_ok).pack(side=tk.LEFT, padx=4)
+    ttk.Button(btns, text="Скасувати", command=on_cancel).pack(side=tk.LEFT, padx=4)
+    dlg.bind("<Return>", lambda e: on_ok())
+    dlg.bind("<Escape>", lambda e: on_cancel())
+    dlg.wait_window()
+    return result
+
+
+def channel_prompt(initial=None):
+    dlg = tk.Toplevel()
+    dlg.title("Канал продажу")
+    dlg.grab_set()
+    name_var = tk.StringVar(value=initial[0] if initial else "")
+    active_var = tk.BooleanVar(value=initial[1] if initial else True)
+
+    ttk.Label(dlg, text="Назва").grid(row=0, column=0, padx=6, pady=4, sticky="w")
+    ttk.Entry(dlg, textvariable=name_var, width=30).grid(row=0, column=1, padx=6, pady=4)
+    ttk.Checkbutton(dlg, text="Активний", variable=active_var).grid(row=1, column=1, padx=6, pady=4, sticky="w")
+
+    result = None
+
+    def on_ok():
+        nonlocal result
+        name = name_var.get().strip()
+        if not name:
+            messagebox.showerror("Валідація", "Заповніть назву")
+            return
+        result = (name, bool(active_var.get()))
+        dlg.destroy()
+
+    def on_cancel():
+        dlg.destroy()
+
+    btns = ttk.Frame(dlg)
+    btns.grid(row=2, column=0, columnspan=2, pady=8)
+    ttk.Button(btns, text="OK", command=on_ok).pack(side=tk.LEFT, padx=4)
+    ttk.Button(btns, text="Скасувати", command=on_cancel).pack(side=tk.LEFT, padx=4)
+    dlg.bind("<Return>", lambda e: on_ok())
+    dlg.bind("<Escape>", lambda e: on_cancel())
+    dlg.wait_window()
+    return result
+
+
+def document_prompt(doc_type: str, products, counterparties, warehouses, channels, doc=None, lines=None):
     dlg = tk.Toplevel()
     dlg.title("Документ")
     dlg.grab_set()
     editable = not doc or doc["status"] == "draft"
 
     ttk.Label(dlg, text="Тип").grid(row=0, column=0, padx=6, pady=4, sticky="w")
-    doc_type_label = "Прихід" if doc_type == "IN" else "Розхід"
+    doc_type_label = "Закупівля" if doc_type == "purchase" else "Продаж"
     ttk.Label(dlg, text=doc_type_label).grid(row=0, column=1, padx=6, pady=4, sticky="w")
 
     ttk.Label(dlg, text="Дата (YYYY-MM-DD)").grid(row=1, column=0, padx=6, pady=4, sticky="w")
     date_var = tk.StringVar(value=doc["doc_date"] if doc else datetime.now().strftime("%Y-%m-%d"))
-    date_entry = ttk.Entry(dlg, textvariable=date_var, width=15, state="normal" if editable else "disabled")
-    date_entry.grid(row=1, column=1, padx=6, pady=4, sticky="w")
+    ttk.Entry(dlg, textvariable=date_var, width=15, state="normal" if editable else "disabled").grid(row=1, column=1, padx=6, pady=4, sticky="w")
 
-    ttk.Label(dlg, text="Номер").grid(row=2, column=0, padx=6, pady=4, sticky="w")
-    number_var = tk.StringVar(value=doc["number"] if doc else "")
-    ttk.Entry(dlg, textvariable=number_var, width=20, state="normal" if editable else "disabled").grid(row=2, column=1, padx=6, pady=4, sticky="w")
+    ttk.Label(dlg, text="Склад").grid(row=2, column=0, padx=6, pady=4, sticky="w")
+    wh_var = tk.StringVar()
+    wh_names = [w["name"] for w in warehouses]
+    wh_combo = ttk.Combobox(dlg, textvariable=wh_var, values=wh_names, state="readonly")
+    wh_combo.grid(row=2, column=1, padx=6, pady=4, sticky="w")
 
-    ttk.Label(dlg, text="Контрагент").grid(row=3, column=0, padx=6, pady=4, sticky="w")
-    allowed_types = {"IN": {"supplier", "other"}, "OUT": {"customer", "other"}}[doc_type]
+    ttk.Label(dlg, text="Канал").grid(row=3, column=0, padx=6, pady=4, sticky="w")
+    ch_var = tk.StringVar()
+    ch_names = [c["name"] for c in channels]
+    ch_combo = ttk.Combobox(dlg, textvariable=ch_var, values=ch_names, state="readonly")
+    ch_combo.grid(row=3, column=1, padx=6, pady=4, sticky="w")
+
+    ttk.Label(dlg, text="Контрагент").grid(row=4, column=0, padx=6, pady=4, sticky="w")
+    allowed_types = {"purchase": {"supplier", "both", "other"}, "sale": {"customer", "both", "other"}}[doc_type]
     filtered_counterparties = [c for c in counterparties if c["type"] in allowed_types]
     cp_names = ["-"] + [c["name"] for c in filtered_counterparties]
     cp_var = tk.StringVar()
     cp_combo = ttk.Combobox(dlg, textvariable=cp_var, values=cp_names, state="readonly", width=25)
-    cp_combo.grid(row=3, column=1, padx=6, pady=4, sticky="w")
-    if doc and doc["counterparty_id"]:
-        target = next((c["name"] for c in filtered_counterparties if c["id"] == doc["counterparty_id"]), "-")
-        cp_var.set(target)
-    else:
-        cp_var.set("-")
-    if not editable:
-        cp_combo.state(["disabled"])
+    cp_combo.grid(row=4, column=1, padx=6, pady=4, sticky="w")
 
-    ttk.Label(dlg, text="Коментар").grid(row=4, column=0, padx=6, pady=4, sticky="w")
+    ttk.Label(dlg, text="Коментар").grid(row=5, column=0, padx=6, pady=4, sticky="w")
     comment_var = tk.StringVar(value=doc["comment"] if doc else "")
-    ttk.Entry(dlg, textvariable=comment_var, width=40).grid(row=4, column=1, padx=6, pady=4, sticky="w")
+    ttk.Entry(dlg, textvariable=comment_var, width=40).grid(row=5, column=1, padx=6, pady=4, sticky="w")
 
-    ttk.Label(dlg, text="Рядки").grid(row=5, column=0, padx=6, pady=4, sticky="nw")
+    ttk.Label(dlg, text="Рядки").grid(row=6, column=0, padx=6, pady=4, sticky="nw")
     line_frame = ttk.Frame(dlg)
-    line_frame.grid(row=5, column=1, padx=6, pady=4, sticky="nsew")
+    line_frame.grid(row=6, column=1, padx=6, pady=4, sticky="nsew")
     line_frame.grid_columnconfigure(0, weight=1)
 
     columns = ["product", "quantity", "price", "amount"]
@@ -881,7 +1339,7 @@ def document_prompt(doc_type: str, products, counterparties, doc=None, lines=Non
     products_by_id = {p["id"]: f"{p['name']} ({p['sku']})" for p in products}
 
     entry_frame = ttk.Frame(dlg)
-    entry_frame.grid(row=6, column=0, columnspan=2, padx=6, pady=4, sticky="w")
+    entry_frame.grid(row=7, column=0, columnspan=2, padx=6, pady=4, sticky="w")
     ttk.Label(entry_frame, text="Товар").grid(row=0, column=0, padx=4, pady=2)
     product_var = tk.StringVar()
     product_combo = ttk.Combobox(entry_frame, textvariable=product_var, values=list(product_lookup.keys()), state="readonly", width=40)
@@ -891,26 +1349,49 @@ def document_prompt(doc_type: str, products, counterparties, doc=None, lines=Non
 
     ttk.Label(entry_frame, text="Кількість").grid(row=0, column=2, padx=4, pady=2)
     qty_var = tk.StringVar(value="1")
-    qty_entry = ttk.Entry(entry_frame, textvariable=qty_var, width=10)
-    qty_entry.grid(row=0, column=3, padx=4, pady=2)
+    ttk.Entry(entry_frame, textvariable=qty_var, width=10).grid(row=0, column=3, padx=4, pady=2)
 
     ttk.Label(entry_frame, text="Ціна").grid(row=0, column=4, padx=4, pady=2)
     price_var = tk.StringVar(value="0")
-    price_entry = ttk.Entry(entry_frame, textvariable=price_var, width=10)
-    price_entry.grid(row=0, column=5, padx=4, pady=2)
+    ttk.Entry(entry_frame, textvariable=price_var, width=10).grid(row=0, column=5, padx=4, pady=2)
 
     line_data = []
     if lines:
         for ln in lines:
+            price_field = "purchase_price" if doc_type == "purchase" else "sale_price"
             line_data.append(
                 {
                     "product_id": ln["product_id"],
                     "product_name": ln["product_name"],
                     "quantity": float(ln["quantity"]),
-                    "price": float(ln["price"]),
-                    "amount": float(ln["quantity"]) * float(ln["price"]),
+                    "price": float(ln[price_field]),
+                    "amount": float(ln["quantity"]) * float(ln[price_field]),
                 }
             )
+
+    if doc:
+        if doc["warehouse_id"]:
+            try:
+                wh_combo.current(next(i for i, w in enumerate(warehouses) if w["id"] == doc["warehouse_id"]))
+            except StopIteration:
+                wh_combo.set(warehouses[0]["name"] if warehouses else "")
+        if doc["channel"]:
+            try:
+                ch_combo.current(next(i for i, c in enumerate(channels) if c["name"] == doc["channel"]))
+            except StopIteration:
+                ch_combo.set(channels[0]["name"] if channels else "")
+        if doc.get("supplier_id"):
+            target = next((c["name"] for c in filtered_counterparties if c["id"] == doc.get("supplier_id")), "-")
+            cp_var.set(target)
+        if doc.get("customer_id"):
+            target = next((c["name"] for c in filtered_counterparties if c["id"] == doc.get("customer_id")), "-")
+            cp_var.set(target)
+    else:
+        if warehouses:
+            wh_combo.current(0)
+        if channels:
+            ch_combo.current(0)
+        cp_var.set("-")
 
     selected_idx: list[int] = []
 
@@ -1001,11 +1482,18 @@ def document_prompt(doc_type: str, products, counterparties, doc=None, lines=Non
         cp_id = None
         if cp_name and cp_name != "-":
             cp_id = next((c["id"] for c in filtered_counterparties if c["name"] == cp_name), None)
+        try:
+            warehouse_id = warehouses[wh_combo.current()]["id"]
+        except Exception:
+            messagebox.showerror("Валідація", "Оберіть склад")
+            return
+        channel_name = ch_var.get() if ch_var.get() else (channels[0]["name"] if channels else "")
         info = {
             "doc_type": doc_type,
             "doc_date": date_var.get().strip(),
-            "number": number_var.get().strip(),
             "counterparty_id": cp_id,
+            "warehouse_id": warehouse_id,
+            "channel": channel_name,
             "comment": comment_var.get().strip(),
         }
         lines_to_save = [(ln["product_id"], ln["quantity"], ln["price"]) for ln in line_data]
@@ -1016,7 +1504,95 @@ def document_prompt(doc_type: str, products, counterparties, doc=None, lines=Non
         dlg.destroy()
 
     btns = ttk.Frame(dlg)
-    btns.grid(row=7, column=0, columnspan=2, pady=8)
+    btns.grid(row=8, column=0, columnspan=2, pady=8)
+    ttk.Button(btns, text="OK", command=on_ok).pack(side=tk.LEFT, padx=4)
+    ttk.Button(btns, text="Скасувати", command=on_cancel).pack(side=tk.LEFT, padx=4)
+    dlg.bind("<Return>", lambda e: on_ok())
+    dlg.bind("<Escape>", lambda e: on_cancel())
+    dlg.wait_window()
+    return result
+
+
+def cash_prompt(counterparties, channels):
+    dlg = tk.Toplevel()
+    dlg.title("Рух коштів")
+    dlg.grab_set()
+
+    ttk.Label(dlg, text="Дата (YYYY-MM-DD)").grid(row=0, column=0, padx=6, pady=4, sticky="w")
+    date_var = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
+    ttk.Entry(dlg, textvariable=date_var, width=15).grid(row=0, column=1, padx=6, pady=4, sticky="w")
+
+    ttk.Label(dlg, text="Тип").grid(row=1, column=0, padx=6, pady=4, sticky="w")
+    type_var = tk.StringVar()
+    types = [
+        ("Оплата від клієнта", "sale_payment"),
+        ("Оплата постачальнику", "purchase_payment"),
+        ("Інший дохід", "other_income"),
+        ("Змінна витрата", "other_variable_expense"),
+        ("Постійна витрата", "fixed_expense"),
+    ]
+    type_combo = ttk.Combobox(dlg, textvariable=type_var, values=[t[0] for t in types], state="readonly")
+    type_combo.grid(row=1, column=1, padx=6, pady=4, sticky="w")
+    type_combo.current(0)
+
+    ttk.Label(dlg, text="Сума (+ вхід, - вихід)").grid(row=2, column=0, padx=6, pady=4, sticky="w")
+    amount_var = tk.StringVar(value="0")
+    ttk.Entry(dlg, textvariable=amount_var, width=15).grid(row=2, column=1, padx=6, pady=4, sticky="w")
+
+    ttk.Label(dlg, text="Контрагент").grid(row=3, column=0, padx=6, pady=4, sticky="w")
+    cp_var = tk.StringVar()
+    cp_names = ["-"] + [c["name"] for c in counterparties]
+    cp_combo = ttk.Combobox(dlg, textvariable=cp_var, values=cp_names, state="readonly", width=30)
+    cp_combo.grid(row=3, column=1, padx=6, pady=4, sticky="w")
+    cp_combo.current(0)
+
+    ttk.Label(dlg, text="Канал").grid(row=4, column=0, padx=6, pady=4, sticky="w")
+    ch_var = tk.StringVar()
+    ch_names = [c["name"] for c in channels]
+    ch_combo = ttk.Combobox(dlg, textvariable=ch_var, values=ch_names, state="readonly", width=20)
+    ch_combo.grid(row=4, column=1, padx=6, pady=4, sticky="w")
+    if channels:
+        ch_combo.current(0)
+
+    ttk.Label(dlg, text="Коментар").grid(row=5, column=0, padx=6, pady=4, sticky="w")
+    comment_var = tk.StringVar()
+    ttk.Entry(dlg, textvariable=comment_var, width=40).grid(row=5, column=1, padx=6, pady=4, sticky="w")
+
+    result: list[dict] | None = None
+
+    def on_ok():
+        nonlocal result
+        try:
+            datetime.fromisoformat(date_var.get())
+            amount = float(amount_var.get())
+        except ValueError:
+            messagebox.showerror("Валідація", "Невірні значення дати або суми")
+            return
+        ctype = next((t[1] for t in types if t[0] == type_var.get()), types[0][1])
+        cp_name = cp_var.get()
+        cp_id = None
+        if cp_name and cp_name != "-":
+            cp_id = next((c["id"] for c in counterparties if c["name"] == cp_name), None)
+        channel = ch_var.get() if ch_var.get() else ""
+        result = [
+            {
+                "date": date_var.get().strip(),
+                "amount": amount,
+                "ctype": ctype,
+                "counterparty_id": cp_id,
+                "related_doc_type": None,
+                "related_doc_id": None,
+                "channel": channel,
+                "comment": comment_var.get().strip(),
+            }
+        ]
+        dlg.destroy()
+
+    def on_cancel():
+        dlg.destroy()
+
+    btns = ttk.Frame(dlg)
+    btns.grid(row=6, column=0, columnspan=2, pady=8)
     ttk.Button(btns, text="OK", command=on_ok).pack(side=tk.LEFT, padx=4)
     ttk.Button(btns, text="Скасувати", command=on_cancel).pack(side=tk.LEFT, padx=4)
     dlg.bind("<Return>", lambda e: on_ok())
@@ -1035,7 +1611,7 @@ def main() -> None:
             app.mainloop()
     except RuntimeError:
         messagebox.showwarning(APP_NAME, "Програма вже запущена.")
-    except Exception:  # pragma: no cover - GUI bootstrap
+    except Exception:
         logging.exception("Fatal error")
         messagebox.showerror(APP_NAME, "Критична помилка. Деталі у логах.")
         traceback.print_exc()

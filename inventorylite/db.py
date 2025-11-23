@@ -234,7 +234,68 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "CashTransactions", "channel", "TEXT")
     _ensure_column(conn, "CashTransactions", "comment", "TEXT")
 
+    _migrate_stock_balances(conn)
+
     conn.commit()
+
+
+def _migrate_stock_balances(conn: sqlite3.Connection) -> None:
+    """Rebuild StockBalances table if it misses expected columns or PK."""
+
+    cur = conn.execute("PRAGMA table_info(StockBalances)")
+    columns = {row[1]: row[5] for row in cur.fetchall()}  # name -> pk position
+    expected_columns = {"product_id", "warehouse_id", "quantity", "average_cost", "updated_at"}
+    has_all_columns = expected_columns.issubset(columns)
+    has_composite_pk = columns.get("product_id") and columns.get("warehouse_id")
+
+    if has_all_columns and has_composite_pk:
+        return
+
+    logging.info("Rebuilding StockBalances schema to include warehouse-level balances")
+    conn.execute("ALTER TABLE StockBalances RENAME TO StockBalances_old")
+    conn.execute(
+        """
+        CREATE TABLE StockBalances (
+            product_id INTEGER NOT NULL,
+            warehouse_id INTEGER NOT NULL,
+            quantity REAL NOT NULL DEFAULT 0,
+            average_cost REAL NOT NULL DEFAULT 0,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (product_id, warehouse_id),
+            FOREIGN KEY (product_id) REFERENCES Products(id),
+            FOREIGN KEY (warehouse_id) REFERENCES Warehouses(id)
+        )
+        """
+    )
+
+    default_wh = conn.execute("SELECT id FROM Warehouses ORDER BY id LIMIT 1").fetchone()
+    if not default_wh:
+        default_wh_id = conn.execute(
+            "INSERT INTO Warehouses (name, description, is_active) VALUES ('Main warehouse','',1)"
+        ).lastrowid
+    else:
+        default_wh_id = int(default_wh[0])
+
+    old_columns = {row[1] for row in conn.execute("PRAGMA table_info(StockBalances_old)").fetchall()}
+    if "warehouse_id" in old_columns:
+        conn.execute(
+            """
+            INSERT INTO StockBalances (product_id, warehouse_id, quantity, average_cost, updated_at)
+            SELECT product_id, warehouse_id, quantity, average_cost, updated_at
+            FROM StockBalances_old
+            """
+        )
+    else:
+        conn.execute(
+            """
+            INSERT INTO StockBalances (product_id, warehouse_id, quantity, average_cost, updated_at)
+            SELECT product_id, ?, quantity, average_cost, updated_at
+            FROM StockBalances_old
+            """,
+            (default_wh_id,),
+        )
+
+    conn.execute("DROP TABLE StockBalances_old")
 
 
 # Brand CRUD

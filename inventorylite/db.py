@@ -178,7 +178,63 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_cash_date ON CashTransactions(date);
             """
         )
+        _migrate_schema(conn)
     logging.info("Database initialized at %s", db_path)
+
+
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    cur = conn.execute(f"PRAGMA table_info({table})")
+    return any(row[1] == column for row in cur.fetchall())
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    if not _column_exists(conn, table, column):
+        logging.info("Adding missing column %s.%s", table, column)
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
+
+
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    """Ensure legacy databases get new columns required by current version."""
+
+    _ensure_column(conn, "Products", "unit", "TEXT NOT NULL DEFAULT 'pcs'")
+    _ensure_column(conn, "Products", "is_active", "INTEGER NOT NULL DEFAULT 1")
+
+    _ensure_column(conn, "Counterparties", "type", "TEXT NOT NULL DEFAULT 'other'")
+    _ensure_column(conn, "Counterparties", "phone", "TEXT")
+    _ensure_column(conn, "Counterparties", "email", "TEXT")
+    _ensure_column(conn, "Counterparties", "address", "TEXT")
+    _ensure_column(conn, "Counterparties", "note", "TEXT")
+
+    _ensure_column(conn, "Warehouses", "description", "TEXT")
+    _ensure_column(conn, "Warehouses", "is_active", "INTEGER NOT NULL DEFAULT 1")
+
+    _ensure_column(conn, "SalesChannels", "is_active", "INTEGER NOT NULL DEFAULT 1")
+
+    _ensure_column(conn, "PurchaseDocuments", "channel", "TEXT")
+    _ensure_column(conn, "PurchaseDocuments", "status", "TEXT NOT NULL DEFAULT 'draft'")
+    _ensure_column(conn, "PurchaseDocuments", "comment", "TEXT")
+    _ensure_column(conn, "PurchaseDocuments", "created_at", "TEXT DEFAULT CURRENT_TIMESTAMP")
+
+    _ensure_column(conn, "PurchaseLines", "amount", "REAL NOT NULL DEFAULT 0")
+
+    _ensure_column(conn, "SalesDocuments", "channel", "TEXT")
+    _ensure_column(conn, "SalesDocuments", "status", "TEXT NOT NULL DEFAULT 'draft'")
+    _ensure_column(conn, "SalesDocuments", "comment", "TEXT")
+    _ensure_column(conn, "SalesDocuments", "created_at", "TEXT DEFAULT CURRENT_TIMESTAMP")
+
+    _ensure_column(conn, "SalesLines", "amount", "REAL NOT NULL DEFAULT 0")
+
+    _ensure_column(conn, "StockMoves", "channel", "TEXT")
+    _ensure_column(conn, "StockMoves", "counterparty_id", "INTEGER")
+
+    _ensure_column(conn, "CashTransactions", "type", "TEXT NOT NULL DEFAULT 'other_income'")
+    _ensure_column(conn, "CashTransactions", "counterparty_id", "INTEGER")
+    _ensure_column(conn, "CashTransactions", "related_doc_type", "TEXT")
+    _ensure_column(conn, "CashTransactions", "related_doc_id", "INTEGER")
+    _ensure_column(conn, "CashTransactions", "channel", "TEXT")
+    _ensure_column(conn, "CashTransactions", "comment", "TEXT")
+
+    conn.commit()
 
 
 # Brand CRUD

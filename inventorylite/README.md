@@ -14,6 +14,14 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 build.bat
 ```
 
+Або вручну через PyInstaller (наприклад, у PowerShell):
+
+```powershell
+py -3.13 -m PyInstaller --onedir --noconsole app.py
+```
+
+Ця команда створює варіант `dist\app` у форматі `onedir`. За потреби можна додати параметри `--icon icons/app.ico` чи `--name InventoryLite` аналогічно до скриптів збірки.
+
 Під час збірки іконка автоматично генерується з base64 (`icons/app_ico_base64.txt`) у `icons/app.ico`, тому двійкових файлів у репозиторії немає.
 
 ## Як запустити

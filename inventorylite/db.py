@@ -42,6 +42,9 @@ def init_db() -> None:
                 FOREIGN KEY (brand_id) REFERENCES Brands(id) ON DELETE CASCADE,
                 FOREIGN KEY (category_id) REFERENCES Categories(id) ON DELETE CASCADE
             );
+
+            CREATE INDEX IF NOT EXISTS idx_products_sku_lower ON Products(lower(sku));
+            CREATE INDEX IF NOT EXISTS idx_products_name_lower ON Products(lower(name));
             """
         )
     logging.info("Database initialized at %s", db_path)

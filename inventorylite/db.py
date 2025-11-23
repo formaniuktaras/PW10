@@ -190,7 +190,7 @@ def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
     if not _column_exists(conn, table, column):
         logging.info("Adding missing column %s.%s", table, column)
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 def _migrate_schema(conn: sqlite3.Connection) -> None:

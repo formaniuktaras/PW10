@@ -12,6 +12,7 @@ import logging
 import traceback
 from datetime import datetime
 from pathlib import Path
+import sys
 import tkinter as tk
 from tkinter import ttk, messagebox
 import sqlite3
@@ -25,6 +26,7 @@ from utils import (
     get_data_dir,
     get_db_path,
     get_lock_path,
+    get_log_path,
     backup_database,
     open_data_folder,
     show_error,
@@ -1613,7 +1615,10 @@ def main() -> None:
         messagebox.showwarning(APP_NAME, "Програма вже запущена.")
     except Exception:
         logging.exception("Fatal error")
-        messagebox.showerror(APP_NAME, "Критична помилка. Деталі у логах.")
+        try:
+            messagebox.showerror(APP_NAME, f"Критична помилка. Деталі у логах: {get_log_path()}")
+        except tk.TclError:
+            print("Критична помилка. Деталі у логах:", get_log_path(), file=sys.stderr)
         traceback.print_exc()
 
 

@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+
+# PyInstaller artifacts
+inventorylite/build/
+inventorylite/dist/
+*.spec
+
+# Generated icon
+inventorylite/icons/app.ico

@@ -7,7 +7,7 @@ import os
 import sys
 import shutil
 import datetime
-from tkinter import messagebox
+from tkinter import messagebox, TclError
 from pathlib import Path
 
 try:
@@ -57,7 +57,12 @@ def configure_logging() -> None:
 
 def show_error(title: str, message: str) -> None:
     logging.error("%s: %s", title, message)
-    messagebox.showerror(title, message)
+    try:
+        messagebox.showerror(title, message)
+    except TclError:
+        # Fallback for headless environments where Tk dialogs cannot be shown
+        logging.error("Could not show error dialog (headless environment): %s - %s", title, message)
+        print(f"{title}: {message}", file=sys.stderr)
 
 
 class SingleInstance:

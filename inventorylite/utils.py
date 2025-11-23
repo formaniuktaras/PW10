@@ -21,7 +21,7 @@ except ImportError:  # POSIX fallback
     msvcrt = None  # type: ignore
 
 APP_NAME = "InventoryLite"
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 
 def get_data_dir() -> Path:

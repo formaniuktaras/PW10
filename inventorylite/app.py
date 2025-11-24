@@ -522,12 +522,11 @@ class InventoryApp(tk.Tk):
 
         columns = [
             ("doc_date", "Дата", 90),
-            ("supplier", "Постачальник", 180),
-            ("warehouse", "Склад", 140),
-            ("channel", "Канал", 100),
+            ("supplier", "Постачальник", 200),
+            ("warehouse", "Склад", 160),
             ("status", "Статус", 90),
             ("total", "Сума", 90),
-            ("comment", "Коментар", 220),
+            ("comment", "Коментар", 240),
         ]
         self.purchase_table = TableFrame(self.purchases_frame, columns)
         self.purchase_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
@@ -558,7 +557,6 @@ class InventoryApp(tk.Tk):
                     "doc_date": r["doc_date"],
                     "supplier": r["supplier"] or "-",
                     "warehouse": r["warehouse"] or "-",
-                    "channel": r["channel"] or "-",
                     "status": "Чернетка" if r["status"] == "draft" else "Проведений",
                     "total": f"{r['total']:.2f}",
                     "comment": r["comment"] or "",
@@ -570,14 +568,13 @@ class InventoryApp(tk.Tk):
     def new_purchase(self) -> None:
         products = db.list_products()
         warehouses = db.list_warehouses(active_only=True)
-        channels = db.list_channels(active_only=True)
         counterparties = db.list_counterparties()
-        result = document_prompt("purchase", products, counterparties, warehouses, channels)
+        result = document_prompt("purchase", products, counterparties, warehouses, [])
         if not result:
             return
         info, lines = result
         try:
-            doc_id = db.create_purchase(info["doc_date"], info["counterparty_id"], info["warehouse_id"], info["channel"], info["comment"])
+            doc_id = db.create_purchase(info["doc_date"], info["counterparty_id"], info["warehouse_id"], "", info["comment"])
             db.replace_purchase_lines(doc_id, lines)
             self.refresh_purchases()
         except Exception:
@@ -594,18 +591,17 @@ class InventoryApp(tk.Tk):
         lines = db.list_purchase_lines(doc_id)
         products = db.list_products()
         warehouses = db.list_warehouses(active_only=False)
-        channels = db.list_channels(active_only=False)
         counterparties = db.list_counterparties()
-        result = document_prompt("purchase", products, counterparties, warehouses, channels, doc=doc, lines=lines)
+        result = document_prompt("purchase", products, counterparties, warehouses, [], doc=doc, lines=lines)
         if not result:
             return
         info, new_lines = result
         try:
             if doc["status"] == "draft":
-                db.update_purchase(doc_id, info["doc_date"], info["counterparty_id"], info["warehouse_id"], info["channel"], info["comment"])
+                db.update_purchase(doc_id, info["doc_date"], info["counterparty_id"], info["warehouse_id"], "", info["comment"])
                 db.replace_purchase_lines(doc_id, new_lines)
             else:
-                db.update_purchase(doc_id, doc["doc_date"], doc["supplier_id"], doc["warehouse_id"], doc["channel"] or "", info["comment"])
+                db.update_purchase(doc_id, doc["doc_date"], doc["supplier_id"], doc["warehouse_id"], "", info["comment"])
             self.refresh_purchases()
         except Exception:
             logging.exception("Edit purchase error")
@@ -637,6 +633,7 @@ class InventoryApp(tk.Tk):
             db.post_purchase(doc_id)
             self.refresh_purchases()
             self.refresh_stock()
+            self.refresh_cash()
         except Exception as exc:
             logging.exception("Post purchase error")
             show_error("Закупівлі", str(exc))
@@ -649,6 +646,7 @@ class InventoryApp(tk.Tk):
             db.unpost_purchase(doc_id)
             self.refresh_purchases()
             self.refresh_stock()
+            self.refresh_cash()
         except Exception as exc:
             logging.exception("Unpost purchase error")
             show_error("Закупівлі", str(exc))
@@ -786,6 +784,7 @@ class InventoryApp(tk.Tk):
             db.post_sale(doc_id)
             self.refresh_sales()
             self.refresh_stock()
+            self.refresh_cash()
         except Exception as exc:
             logging.exception("Post sale error")
             show_error("Продажі", str(exc))
@@ -798,6 +797,7 @@ class InventoryApp(tk.Tk):
             db.unpost_sale(doc_id)
             self.refresh_sales()
             self.refresh_stock()
+            self.refresh_cash()
         except Exception as exc:
             logging.exception("Unpost sale error")
             show_error("Продажі", str(exc))
@@ -1302,27 +1302,32 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
     wh_combo = ttk.Combobox(dlg, textvariable=wh_var, values=wh_names, state="readonly")
     wh_combo.grid(row=2, column=1, padx=6, pady=4, sticky="w")
 
-    ttk.Label(dlg, text="Канал").grid(row=3, column=0, padx=6, pady=4, sticky="w")
+    row_idx = 3
     ch_var = tk.StringVar()
-    ch_names = [c["name"] for c in channels]
-    ch_combo = ttk.Combobox(dlg, textvariable=ch_var, values=ch_names, state="readonly")
-    ch_combo.grid(row=3, column=1, padx=6, pady=4, sticky="w")
+    ch_combo = None
+    if doc_type == "sale":
+        ttk.Label(dlg, text="Канал").grid(row=row_idx, column=0, padx=6, pady=4, sticky="w")
+        ch_names = [c["name"] for c in channels]
+        ch_combo = ttk.Combobox(dlg, textvariable=ch_var, values=ch_names, state="readonly")
+        ch_combo.grid(row=row_idx, column=1, padx=6, pady=4, sticky="w")
+        row_idx += 1
 
-    ttk.Label(dlg, text="Контрагент").grid(row=4, column=0, padx=6, pady=4, sticky="w")
+    ttk.Label(dlg, text="Контрагент").grid(row=row_idx, column=0, padx=6, pady=4, sticky="w")
     allowed_types = {"purchase": {"supplier", "both", "other"}, "sale": {"customer", "both", "other"}}[doc_type]
     filtered_counterparties = [c for c in counterparties if c["type"] in allowed_types]
     cp_names = ["-"] + [c["name"] for c in filtered_counterparties]
     cp_var = tk.StringVar()
     cp_combo = ttk.Combobox(dlg, textvariable=cp_var, values=cp_names, state="readonly", width=25)
-    cp_combo.grid(row=4, column=1, padx=6, pady=4, sticky="w")
+    cp_combo.grid(row=row_idx, column=1, padx=6, pady=4, sticky="w")
+    row_idx += 1
 
-    ttk.Label(dlg, text="Коментар").grid(row=5, column=0, padx=6, pady=4, sticky="w")
+    ttk.Label(dlg, text="Коментар").grid(row=row_idx, column=0, padx=6, pady=4, sticky="w")
     comment_var = tk.StringVar(value=doc["comment"] if doc else "")
-    ttk.Entry(dlg, textvariable=comment_var, width=40).grid(row=5, column=1, padx=6, pady=4, sticky="w")
+    ttk.Entry(dlg, textvariable=comment_var, width=40).grid(row=row_idx, column=1, padx=6, pady=4, sticky="w")
 
-    ttk.Label(dlg, text="Рядки").grid(row=6, column=0, padx=6, pady=4, sticky="nw")
+    ttk.Label(dlg, text="Рядки").grid(row=row_idx + 1, column=0, padx=6, pady=4, sticky="nw")
     line_frame = ttk.Frame(dlg)
-    line_frame.grid(row=6, column=1, padx=6, pady=4, sticky="nsew")
+    line_frame.grid(row=row_idx + 1, column=1, padx=6, pady=4, sticky="nsew")
     line_frame.grid_columnconfigure(0, weight=1)
 
     columns = ["product", "quantity", "price", "amount"]
@@ -1377,11 +1382,14 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
                 wh_combo.current(next(i for i, w in enumerate(warehouses) if w["id"] == doc["warehouse_id"]))
             except StopIteration:
                 wh_combo.set(warehouses[0]["name"] if warehouses else "")
-        if doc["channel"]:
-            try:
-                ch_combo.current(next(i for i, c in enumerate(channels) if c["name"] == doc["channel"]))
-            except StopIteration:
-                ch_combo.set(channels[0]["name"] if channels else "")
+        if doc_type == "sale" and ch_combo:
+            if doc["channel"]:
+                try:
+                    ch_combo.current(next(i for i, c in enumerate(channels) if c["name"] == doc["channel"]))
+                except StopIteration:
+                    ch_combo.set(channels[0]["name"] if channels else "")
+            elif channels:
+                ch_combo.current(0)
         if doc.get("supplier_id"):
             target = next((c["name"] for c in filtered_counterparties if c["id"] == doc.get("supplier_id")), "-")
             cp_var.set(target)
@@ -1391,7 +1399,7 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
     else:
         if warehouses:
             wh_combo.current(0)
-        if channels:
+        if ch_combo and channels:
             ch_combo.current(0)
         cp_var.set("-")
 
@@ -1489,7 +1497,9 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
         except Exception:
             messagebox.showerror("Валідація", "Оберіть склад")
             return
-        channel_name = ch_var.get() if ch_var.get() else (channels[0]["name"] if channels else "")
+        channel_name = ""
+        if doc_type == "sale":
+            channel_name = ch_var.get() if ch_var.get() else (channels[0]["name"] if channels else "")
         info = {
             "doc_type": doc_type,
             "doc_date": date_var.get().strip(),

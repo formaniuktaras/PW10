@@ -541,13 +541,26 @@ def _set_balance(conn: sqlite3.Connection, product_id: int, warehouse_id: int, q
     )
 
 
+def _document_total(conn: sqlite3.Connection, table: str, fk_field: str, doc_id: int) -> float:
+    return float(
+        conn.execute(f"SELECT IFNULL(SUM(amount),0) FROM {table} WHERE {fk_field}=?", (doc_id,)).fetchone()[0]
+    )
+
+
+def _remove_cash_links(conn: sqlite3.Connection, doc_type: str, doc_id: int) -> None:
+    conn.execute(
+        "DELETE FROM CashTransactions WHERE related_doc_type=? AND related_doc_id=?",
+        (doc_type, doc_id),
+    )
+
+
 # Purchases
 
 def create_purchase(doc_date: str, supplier_id: Optional[int], warehouse_id: int, channel: str, comment: str = "") -> int:
     with get_connection() as conn:
         cur = conn.execute(
             "INSERT INTO PurchaseDocuments (doc_date, supplier_id, warehouse_id, channel, comment, status) VALUES (?,?,?,?,?, 'draft')",
-            (doc_date, supplier_id, warehouse_id, channel.strip()),
+            (doc_date, supplier_id, warehouse_id, channel.strip(), comment.strip()),
         )
         conn.commit()
         return cur.lastrowid
@@ -775,15 +788,35 @@ def recalc_stock(allow_negative: bool = False) -> None:
 
 def post_purchase(purchase_id: int) -> None:
     with get_connection() as conn:
-        status = conn.execute("SELECT status FROM PurchaseDocuments WHERE id=?", (purchase_id,)).fetchone()
-        if not status:
+        doc_row = conn.execute(
+            "SELECT status, supplier_id, doc_date, warehouse_id, channel FROM PurchaseDocuments WHERE id=?",
+            (purchase_id,),
+        ).fetchone()
+        if not doc_row:
             raise ValueError("Документ не знайдено")
-        if status[0] != "draft":
+        if doc_row["status"] != "draft":
             raise ValueError("Документ вже проведено")
         has_lines = conn.execute("SELECT COUNT(*) FROM PurchaseLines WHERE purchase_id=?", (purchase_id,)).fetchone()[0]
         if not has_lines:
             raise ValueError("Немає рядків для проведення")
         conn.execute("UPDATE PurchaseDocuments SET status='posted' WHERE id=?", (purchase_id,))
+        total = _document_total(conn, "PurchaseLines", "purchase_id", purchase_id)
+        _remove_cash_links(conn, "purchase", purchase_id)
+        if total:
+            conn.execute(
+                "INSERT INTO CashTransactions (date, amount, type, counterparty_id, related_doc_type, related_doc_id, channel, comment) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    doc_row["doc_date"],
+                    -abs(total),
+                    "purchase_payment",
+                    doc_row["supplier_id"],
+                    "purchase",
+                    purchase_id,
+                    "",
+                    "Оплата за закупівлю",
+                ),
+            )
         conn.commit()
     recalc_stock()
 
@@ -796,21 +829,42 @@ def unpost_purchase(purchase_id: int) -> None:
         if status[0] != "posted":
             raise ValueError("Документ не проведено")
         conn.execute("UPDATE PurchaseDocuments SET status='draft' WHERE id=?", (purchase_id,))
+        _remove_cash_links(conn, "purchase", purchase_id)
         conn.commit()
     recalc_stock()
 
 
 def post_sale(sale_id: int, allow_negative: bool = False) -> None:
     with get_connection() as conn:
-        status = conn.execute("SELECT status FROM SalesDocuments WHERE id=?", (sale_id,)).fetchone()
-        if not status:
+        doc_row = conn.execute(
+            "SELECT status, customer_id, doc_date, channel FROM SalesDocuments WHERE id=?",
+            (sale_id,),
+        ).fetchone()
+        if not doc_row:
             raise ValueError("Документ не знайдено")
-        if status[0] != "draft":
+        if doc_row["status"] != "draft":
             raise ValueError("Документ вже проведено")
         has_lines = conn.execute("SELECT COUNT(*) FROM SalesLines WHERE sale_id=?", (sale_id,)).fetchone()[0]
         if not has_lines:
             raise ValueError("Немає рядків для проведення")
         conn.execute("UPDATE SalesDocuments SET status='posted' WHERE id=?", (sale_id,))
+        total = _document_total(conn, "SalesLines", "sale_id", sale_id)
+        _remove_cash_links(conn, "sale", sale_id)
+        if total:
+            conn.execute(
+                "INSERT INTO CashTransactions (date, amount, type, counterparty_id, related_doc_type, related_doc_id, channel, comment) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    doc_row["doc_date"],
+                    abs(total),
+                    "sale_payment",
+                    doc_row["customer_id"],
+                    "sale",
+                    sale_id,
+                    doc_row["channel"] or "",
+                    "Оплата від клієнта",
+                ),
+            )
         conn.commit()
     recalc_stock(allow_negative=allow_negative)
 
@@ -823,6 +877,7 @@ def unpost_sale(sale_id: int) -> None:
         if status[0] != "posted":
             raise ValueError("Документ не проведено")
         conn.execute("UPDATE SalesDocuments SET status='draft' WHERE id=?", (sale_id,))
+        _remove_cash_links(conn, "sale", sale_id)
         conn.commit()
     recalc_stock()
 

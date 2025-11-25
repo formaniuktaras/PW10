@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 import sys
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 import sqlite3
 
 import db
@@ -22,14 +22,16 @@ from utils import (
     APP_NAME,
     VERSION,
     SingleInstance,
+    backup_all_data,
     configure_logging,
     get_data_dir,
     get_db_path,
     get_lock_path,
     get_log_path,
-    backup_database,
     open_data_folder,
+    restore_all_data,
     show_error,
+    backup_database,
 )
 from ui_components import TableFrame, simple_prompt
 
@@ -93,11 +95,58 @@ class InventoryApp(tk.Tk):
     def create_menu(self) -> None:
         menubar = tk.Menu(self)
         file_menu = tk.Menu(menubar, tearoff=0)
+        file_menu.add_command(label="Резервна копія всіх даних", command=self.on_backup_all)
+        file_menu.add_command(label="Відновлення з резервної копії", command=self.on_restore_all)
+        file_menu.add_separator()
         file_menu.add_command(label="Резервна копія БД", command=self.on_backup)
         file_menu.add_separator()
         file_menu.add_command(label="Вихід", command=self.destroy)
         menubar.add_cascade(label="Файл", menu=file_menu)
         self.config(menu=menubar)
+
+    def on_backup_all(self) -> None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_name = f"{APP_NAME}_backup_{timestamp}.zip"
+        initialdir = get_data_dir()
+        target_path = filedialog.asksaveasfilename(
+            title="Зберегти резервну копію",
+            defaultextension=".zip",
+            initialfile=default_name,
+            initialdir=initialdir,
+            filetypes=(("ZIP", "*.zip"), ("Усі файли", "*.*")),
+        )
+        if not target_path:
+            return
+        try:
+            target = backup_all_data(Path(target_path))
+            messagebox.showinfo("Резервна копія", f"Створено: {target}")
+        except Exception:
+            logging.exception("Full backup failed")
+            show_error("Резервна копія", "Не вдалося створити копію даних.")
+
+    def on_restore_all(self) -> None:
+        archive_path = filedialog.askopenfilename(
+            title="Відновити з резервної копії",
+            initialdir=get_data_dir(),
+            filetypes=(("ZIP", "*.zip"), ("Усі файли", "*.*")),
+        )
+        if not archive_path:
+            return
+        if not messagebox.askyesno(
+            "Відновлення даних",
+            "Відновити всі дані з вибраної копії? Поточні дані буде перезаписано.",
+        ):
+            return
+        try:
+            restore_all_data(Path(archive_path))
+            messagebox.showinfo(
+                "Відновлення даних",
+                "Дані відновлено. Перезапустіть додаток, щоб застосувати зміни.",
+            )
+            self.refresh_all()
+        except Exception as exc:
+            logging.exception("Restore failed")
+            show_error("Відновлення даних", str(exc))
 
     def on_backup(self) -> None:
         try:

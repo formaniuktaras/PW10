@@ -25,6 +25,9 @@ except ImportError:  # POSIX fallback
 APP_NAME = "InventoryLite"
 # v0.3 adds cash-basis accounting, moving-average inventory costing and direct-costing reports.
 VERSION = "0.3.0"
+BASE_CURRENCY = "UAH"
+BASE_CURRENCY_NAME = "Українська гривня"
+BASE_CURRENCY_DECIMALS = 2
 
 
 def get_data_dir() -> Path:

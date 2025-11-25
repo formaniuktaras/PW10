@@ -53,6 +53,7 @@ class InventoryApp(tk.Tk):
         self.counterparties_frame = ttk.Frame(notebook)
         self.warehouses_frame = ttk.Frame(notebook)
         self.channels_frame = ttk.Frame(notebook)
+        self.currencies_frame = ttk.Frame(notebook)
         self.purchases_frame = ttk.Frame(notebook)
         self.sales_frame = ttk.Frame(notebook)
         self.cash_frame = ttk.Frame(notebook)
@@ -67,6 +68,7 @@ class InventoryApp(tk.Tk):
         notebook.add(self.counterparties_frame, text="Контрагенти")
         notebook.add(self.warehouses_frame, text="Склади")
         notebook.add(self.channels_frame, text="Канали продажу")
+        notebook.add(self.currencies_frame, text="Валюти")
         notebook.add(self.purchases_frame, text="Закупівлі")
         notebook.add(self.sales_frame, text="Продажі")
         notebook.add(self.cash_frame, text="Каса")
@@ -81,6 +83,7 @@ class InventoryApp(tk.Tk):
         self.create_counterparties_tab()
         self.create_warehouses_tab()
         self.create_channels_tab()
+        self.create_currencies_tab()
         self.create_purchases_tab()
         self.create_sales_tab()
         self.create_cash_tab()
@@ -553,6 +556,133 @@ class InventoryApp(tk.Tk):
             logging.exception("Delete channel error")
             show_error("Канали", str(exc))
 
+    # Currencies
+    def create_currencies_tab(self) -> None:
+        top = ttk.Frame(self.currencies_frame)
+        top.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+        ttk.Label(top, text="Довідник валют").pack(anchor="w")
+        curr_columns = [("code", "Код", 80), ("name", "Назва", 200), ("decimals", "Знаків", 60), ("is_active", "Активна", 80)]
+        self.currency_table = TableFrame(top, curr_columns, height=6)
+        self.currency_table.pack(fill=tk.X, pady=4)
+
+        btns = ttk.Frame(top)
+        btns.pack(pady=4, anchor="w")
+        ttk.Button(btns, text="Додати валюту", command=self.add_currency).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Змінити", command=self.edit_currency).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Видалити", command=self.delete_currency).pack(side=tk.LEFT, padx=4)
+
+        ttk.Label(top, text="Курси валют").pack(anchor="w", pady=(10, 0))
+        rate_columns = [("rate_date", "Дата", 120), ("rate", "Курс до базової", 160)]
+        self.rate_table = TableFrame(top, rate_columns, height=6)
+        self.rate_table.pack(fill=tk.X, pady=4)
+
+        rate_btns = ttk.Frame(top)
+        rate_btns.pack(pady=4, anchor="w")
+        ttk.Button(rate_btns, text="Додати курс", command=self.add_rate).pack(side=tk.LEFT, padx=4)
+
+        self.currency_table.on_select(self.refresh_rates)
+
+    def add_currency(self) -> None:
+        values = simple_prompt("Нова валюта", ["Код", "Назва", "Знаків після коми"], ["USD", "Долар США", "2"])
+        if not values:
+            return
+        try:
+            decimals = int(values[2]) if len(values) > 2 else 2
+            db.add_currency(values[0], values[1], decimals)
+            self.refresh_currencies()
+        except sqlite3.IntegrityError:
+            show_error("Валюти", "Валюта з таким кодом вже існує")
+        except Exception as exc:
+            logging.exception("Add currency error")
+            show_error("Валюти", str(exc))
+
+    def edit_currency(self) -> None:
+        code = self.currency_table.selected_id()
+        if not code:
+            show_error("Валюти", "Оберіть валюту")
+            return
+        rows = [c for c in db.list_currencies(active_only=False) if c["code"] == code]
+        if not rows:
+            return
+        cur = rows[0]
+        values = simple_prompt("Змінити валюту", ["Код", "Назва", "Знаків після коми", "Активна (1/0)"], [cur["code"], cur["name"], str(cur["decimals"]), str(cur["is_active"]),])
+        if not values:
+            return
+        try:
+            decimals = int(values[2]) if len(values) > 2 else 2
+            is_active = values[3].strip() != "0" if len(values) > 3 else True
+            db.update_currency(values[0], values[1], decimals, is_active)
+            self.refresh_currencies()
+        except Exception as exc:
+            logging.exception("Edit currency error")
+            show_error("Валюти", str(exc))
+
+    def delete_currency(self) -> None:
+        code = self.currency_table.selected_id()
+        if not code:
+            show_error("Валюти", "Оберіть валюту")
+            return
+        if not messagebox.askyesno("Валюти", "Видалити валюту?"):
+            return
+        try:
+            db.delete_currency(code)
+            self.refresh_currencies()
+        except Exception as exc:
+            logging.exception("Delete currency error")
+            show_error("Валюти", str(exc))
+
+    def refresh_currencies(self) -> None:
+        rows = db.list_currencies(active_only=False)
+        self.currency_table.set_rows(
+            [
+                {
+                    "id": row["code"],
+                    "code": row["code"],
+                    "name": row["name"],
+                    "decimals": row["decimals"],
+                    "is_active": "Так" if row["is_active"] else "Ні",
+                }
+                for row in rows
+            ]
+        )
+        self.refresh_rates()
+
+    def refresh_rates(self) -> None:
+        code = self.currency_table.selected_id()
+        code = code or (db.list_currencies(active_only=True)[0]["code"] if db.list_currencies(active_only=True) else None)
+        if not code:
+            self.rate_table.set_rows([])
+            return
+        rates = db.list_currency_rates(code)
+        self.rate_table.set_rows(
+            [
+                {
+                    "id": r["id"],
+                    "rate_date": r["rate_date"],
+                    "rate": f"{r['rate']:.4f}",
+                }
+                for r in rates
+            ]
+        )
+
+    def add_rate(self) -> None:
+        code = self.currency_table.selected_id()
+        if not code:
+            show_error("Курси", "Оберіть валюту")
+            return
+        defaults = [datetime.now().strftime("%Y-%m-%d"), "1"]
+        values = simple_prompt("Новий курс", ["Дата", "Курс до базової валюти"], defaults)
+        if not values:
+            return
+        try:
+            rate = float(values[1])
+            db.add_currency_rate(code, values[0], rate)
+            self.refresh_rates()
+        except Exception as exc:
+            logging.exception("Add rate error")
+            show_error("Курси", str(exc))
+
     # Purchases
     def create_purchases_tab(self) -> None:
         filters = ttk.Frame(self.purchases_frame)
@@ -574,7 +704,10 @@ class InventoryApp(tk.Tk):
             ("supplier", "Постачальник", 200),
             ("warehouse", "Склад", 160),
             ("status", "Статус", 90),
-            ("total", "Сума", 90),
+            ("currency", "Валюта", 80),
+            ("rate", "Курс", 80),
+            ("total_doc", "Сума (вал)", 110),
+            ("total", "Сума (база)", 110),
             ("comment", "Коментар", 240),
         ]
         self.purchase_table = TableFrame(self.purchases_frame, columns)
@@ -607,6 +740,9 @@ class InventoryApp(tk.Tk):
                     "supplier": r["supplier"] or "-",
                     "warehouse": r["warehouse"] or "-",
                     "status": "Чернетка" if r["status"] == "draft" else "Проведений",
+                    "currency": r["currency_code"],
+                    "rate": f"{r['exchange_rate']:.4f}",
+                    "total_doc": f"{r['total_doc']:.2f}",
                     "total": f"{r['total']:.2f}",
                     "comment": r["comment"] or "",
                 }
@@ -618,13 +754,22 @@ class InventoryApp(tk.Tk):
         products = db.list_products()
         warehouses = db.list_warehouses(active_only=True)
         counterparties = db.list_counterparties()
-        result = document_prompt("purchase", products, counterparties, warehouses, [])
+        currencies = db.list_currencies()
+        result = document_prompt("purchase", products, counterparties, warehouses, [], currencies)
         if not result:
             return
         info, lines = result
         try:
-            doc_id = db.create_purchase(info["doc_date"], info["counterparty_id"], info["warehouse_id"], "", info["comment"])
-            db.replace_purchase_lines(doc_id, lines)
+            doc_id = db.create_purchase(
+                info["doc_date"],
+                info["counterparty_id"],
+                info["warehouse_id"],
+                "",
+                info["comment"],
+                info["currency"],
+                info["rate"],
+            )
+            db.replace_purchase_lines(doc_id, lines, info["rate"])
             self.refresh_purchases()
         except Exception:
             logging.exception("Create purchase error")
@@ -641,16 +786,35 @@ class InventoryApp(tk.Tk):
         products = db.list_products()
         warehouses = db.list_warehouses(active_only=False)
         counterparties = db.list_counterparties()
-        result = document_prompt("purchase", products, counterparties, warehouses, [], doc=doc, lines=lines)
+        currencies = db.list_currencies()
+        result = document_prompt("purchase", products, counterparties, warehouses, [], currencies, doc=doc, lines=lines)
         if not result:
             return
         info, new_lines = result
         try:
             if doc["status"] == "draft":
-                db.update_purchase(doc_id, info["doc_date"], info["counterparty_id"], info["warehouse_id"], "", info["comment"])
-                db.replace_purchase_lines(doc_id, new_lines)
+                db.update_purchase(
+                    doc_id,
+                    info["doc_date"],
+                    info["counterparty_id"],
+                    info["warehouse_id"],
+                    "",
+                    info["comment"],
+                    info["currency"],
+                    info["rate"],
+                )
+                db.replace_purchase_lines(doc_id, new_lines, info["rate"])
             else:
-                db.update_purchase(doc_id, doc["doc_date"], doc["supplier_id"], doc["warehouse_id"], "", info["comment"])
+                db.update_purchase(
+                    doc_id,
+                    doc["doc_date"],
+                    doc["supplier_id"],
+                    doc["warehouse_id"],
+                    "",
+                    info["comment"],
+                    doc["currency_code"],
+                    doc["exchange_rate"],
+                )
             self.refresh_purchases()
         except Exception:
             logging.exception("Edit purchase error")
@@ -722,7 +886,10 @@ class InventoryApp(tk.Tk):
             ("warehouse", "Склад", 140),
             ("channel", "Канал", 100),
             ("status", "Статус", 90),
-            ("total", "Сума", 90),
+            ("currency", "Валюта", 80),
+            ("rate", "Курс", 80),
+            ("total_doc", "Сума (вал)", 110),
+            ("total", "Сума (база)", 110),
             ("comment", "Коментар", 220),
         ]
         self.sales_table = TableFrame(self.sales_frame, columns)
@@ -756,6 +923,9 @@ class InventoryApp(tk.Tk):
                     "warehouse": r["warehouse"] or "-",
                     "channel": r["channel"] or "-",
                     "status": "Чернетка" if r["status"] == "draft" else "Проведений",
+                    "currency": r["currency_code"],
+                    "rate": f"{r['exchange_rate']:.4f}",
+                    "total_doc": f"{r['total_doc']:.2f}",
                     "total": f"{r['total']:.2f}",
                     "comment": r["comment"] or "",
                 }
@@ -768,13 +938,22 @@ class InventoryApp(tk.Tk):
         warehouses = db.list_warehouses(active_only=True)
         channels = db.list_channels(active_only=True)
         counterparties = db.list_counterparties()
-        result = document_prompt("sale", products, counterparties, warehouses, channels)
+        currencies = db.list_currencies()
+        result = document_prompt("sale", products, counterparties, warehouses, channels, currencies)
         if not result:
             return
         info, lines = result
         try:
-            doc_id = db.create_sale(info["doc_date"], info["counterparty_id"], info["warehouse_id"], info["channel"], info["comment"])
-            db.replace_sale_lines(doc_id, lines)
+            doc_id = db.create_sale(
+                info["doc_date"],
+                info["counterparty_id"],
+                info["warehouse_id"],
+                info["channel"],
+                info["comment"],
+                info["currency"],
+                info["rate"],
+            )
+            db.replace_sale_lines(doc_id, lines, info["rate"])
             self.refresh_sales()
         except Exception:
             logging.exception("Create sale error")
@@ -792,16 +971,35 @@ class InventoryApp(tk.Tk):
         warehouses = db.list_warehouses(active_only=False)
         channels = db.list_channels(active_only=False)
         counterparties = db.list_counterparties()
-        result = document_prompt("sale", products, counterparties, warehouses, channels, doc=doc, lines=lines)
+        currencies = db.list_currencies()
+        result = document_prompt("sale", products, counterparties, warehouses, channels, currencies, doc=doc, lines=lines)
         if not result:
             return
         info, new_lines = result
         try:
             if doc["status"] == "draft":
-                db.update_sale(doc_id, info["doc_date"], info["counterparty_id"], info["warehouse_id"], info["channel"], info["comment"])
-                db.replace_sale_lines(doc_id, new_lines)
+                db.update_sale(
+                    doc_id,
+                    info["doc_date"],
+                    info["counterparty_id"],
+                    info["warehouse_id"],
+                    info["channel"],
+                    info["comment"],
+                    info["currency"],
+                    info["rate"],
+                )
+                db.replace_sale_lines(doc_id, new_lines, info["rate"])
             else:
-                db.update_sale(doc_id, doc["doc_date"], doc["customer_id"], doc["warehouse_id"], doc["channel"] or "", info["comment"])
+                db.update_sale(
+                    doc_id,
+                    doc["doc_date"],
+                    doc["customer_id"],
+                    doc["warehouse_id"],
+                    doc["channel"] or "",
+                    info["comment"],
+                    doc["currency_code"],
+                    doc["exchange_rate"],
+                )
             self.refresh_sales()
         except Exception:
             logging.exception("Edit sale error")
@@ -1126,6 +1324,7 @@ class InventoryApp(tk.Tk):
         self.refresh_counterparties()
         self.refresh_warehouses()
         self.refresh_channels()
+        self.refresh_currencies()
         self.refresh_purchases()
         self.refresh_sales()
         self.refresh_cash()
@@ -1331,7 +1530,7 @@ def channel_prompt(initial=None):
     return result
 
 
-def document_prompt(doc_type: str, products, counterparties, warehouses, channels, doc=None, lines=None):
+def document_prompt(doc_type: str, products, counterparties, warehouses, channels, currencies, doc=None, lines=None):
     dlg = tk.Toplevel()
     dlg.title("Документ")
     dlg.grab_set()
@@ -1345,13 +1544,27 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
     date_var = tk.StringVar(value=doc["doc_date"] if doc else datetime.now().strftime("%Y-%m-%d"))
     ttk.Entry(dlg, textvariable=date_var, width=15, state="normal" if editable else "disabled").grid(row=1, column=1, padx=6, pady=4, sticky="w")
 
-    ttk.Label(dlg, text="Склад").grid(row=2, column=0, padx=6, pady=4, sticky="w")
+    ttk.Label(dlg, text="Валюта").grid(row=2, column=0, padx=6, pady=4, sticky="w")
+    curr_var = tk.StringVar(value=doc["currency_code"] if doc else (currencies[0]["code"] if currencies else "UAH"))
+    curr_codes = [c["code"] for c in currencies] if currencies else ["UAH"]
+    curr_combo = ttk.Combobox(dlg, textvariable=curr_var, values=curr_codes, state="readonly")
+    if not editable:
+        curr_combo.state(["disabled"])
+    curr_combo.grid(row=2, column=1, padx=6, pady=4, sticky="w")
+
+    ttk.Label(dlg, text="Курс до базової").grid(row=3, column=0, padx=6, pady=4, sticky="w")
+    default_rate = doc["exchange_rate"] if doc else (db.latest_rate(curr_var.get()) if currencies else 1.0)
+    rate_var = tk.StringVar(value=f"{default_rate:.4f}")
+    rate_entry = ttk.Entry(dlg, textvariable=rate_var, width=12, state="normal" if editable else "disabled")
+    rate_entry.grid(row=3, column=1, padx=6, pady=4, sticky="w")
+
+    ttk.Label(dlg, text="Склад").grid(row=4, column=0, padx=6, pady=4, sticky="w")
     wh_var = tk.StringVar()
     wh_names = [w["name"] for w in warehouses]
     wh_combo = ttk.Combobox(dlg, textvariable=wh_var, values=wh_names, state="readonly")
-    wh_combo.grid(row=2, column=1, padx=6, pady=4, sticky="w")
+    wh_combo.grid(row=4, column=1, padx=6, pady=4, sticky="w")
 
-    row_idx = 3
+    row_idx = 5
     ch_var = tk.StringVar()
     ch_combo = None
     if doc_type == "sale":
@@ -1381,8 +1594,13 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
 
     columns = ["product", "quantity", "price", "amount"]
     tree = ttk.Treeview(line_frame, columns=columns, show="headings", height=8)
-    headings = [("product", "Товар", 200), ("quantity", "Кількість", 90), ("price", "Ціна", 90), ("amount", "Сума", 90)]
-    for col, title, width in headings:
+    headings = {
+        "product": ("Товар", 200),
+        "quantity": ("Кількість", 90),
+        "price": ("Ціна", 90),
+        "amount": ("Сума", 90),
+    }
+    for col, (title, width) in headings.items():
         tree.heading(col, text=title)
         tree.column(col, width=width, anchor="w")
     tree.grid(row=0, column=0, sticky="nsew")
@@ -1390,6 +1608,21 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
     tree.configure(yscrollcommand=yscroll.set)
     yscroll.grid(row=0, column=1, sticky="ns")
     line_frame.grid_rowconfigure(0, weight=1)
+
+    def refresh_currency_ui() -> None:
+        price_label.config(text=f"Ціна ({curr_var.get()})")
+        tree.heading("price", text=f"Ціна ({curr_var.get()})")
+        tree.heading("amount", text=f"Сума ({curr_var.get()})")
+
+    def on_currency_change(event=None):
+        if editable:
+            try:
+                rate_var.set(f"{db.latest_rate(curr_var.get()):.4f}")
+            except Exception:
+                pass
+        refresh_currency_ui()
+
+    curr_combo.bind("<<ComboboxSelected>>", on_currency_change)
 
     product_lookup = {f"{p['name']} ({p['sku']})": p["id"] for p in products}
     products_by_id = {p["id"]: f"{p['name']} ({p['sku']})" for p in products}
@@ -1407,7 +1640,8 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
     qty_var = tk.StringVar(value="1")
     ttk.Entry(entry_frame, textvariable=qty_var, width=10).grid(row=0, column=3, padx=4, pady=2)
 
-    ttk.Label(entry_frame, text="Ціна").grid(row=0, column=4, padx=4, pady=2)
+    price_label = ttk.Label(entry_frame, text="Ціна")
+    price_label.grid(row=0, column=4, padx=4, pady=2)
     price_var = tk.StringVar(value="0")
     ttk.Entry(entry_frame, textvariable=price_var, width=10).grid(row=0, column=5, padx=4, pady=2)
 
@@ -1431,6 +1665,11 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
                 wh_combo.current(next(i for i, w in enumerate(warehouses) if w["id"] == doc["warehouse_id"]))
             except StopIteration:
                 wh_combo.set(warehouses[0]["name"] if warehouses else "")
+        if curr_codes:
+            try:
+                curr_combo.current(curr_codes.index(doc.get("currency_code", curr_codes[0])))
+            except ValueError:
+                curr_combo.current(0)
         if doc_type == "sale" and ch_combo:
             if doc["channel"]:
                 try:
@@ -1450,9 +1689,13 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
             wh_combo.current(0)
         if ch_combo and channels:
             ch_combo.current(0)
+        if curr_codes:
+            curr_combo.current(0)
         cp_var.set("-")
 
     selected_idx: list[int] = []
+
+    refresh_currency_ui()
 
     def refresh_lines():
         tree.delete(*tree.get_children())
@@ -1537,6 +1780,14 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
         if editable and not line_data:
             messagebox.showerror("Валідація", "Додайте хоча б один рядок")
             return
+        try:
+            rate = float(rate_var.get())
+        except ValueError:
+            messagebox.showerror("Валідація", "Невірний курс")
+            return
+        if rate <= 0:
+            messagebox.showerror("Валідація", "Курс має бути більшим за 0")
+            return
         cp_name = cp_var.get()
         cp_id = None
         if cp_name and cp_name != "-":
@@ -1556,6 +1807,8 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
             "warehouse_id": warehouse_id,
             "channel": channel_name,
             "comment": comment_var.get().strip(),
+            "currency": curr_var.get(),
+            "rate": rate,
         }
         lines_to_save = [(ln["product_id"], ln["quantity"], ln["price"]) for ln in line_data]
         result = (info, lines_to_save)

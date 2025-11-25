@@ -26,11 +26,17 @@ class TableFrame(ttk.Frame):
             values = [row[col] for col in self.tree.cget("columns")]
             self.tree.insert("", "end", iid=row["id"], values=values)
 
-    def selected_id(self) -> Optional[int]:
+    def selected_id(self) -> Optional[str | int]:
         item = self.tree.selection()
         if not item:
             return None
-        return int(item[0])
+        try:
+            return int(item[0])
+        except ValueError:
+            return item[0]
+
+    def on_select(self, callback: Callable[[], None]) -> None:
+        self.tree.bind("<<TreeviewSelect>>", lambda e: callback())
 
 
 def simple_prompt(title: str, fields: List[str], initial: Optional[List[str]] = None) -> Optional[List[str]]:

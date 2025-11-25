@@ -15,7 +15,7 @@ import sqlite3
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
-from utils import get_db_path
+from utils import BASE_CURRENCY, BASE_CURRENCY_DECIMALS, BASE_CURRENCY_NAME, get_db_path
 
 
 def get_connection() -> sqlite3.Connection:
@@ -54,6 +54,22 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT UNIQUE NOT NULL,
                 is_active INTEGER NOT NULL DEFAULT 1
+            );
+
+            CREATE TABLE IF NOT EXISTS Currencies (
+                code TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                decimals INTEGER NOT NULL DEFAULT 2,
+                is_active INTEGER NOT NULL DEFAULT 1
+            );
+
+            CREATE TABLE IF NOT EXISTS CurrencyRates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                currency_code TEXT NOT NULL,
+                rate_date TEXT NOT NULL,
+                rate REAL NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (currency_code) REFERENCES Currencies(code) ON DELETE CASCADE
             );
 
             CREATE TABLE IF NOT EXISTS Products (
@@ -214,15 +230,23 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "PurchaseDocuments", "status", "TEXT NOT NULL DEFAULT 'draft'")
     _ensure_column(conn, "PurchaseDocuments", "comment", "TEXT")
     _ensure_column(conn, "PurchaseDocuments", "created_at", "TEXT DEFAULT CURRENT_TIMESTAMP")
+    _ensure_column(conn, "PurchaseDocuments", "currency_code", "TEXT NOT NULL DEFAULT 'UAH'")
+    _ensure_column(conn, "PurchaseDocuments", "exchange_rate", "REAL NOT NULL DEFAULT 1")
 
     _ensure_column(conn, "PurchaseLines", "amount", "REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "PurchaseLines", "amount_doc", "REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "PurchaseLines", "purchase_price_base", "REAL NOT NULL DEFAULT 0")
 
     _ensure_column(conn, "SalesDocuments", "channel", "TEXT")
     _ensure_column(conn, "SalesDocuments", "status", "TEXT NOT NULL DEFAULT 'draft'")
     _ensure_column(conn, "SalesDocuments", "comment", "TEXT")
     _ensure_column(conn, "SalesDocuments", "created_at", "TEXT DEFAULT CURRENT_TIMESTAMP")
+    _ensure_column(conn, "SalesDocuments", "currency_code", "TEXT NOT NULL DEFAULT 'UAH'")
+    _ensure_column(conn, "SalesDocuments", "exchange_rate", "REAL NOT NULL DEFAULT 1")
 
     _ensure_column(conn, "SalesLines", "amount", "REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "SalesLines", "amount_doc", "REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "SalesLines", "sale_price_base", "REAL NOT NULL DEFAULT 0")
 
     _ensure_column(conn, "StockMoves", "channel", "TEXT")
     _ensure_column(conn, "StockMoves", "counterparty_id", "INTEGER")
@@ -236,7 +260,22 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
 
     _migrate_stock_balances(conn)
 
+    _ensure_currency_tables(conn)
+
     conn.commit()
+
+
+def _ensure_currency_tables(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "INSERT OR IGNORE INTO Currencies (code, name, decimals, is_active) VALUES (?,?,?,1)",
+        (BASE_CURRENCY, BASE_CURRENCY_NAME, BASE_CURRENCY_DECIMALS),
+    )
+    has_rate = conn.execute("SELECT 1 FROM CurrencyRates WHERE currency_code=? LIMIT 1", (BASE_CURRENCY,)).fetchone()
+    if not has_rate:
+        conn.execute(
+            "INSERT INTO CurrencyRates (currency_code, rate_date, rate) VALUES (?, date('now'), 1)",
+            (BASE_CURRENCY,),
+        )
 
 
 def _migrate_stock_balances(conn: sqlite3.Connection) -> None:
@@ -465,6 +504,101 @@ def delete_channel(channel_id: int) -> None:
         conn.commit()
 
 
+# Currencies
+
+
+def list_currencies(active_only: bool = True) -> List[sqlite3.Row]:
+    query = "SELECT code, name, decimals, is_active FROM Currencies"
+    if active_only:
+        query += " WHERE is_active=1"
+    query += " ORDER BY code"
+    with get_connection() as conn:
+        return list(conn.execute(query))
+
+
+def add_currency(code: str, name: str, decimals: int = 2, is_active: bool = True) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO Currencies (code, name, decimals, is_active) VALUES (?,?,?,?)",
+            (code.strip().upper(), name.strip(), max(decimals, 0), 1 if is_active else 0),
+        )
+        conn.commit()
+
+
+def update_currency(code: str, name: str, decimals: int = 2, is_active: bool = True) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE Currencies SET name=?, decimals=?, is_active=? WHERE code=?",
+            (name.strip(), max(decimals, 0), 1 if is_active else 0, code.strip().upper()),
+        )
+        conn.commit()
+
+
+def delete_currency(code: str) -> None:
+    code = code.strip().upper()
+    if code == BASE_CURRENCY:
+        raise ValueError("Базову валюту не можна видалити")
+    with get_connection() as conn:
+        conn.execute("DELETE FROM Currencies WHERE code=?", (code,))
+        conn.commit()
+
+
+def add_currency_rate(currency_code: str, rate_date: str, rate: float) -> int:
+    currency_code = currency_code.strip().upper()
+    with get_connection() as conn:
+        cur = conn.execute(
+            "INSERT INTO CurrencyRates (currency_code, rate_date, rate) VALUES (?,?,?)",
+            (currency_code, rate_date, rate),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def list_currency_rates(currency_code: Optional[str] = None) -> List[sqlite3.Row]:
+    query = "SELECT id, currency_code, rate_date, rate FROM CurrencyRates"
+    params: Tuple[str, ...] = ()
+    if currency_code:
+        query += " WHERE currency_code=?"
+        params = (currency_code.strip().upper(),)
+    query += " ORDER BY rate_date DESC, id DESC"
+    with get_connection() as conn:
+        return list(conn.execute(query, params))
+
+
+def latest_rate(currency_code: str) -> float:
+    currency_code = currency_code.strip().upper()
+    if currency_code == BASE_CURRENCY:
+        return 1.0
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT rate FROM CurrencyRates WHERE currency_code=? ORDER BY rate_date DESC, id DESC LIMIT 1",
+            (currency_code,),
+        ).fetchone()
+    if not row:
+        raise ValueError(f"Немає курсу для {currency_code}")
+    return float(row[0])
+
+
+def rate_on_or_before(currency_code: str, rate_date: str) -> float:
+    currency_code = currency_code.strip().upper()
+    if currency_code == BASE_CURRENCY:
+        return 1.0
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT rate FROM CurrencyRates WHERE currency_code=? AND rate_date<=? ORDER BY rate_date DESC, id DESC LIMIT 1",
+            (currency_code, rate_date),
+        ).fetchone()
+        if row:
+            return float(row[0])
+        row = conn.execute(
+            "SELECT rate FROM CurrencyRates WHERE currency_code=? ORDER BY rate_date DESC, id DESC LIMIT 1",
+            (currency_code,),
+        ).fetchone()
+        if row:
+            return float(row[0])
+    raise ValueError(f"Немає курсу для {currency_code}")
+
+
 # Counterparties
 
 def list_counterparties(counterparty_type: Optional[str] = None) -> List[sqlite3.Row]:
@@ -556,17 +690,35 @@ def _remove_cash_links(conn: sqlite3.Connection, doc_type: str, doc_id: int) -> 
 
 # Purchases
 
-def create_purchase(doc_date: str, supplier_id: Optional[int], warehouse_id: int, channel: str, comment: str = "") -> int:
+def create_purchase(
+    doc_date: str,
+    supplier_id: Optional[int],
+    warehouse_id: int,
+    channel: str,
+    comment: str = "",
+    currency_code: str = BASE_CURRENCY,
+    exchange_rate: float = 1.0,
+) -> int:
     with get_connection() as conn:
         cur = conn.execute(
-            "INSERT INTO PurchaseDocuments (doc_date, supplier_id, warehouse_id, channel, comment, status) VALUES (?,?,?,?,?, 'draft')",
-            (doc_date, supplier_id, warehouse_id, channel.strip(), comment.strip()),
+            "INSERT INTO PurchaseDocuments (doc_date, supplier_id, warehouse_id, channel, comment, status, currency_code, exchange_rate) "
+            "VALUES (?,?,?,?,?, 'draft', ?, ?)",
+            (doc_date, supplier_id, warehouse_id, channel.strip(), comment.strip(), currency_code.strip().upper(), exchange_rate),
         )
         conn.commit()
         return cur.lastrowid
 
 
-def update_purchase(purchase_id: int, doc_date: str, supplier_id: Optional[int], warehouse_id: int, channel: str, comment: str) -> None:
+def update_purchase(
+    purchase_id: int,
+    doc_date: str,
+    supplier_id: Optional[int],
+    warehouse_id: int,
+    channel: str,
+    comment: str,
+    currency_code: str,
+    exchange_rate: float,
+) -> None:
     with get_connection() as conn:
         status = conn.execute("SELECT status FROM PurchaseDocuments WHERE id=?", (purchase_id,)).fetchone()
         if not status:
@@ -574,31 +726,43 @@ def update_purchase(purchase_id: int, doc_date: str, supplier_id: Optional[int],
         if status[0] != "draft":
             raise ValueError("Редагування можливе лише у чернетці")
         conn.execute(
-            "UPDATE PurchaseDocuments SET doc_date=?, supplier_id=?, warehouse_id=?, channel=?, comment=? WHERE id=?",
-            (doc_date, supplier_id, warehouse_id, channel.strip(), comment.strip(), purchase_id),
+            "UPDATE PurchaseDocuments SET doc_date=?, supplier_id=?, warehouse_id=?, channel=?, comment=?, currency_code=?, exchange_rate=? WHERE id=?",
+            (
+                doc_date,
+                supplier_id,
+                warehouse_id,
+                channel.strip(),
+                comment.strip(),
+                currency_code.strip().upper(),
+                exchange_rate,
+                purchase_id,
+            ),
         )
         conn.commit()
 
 
-def replace_purchase_lines(purchase_id: int, lines: Iterable[Tuple[int, float, float]]) -> None:
+def replace_purchase_lines(purchase_id: int, lines: Iterable[Tuple[int, float, float]], exchange_rate: float) -> None:
     with get_connection() as conn:
         status = conn.execute("SELECT status FROM PurchaseDocuments WHERE id=?", (purchase_id,)).fetchone()
         if not status or status[0] != "draft":
             raise ValueError("Рядки можна змінювати лише у чернетці")
         conn.execute("DELETE FROM PurchaseLines WHERE purchase_id=?", (purchase_id,))
         for product_id, qty, price in lines:
-            amount = qty * price
+            amount_doc = qty * price
+            price_base = price * exchange_rate
+            amount = qty * price_base
             conn.execute(
-                "INSERT INTO PurchaseLines (purchase_id, product_id, quantity, purchase_price, amount) VALUES (?,?,?,?,?)",
-                (purchase_id, product_id, qty, price, amount),
+                "INSERT INTO PurchaseLines (purchase_id, product_id, quantity, purchase_price, amount_doc, purchase_price_base, amount) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (purchase_id, product_id, qty, price, amount_doc, price_base, amount),
             )
         conn.commit()
 
 
 def list_purchases(status: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None) -> List[sqlite3.Row]:
     query = (
-        "SELECT p.id, p.doc_date, p.status, p.comment, p.channel, p.supplier_id, c.name as supplier, w.name as warehouse, "
-        "IFNULL(SUM(pl.amount),0) as total "
+        "SELECT p.id, p.doc_date, p.status, p.comment, p.channel, p.supplier_id, c.name as supplier, w.name as warehouse, p.currency_code, p.exchange_rate, "
+        "IFNULL(SUM(pl.amount),0) as total, IFNULL(SUM(pl.amount_doc),0) as total_doc "
         "FROM PurchaseDocuments p "
         "LEFT JOIN Counterparties c ON c.id = p.supplier_id "
         "LEFT JOIN Warehouses w ON w.id = p.warehouse_id "
@@ -631,7 +795,7 @@ def list_purchase_lines(purchase_id: int) -> List[sqlite3.Row]:
     with get_connection() as conn:
         return list(
             conn.execute(
-                "SELECT pl.id, pl.product_id, pl.quantity, pl.purchase_price, pl.amount, p.name as product_name, p.sku "
+                "SELECT pl.id, pl.product_id, pl.quantity, pl.purchase_price, pl.amount_doc, pl.purchase_price_base, pl.amount, p.name as product_name, p.sku "
                 "FROM PurchaseLines pl JOIN Products p ON p.id = pl.product_id WHERE pl.purchase_id=?",
                 (purchase_id,),
             )
@@ -640,17 +804,35 @@ def list_purchase_lines(purchase_id: int) -> List[sqlite3.Row]:
 
 # Sales
 
-def create_sale(doc_date: str, customer_id: Optional[int], warehouse_id: int, channel: str, comment: str = "") -> int:
+def create_sale(
+    doc_date: str,
+    customer_id: Optional[int],
+    warehouse_id: int,
+    channel: str,
+    comment: str = "",
+    currency_code: str = BASE_CURRENCY,
+    exchange_rate: float = 1.0,
+) -> int:
     with get_connection() as conn:
         cur = conn.execute(
-            "INSERT INTO SalesDocuments (doc_date, customer_id, warehouse_id, channel, comment, status) VALUES (?,?,?,?,?, 'draft')",
-            (doc_date, customer_id, warehouse_id, channel.strip(), comment.strip()),
+            "INSERT INTO SalesDocuments (doc_date, customer_id, warehouse_id, channel, comment, status, currency_code, exchange_rate) "
+            "VALUES (?,?,?,?,?, 'draft', ?, ?)",
+            (doc_date, customer_id, warehouse_id, channel.strip(), comment.strip(), currency_code.strip().upper(), exchange_rate),
         )
         conn.commit()
         return cur.lastrowid
 
 
-def update_sale(sale_id: int, doc_date: str, customer_id: Optional[int], warehouse_id: int, channel: str, comment: str) -> None:
+def update_sale(
+    sale_id: int,
+    doc_date: str,
+    customer_id: Optional[int],
+    warehouse_id: int,
+    channel: str,
+    comment: str,
+    currency_code: str,
+    exchange_rate: float,
+) -> None:
     with get_connection() as conn:
         status = conn.execute("SELECT status FROM SalesDocuments WHERE id=?", (sale_id,)).fetchone()
         if not status:
@@ -658,31 +840,42 @@ def update_sale(sale_id: int, doc_date: str, customer_id: Optional[int], warehou
         if status[0] != "draft":
             raise ValueError("Редагування можливе лише у чернетці")
         conn.execute(
-            "UPDATE SalesDocuments SET doc_date=?, customer_id=?, warehouse_id=?, channel=?, comment=? WHERE id=?",
-            (doc_date, customer_id, warehouse_id, channel.strip(), comment.strip(), sale_id),
+            "UPDATE SalesDocuments SET doc_date=?, customer_id=?, warehouse_id=?, channel=?, comment=?, currency_code=?, exchange_rate=? WHERE id=?",
+            (
+                doc_date,
+                customer_id,
+                warehouse_id,
+                channel.strip(),
+                comment.strip(),
+                currency_code.strip().upper(),
+                exchange_rate,
+                sale_id,
+            ),
         )
         conn.commit()
 
 
-def replace_sale_lines(sale_id: int, lines: Iterable[Tuple[int, float, float]]) -> None:
+def replace_sale_lines(sale_id: int, lines: Iterable[Tuple[int, float, float]], exchange_rate: float) -> None:
     with get_connection() as conn:
         status = conn.execute("SELECT status FROM SalesDocuments WHERE id=?", (sale_id,)).fetchone()
         if not status or status[0] != "draft":
             raise ValueError("Рядки можна змінювати лише у чернетці")
         conn.execute("DELETE FROM SalesLines WHERE sale_id=?", (sale_id,))
         for product_id, qty, price in lines:
-            amount = qty * price
+            amount_doc = qty * price
+            price_base = price * exchange_rate
+            amount = qty * price_base
             conn.execute(
-                "INSERT INTO SalesLines (sale_id, product_id, quantity, sale_price, amount) VALUES (?,?,?,?,?)",
-                (sale_id, product_id, qty, price, amount),
+                "INSERT INTO SalesLines (sale_id, product_id, quantity, sale_price, amount_doc, sale_price_base, amount) VALUES (?,?,?,?,?,?,?)",
+                (sale_id, product_id, qty, price, amount_doc, price_base, amount),
             )
         conn.commit()
 
 
 def list_sales(status: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None) -> List[sqlite3.Row]:
     query = (
-        "SELECT s.id, s.doc_date, s.status, s.comment, s.channel, s.customer_id, c.name as customer, w.name as warehouse, "
-        "IFNULL(SUM(sl.amount),0) as total "
+        "SELECT s.id, s.doc_date, s.status, s.comment, s.channel, s.customer_id, c.name as customer, w.name as warehouse, s.currency_code, s.exchange_rate, "
+        "IFNULL(SUM(sl.amount),0) as total, IFNULL(SUM(sl.amount_doc),0) as total_doc "
         "FROM SalesDocuments s "
         "LEFT JOIN Counterparties c ON c.id = s.customer_id "
         "LEFT JOIN Warehouses w ON w.id = s.warehouse_id "
@@ -715,7 +908,7 @@ def list_sale_lines(sale_id: int) -> List[sqlite3.Row]:
     with get_connection() as conn:
         return list(
             conn.execute(
-                "SELECT sl.id, sl.product_id, sl.quantity, sl.sale_price, sl.amount, p.name as product_name, p.sku "
+                "SELECT sl.id, sl.product_id, sl.quantity, sl.sale_price, sl.amount_doc, sl.sale_price_base, sl.amount, p.name as product_name, p.sku "
                 "FROM SalesLines sl JOIN Products p ON p.id = sl.product_id WHERE sl.sale_id=?",
                 (sale_id,),
             )
@@ -726,7 +919,7 @@ def list_sale_lines(sale_id: int) -> List[sqlite3.Row]:
 
 def _apply_purchase_line(conn: sqlite3.Connection, move_date: str, purchase_id: int, line: sqlite3.Row) -> None:
     qty = float(line["quantity"])
-    price = float(line["purchase_price"])
+    price = float(line.get("purchase_price_base", line["purchase_price"]))
     product_id = int(line["product_id"])
     warehouse_id = int(line["warehouse_id"])
     old_qty, old_avg = _get_balance(conn, product_id, warehouse_id)
@@ -768,7 +961,7 @@ def recalc_stock(allow_negative: bool = False) -> None:
         ).fetchall()
         for pdoc in purchases:
             lines = conn.execute(
-                "SELECT pl.product_id, pl.quantity, pl.purchase_price, ? as warehouse_id, ? as channel, ? as supplier_id FROM PurchaseLines pl WHERE pl.purchase_id=?",
+                "SELECT pl.product_id, pl.quantity, pl.purchase_price, pl.purchase_price_base, ? as warehouse_id, ? as channel, ? as supplier_id FROM PurchaseLines pl WHERE pl.purchase_id=?",
                 (pdoc["warehouse_id"], pdoc["channel"], pdoc["supplier_id"], pdoc["id"]),
             ).fetchall()
             for ln in lines:
@@ -778,7 +971,7 @@ def recalc_stock(allow_negative: bool = False) -> None:
         ).fetchall()
         for sdoc in sales:
             lines = conn.execute(
-                "SELECT sl.product_id, sl.quantity, sl.sale_price, ? as warehouse_id, ? as channel, ? as customer_id FROM SalesLines sl WHERE sl.sale_id=?",
+                "SELECT sl.product_id, sl.quantity, sl.sale_price, sl.sale_price_base, ? as warehouse_id, ? as channel, ? as customer_id FROM SalesLines sl WHERE sl.sale_id=?",
                 (sdoc["warehouse_id"], sdoc["channel"], sdoc["customer_id"], sdoc["id"]),
             ).fetchall()
             for ln in lines:

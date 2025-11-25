@@ -6,6 +6,8 @@ import logging
 import os
 import shutil
 import sys
+import tempfile
+import zipfile
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from tkinter import TclError, messagebox
@@ -123,6 +125,73 @@ def backup_database(db_path: Path) -> Path:
     shutil.copy(db_path, target)
     logging.info("Database backup created: %s", target)
     return target
+
+
+def _is_relative_to(path: Path, base: Path) -> bool:
+    try:
+        path.relative_to(base)
+        return True
+    except ValueError:
+        return False
+
+
+def backup_all_data(target: Path | None = None) -> Path:
+    """Archive the entire data directory into a single zip file."""
+
+    data_dir = get_data_dir()
+    data_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    if target is None:
+        target = data_dir / f"{APP_NAME}_backup_{timestamp}.zip"
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in data_dir.rglob("*"):
+            if path.is_dir():
+                continue
+            if target.resolve() == path.resolve():
+                # Skip the archive file itself if it lives in the data directory.
+                continue
+            archive.write(path, path.relative_to(data_dir))
+
+    logging.info("Full data backup created: %s", target)
+    return target
+
+
+def restore_all_data(archive_path: Path) -> None:
+    """Restore data directory contents from a backup zip archive."""
+
+    archive_path = archive_path.expanduser().resolve()
+    if not archive_path.exists():
+        raise FileNotFoundError(f"Backup file not found: {archive_path}")
+
+    data_dir = get_data_dir()
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        temp_dir = Path(tmp)
+        with zipfile.ZipFile(archive_path, "r") as archive:
+            archive.extractall(temp_dir)
+
+        # Remove existing data files except for the archive itself if it is stored under data_dir.
+        skip_path = archive_path if _is_relative_to(archive_path, data_dir) else None
+        for item in list(data_dir.iterdir()):
+            if skip_path and item.resolve() == skip_path:
+                continue
+            if item.is_dir():
+                shutil.rmtree(item)
+            else:
+                item.unlink(missing_ok=True)
+
+        for source in temp_dir.rglob("*"):
+            target = data_dir / source.relative_to(temp_dir)
+            if source.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+
+    logging.info("Data directory restored from: %s", archive_path)
 
 
 def open_data_folder(path: Path) -> None:

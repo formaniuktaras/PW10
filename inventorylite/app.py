@@ -1536,61 +1536,74 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
     dlg.grab_set()
     editable = not doc or doc["status"] == "draft"
 
-    ttk.Label(dlg, text="Тип").grid(row=0, column=0, padx=6, pady=4, sticky="w")
+    dlg.columnconfigure(0, weight=1)
+    dlg.rowconfigure(0, weight=1)
+    content = ttk.Frame(dlg, padding=10)
+    content.grid(row=0, column=0, sticky="nsew")
+    content.columnconfigure(1, weight=1)
+
+    row_idx = 0
+    ttk.Label(content, text="Тип").grid(row=row_idx, column=0, padx=6, pady=4, sticky="e")
     doc_type_label = "Закупівля" if doc_type == "purchase" else "Продаж"
-    ttk.Label(dlg, text=doc_type_label).grid(row=0, column=1, padx=6, pady=4, sticky="w")
+    ttk.Label(content, text=doc_type_label).grid(row=row_idx, column=1, padx=6, pady=4, sticky="w")
 
-    ttk.Label(dlg, text="Дата (YYYY-MM-DD)").grid(row=1, column=0, padx=6, pady=4, sticky="w")
+    row_idx += 1
+    ttk.Label(content, text="Дата (YYYY-MM-DD)").grid(row=row_idx, column=0, padx=6, pady=4, sticky="e")
     date_var = tk.StringVar(value=doc["doc_date"] if doc else datetime.now().strftime("%Y-%m-%d"))
-    ttk.Entry(dlg, textvariable=date_var, width=15, state="normal" if editable else "disabled").grid(row=1, column=1, padx=6, pady=4, sticky="w")
+    ttk.Entry(content, textvariable=date_var, width=15, state="normal" if editable else "disabled").grid(row=row_idx, column=1, padx=6, pady=4, sticky="w")
 
-    ttk.Label(dlg, text="Валюта").grid(row=2, column=0, padx=6, pady=4, sticky="w")
+    row_idx += 1
+    ttk.Label(content, text="Валюта").grid(row=row_idx, column=0, padx=6, pady=4, sticky="e")
     curr_var = tk.StringVar(value=doc["currency_code"] if doc else (currencies[0]["code"] if currencies else "UAH"))
     curr_codes = [c["code"] for c in currencies] if currencies else ["UAH"]
-    curr_combo = ttk.Combobox(dlg, textvariable=curr_var, values=curr_codes, state="readonly")
+    curr_combo = ttk.Combobox(content, textvariable=curr_var, values=curr_codes, state="readonly")
     if not editable:
         curr_combo.state(["disabled"])
-    curr_combo.grid(row=2, column=1, padx=6, pady=4, sticky="w")
+    curr_combo.grid(row=row_idx, column=1, padx=6, pady=4, sticky="w")
 
-    ttk.Label(dlg, text="Курс до базової").grid(row=3, column=0, padx=6, pady=4, sticky="w")
+    row_idx += 1
+    ttk.Label(content, text="Курс до базової").grid(row=row_idx, column=0, padx=6, pady=4, sticky="e")
     default_rate = doc["exchange_rate"] if doc else (db.latest_rate(curr_var.get()) if currencies else 1.0)
     rate_var = tk.StringVar(value=f"{default_rate:.4f}")
-    rate_entry = ttk.Entry(dlg, textvariable=rate_var, width=12, state="normal" if editable else "disabled")
-    rate_entry.grid(row=3, column=1, padx=6, pady=4, sticky="w")
+    rate_entry = ttk.Entry(content, textvariable=rate_var, width=12, state="normal" if editable else "disabled")
+    rate_entry.grid(row=row_idx, column=1, padx=6, pady=4, sticky="w")
 
-    ttk.Label(dlg, text="Склад").grid(row=4, column=0, padx=6, pady=4, sticky="w")
+    row_idx += 1
+    ttk.Label(content, text="Склад").grid(row=row_idx, column=0, padx=6, pady=4, sticky="e")
     wh_var = tk.StringVar()
     wh_names = [w["name"] for w in warehouses]
-    wh_combo = ttk.Combobox(dlg, textvariable=wh_var, values=wh_names, state="readonly")
-    wh_combo.grid(row=4, column=1, padx=6, pady=4, sticky="w")
+    wh_combo = ttk.Combobox(content, textvariable=wh_var, values=wh_names, state="readonly")
+    wh_combo.grid(row=row_idx, column=1, padx=6, pady=4, sticky="w")
 
-    row_idx = 5
+    row_idx += 1
     ch_var = tk.StringVar()
     ch_combo = None
     if doc_type == "sale":
-        ttk.Label(dlg, text="Канал").grid(row=row_idx, column=0, padx=6, pady=4, sticky="w")
+        ttk.Label(content, text="Канал").grid(row=row_idx, column=0, padx=6, pady=4, sticky="e")
         ch_names = [c["name"] for c in channels]
-        ch_combo = ttk.Combobox(dlg, textvariable=ch_var, values=ch_names, state="readonly")
+        ch_combo = ttk.Combobox(content, textvariable=ch_var, values=ch_names, state="readonly")
         ch_combo.grid(row=row_idx, column=1, padx=6, pady=4, sticky="w")
         row_idx += 1
 
-    ttk.Label(dlg, text="Контрагент").grid(row=row_idx, column=0, padx=6, pady=4, sticky="w")
+    ttk.Label(content, text="Контрагент").grid(row=row_idx, column=0, padx=6, pady=4, sticky="e")
     allowed_types = {"purchase": {"supplier", "both", "other"}, "sale": {"customer", "both", "other"}}[doc_type]
     filtered_counterparties = [c for c in counterparties if c["type"] in allowed_types]
     cp_names = ["-"] + [c["name"] for c in filtered_counterparties]
     cp_var = tk.StringVar()
-    cp_combo = ttk.Combobox(dlg, textvariable=cp_var, values=cp_names, state="readonly", width=25)
+    cp_combo = ttk.Combobox(content, textvariable=cp_var, values=cp_names, state="readonly", width=25)
     cp_combo.grid(row=row_idx, column=1, padx=6, pady=4, sticky="w")
     row_idx += 1
 
-    ttk.Label(dlg, text="Коментар").grid(row=row_idx, column=0, padx=6, pady=4, sticky="w")
+    ttk.Label(content, text="Коментар").grid(row=row_idx, column=0, padx=6, pady=4, sticky="e")
     comment_var = tk.StringVar(value=doc["comment"] if doc else "")
-    ttk.Entry(dlg, textvariable=comment_var, width=40).grid(row=row_idx, column=1, padx=6, pady=4, sticky="w")
+    ttk.Entry(content, textvariable=comment_var, width=40).grid(row=row_idx, column=1, padx=6, pady=4, sticky="ew")
 
-    ttk.Label(dlg, text="Рядки").grid(row=row_idx + 1, column=0, padx=6, pady=4, sticky="nw")
-    line_frame = ttk.Frame(dlg)
-    line_frame.grid(row=row_idx + 1, column=1, padx=6, pady=4, sticky="nsew")
+    row_idx += 1
+    ttk.Label(content, text="Рядки").grid(row=row_idx, column=0, padx=6, pady=4, sticky="ne")
+    line_frame = ttk.Frame(content)
+    line_frame.grid(row=row_idx, column=1, padx=6, pady=4, sticky="nsew")
     line_frame.grid_columnconfigure(0, weight=1)
+    content.rowconfigure(row_idx, weight=1)
 
     columns = ["product", "quantity", "price", "amount"]
     tree = ttk.Treeview(line_frame, columns=columns, show="headings", height=8)
@@ -1627,23 +1640,25 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
     product_lookup = {f"{p['name']} ({p['sku']})": p["id"] for p in products}
     products_by_id = {p["id"]: f"{p['name']} ({p['sku']})" for p in products}
 
-    entry_frame = ttk.Frame(dlg)
-    entry_frame.grid(row=7, column=0, columnspan=2, padx=6, pady=4, sticky="w")
-    ttk.Label(entry_frame, text="Товар").grid(row=0, column=0, padx=4, pady=2)
+    row_idx += 1
+    entry_frame = ttk.Frame(content)
+    entry_frame.grid(row=row_idx, column=0, columnspan=2, padx=6, pady=4, sticky="ew")
+    entry_frame.columnconfigure(1, weight=1)
+    ttk.Label(entry_frame, text="Товар").grid(row=0, column=0, padx=4, pady=2, sticky="e")
     product_var = tk.StringVar()
     product_combo = ttk.Combobox(entry_frame, textvariable=product_var, values=list(product_lookup.keys()), state="readonly", width=40)
-    product_combo.grid(row=0, column=1, padx=4, pady=2)
+    product_combo.grid(row=0, column=1, padx=4, pady=2, sticky="ew")
     if product_lookup:
         product_combo.current(0)
 
-    ttk.Label(entry_frame, text="Кількість").grid(row=0, column=2, padx=4, pady=2)
+    ttk.Label(entry_frame, text="Кількість").grid(row=0, column=2, padx=4, pady=2, sticky="e")
     qty_var = tk.StringVar(value="1")
-    ttk.Entry(entry_frame, textvariable=qty_var, width=10).grid(row=0, column=3, padx=4, pady=2)
+    ttk.Entry(entry_frame, textvariable=qty_var, width=10).grid(row=0, column=3, padx=4, pady=2, sticky="w")
 
     price_label = ttk.Label(entry_frame, text="Ціна")
-    price_label.grid(row=0, column=4, padx=4, pady=2)
+    price_label.grid(row=0, column=4, padx=4, pady=2, sticky="e")
     price_var = tk.StringVar(value="0")
-    ttk.Entry(entry_frame, textvariable=price_var, width=10).grid(row=0, column=5, padx=4, pady=2)
+    ttk.Entry(entry_frame, textvariable=price_var, width=10).grid(row=0, column=5, padx=4, pady=2, sticky="w")
 
     line_data = []
     if lines:
@@ -1768,6 +1783,8 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
 
     refresh_lines()
 
+    row_idx += 1
+
     result = None
 
     def on_ok():
@@ -1817,8 +1834,8 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
     def on_cancel():
         dlg.destroy()
 
-    btns = ttk.Frame(dlg)
-    btns.grid(row=8, column=0, columnspan=2, pady=8)
+    btns = ttk.Frame(content)
+    btns.grid(row=row_idx, column=0, columnspan=2, pady=8, sticky="e")
     ttk.Button(btns, text="OK", command=on_ok).pack(side=tk.LEFT, padx=4)
     ttk.Button(btns, text="Скасувати", command=on_cancel).pack(side=tk.LEFT, padx=4)
     dlg.bind("<Return>", lambda e: on_ok())

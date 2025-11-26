@@ -10,7 +10,8 @@ import tempfile
 import zipfile
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from tkinter import TclError, messagebox
+import tkinter as tk
+from tkinter import TclError, messagebox, ttk
 
 try:
     import fcntl  # type: ignore
@@ -68,6 +69,82 @@ def show_error(title: str, message: str) -> None:
         # Fallback for headless environments where Tk dialogs cannot be shown
         logging.error("Could not show error dialog (headless environment): %s - %s", title, message)
         print(f"{title}: {message}", file=sys.stderr)
+
+
+def _is_text_input(widget: tk.Widget) -> bool:
+    """Return True if widget supports text selection/copy/paste shortcuts."""
+
+    return isinstance(
+        widget,
+        (
+            tk.Entry,
+            ttk.Entry,
+            tk.Text,
+            tk.Spinbox,
+            ttk.Spinbox,
+            ttk.Combobox,
+        ),
+    )
+
+
+def _enable_undo(widget: tk.Widget) -> None:
+    """Enable undo stack for widgets that support it."""
+
+    try:
+        if str(widget.cget("undo")) == "0":
+            widget.configure(undo=True)
+    except (tk.TclError, AttributeError):
+        # Widget does not expose undo configuration; skip silently.
+        return
+
+
+def bind_common_shortcuts(root: tk.Tk) -> None:
+    """Bind copy/paste/select-all/undo shortcuts application-wide."""
+
+    def handle_copy(event: tk.Event) -> str | None:
+        widget = event.widget
+        if _is_text_input(widget):
+            widget.event_generate("<<Copy>>")
+            return "break"
+        return None
+
+    def handle_paste(event: tk.Event) -> str | None:
+        widget = event.widget
+        if _is_text_input(widget):
+            widget.event_generate("<<Paste>>")
+            return "break"
+        return None
+
+    def handle_select_all(event: tk.Event) -> str | None:
+        widget = event.widget
+        if _is_text_input(widget):
+            try:
+                widget.selection_range(0, tk.END)
+                widget.icursor(tk.END)
+                return "break"
+            except tk.TclError:
+                return None
+        return None
+
+    def handle_undo(event: tk.Event) -> str | None:
+        widget = event.widget
+        if _is_text_input(widget):
+            _enable_undo(widget)
+            widget.event_generate("<<Undo>>")
+            return "break"
+        return None
+
+    for sequence, handler in (
+        ("<Control-c>", handle_copy),
+        ("<Control-C>", handle_copy),
+        ("<Control-v>", handle_paste),
+        ("<Control-V>", handle_paste),
+        ("<Control-a>", handle_select_all),
+        ("<Control-A>", handle_select_all),
+        ("<Control-z>", handle_undo),
+        ("<Control-Z>", handle_undo),
+    ):
+        root.bind_all(sequence, handler, add="+")
 
 
 class SingleInstance:

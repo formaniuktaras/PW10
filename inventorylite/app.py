@@ -32,6 +32,7 @@ from utils import (
     restore_all_data,
     show_error,
     backup_database,
+    bind_common_shortcuts,
 )
 from ui_components import TableFrame, simple_prompt
 
@@ -42,6 +43,7 @@ class InventoryApp(tk.Tk):
         self.title(APP_NAME)
         self.geometry("1180x720")
         self.iconbitmap(default="icons/app.ico") if Path("icons/app.ico").exists() else None
+        bind_common_shortcuts(self)
         self.create_menu()
 
         notebook = ttk.Notebook(self)

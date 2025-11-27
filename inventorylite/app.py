@@ -1644,6 +1644,7 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
 
     product_lookup = {f"{p['name']} ({p['sku']})": p["id"] for p in products}
     products_by_id = {p["id"]: f"{p['name']} ({p['sku']})" for p in products}
+    product_names = list(product_lookup.keys())
 
     row_idx += 1
     entry_frame = ttk.Frame(content)
@@ -1651,10 +1652,20 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
     entry_frame.columnconfigure(1, weight=1)
     ttk.Label(entry_frame, text="Товар").grid(row=0, column=0, padx=4, pady=2, sticky="e")
     product_var = tk.StringVar()
-    product_combo = ttk.Combobox(entry_frame, textvariable=product_var, values=list(product_lookup.keys()), state="readonly", width=40)
+    product_combo_state = "normal" if editable else "readonly"
+    product_combo = ttk.Combobox(entry_frame, textvariable=product_var, values=product_names, state=product_combo_state, width=40)
     product_combo.grid(row=0, column=1, padx=4, pady=2, sticky="ew")
     if product_lookup:
         product_combo.current(0)
+
+    def filter_products(event=None):
+        if not editable:
+            return
+        text = product_var.get().lower()
+        matches = [name for name in product_names if text in name.lower()]
+        product_combo["values"] = matches if matches else product_names
+
+    product_combo.bind("<KeyRelease>", filter_products)
 
     ttk.Label(entry_frame, text="Кількість").grid(row=0, column=2, padx=4, pady=2, sticky="e")
     qty_var = tk.StringVar(value="1")
@@ -1753,11 +1764,18 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
         if qty <= 0:
             messagebox.showerror("Валідація", "Кількість повинна бути більшою за 0")
             return
-        product_name = product_var.get()
+        product_name = product_var.get().strip()
         product_id = product_lookup.get(product_name)
         if not product_id:
-            messagebox.showerror("Валідація", "Оберіть товар")
-            return
+            if not editable:
+                return
+            if not product_name:
+                messagebox.showerror("Валідація", "Введіть назву товару")
+                return
+            created = add_new_product(product_name)
+            if not created:
+                return
+            product_id, product_name = created
         data = {
             "product_id": product_id,
             "product_name": product_name,
@@ -1781,8 +1799,106 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
         selected_idx.clear()
         refresh_lines()
 
+    def add_new_product(default_name: str = ""):
+        if not editable:
+            return None
+        brands = db.list_brands()
+        categories = db.list_categories()
+        if not brands or not categories:
+            messagebox.showerror(
+                "Товари",
+                "Додайте принаймні один бренд і категорію у вкладці \"Товари\", щоб створювати нові позиції.",
+            )
+            return None
+
+        dlg_product = tk.Toplevel(dlg)
+        dlg_product.title("Новий товар")
+        dlg_product.grab_set()
+
+        ttk.Label(dlg_product, text="Артикул").grid(row=0, column=0, padx=6, pady=4, sticky="e")
+        sku_var = tk.StringVar(value=default_name)
+        ttk.Entry(dlg_product, textvariable=sku_var, width=30).grid(row=0, column=1, padx=6, pady=4, sticky="w")
+
+        ttk.Label(dlg_product, text="Назва").grid(row=1, column=0, padx=6, pady=4, sticky="e")
+        name_var = tk.StringVar(value=default_name)
+        ttk.Entry(dlg_product, textvariable=name_var, width=30).grid(row=1, column=1, padx=6, pady=4, sticky="w")
+
+        ttk.Label(dlg_product, text="Бренд").grid(row=2, column=0, padx=6, pady=4, sticky="e")
+        brand_var = tk.StringVar()
+        brand_combo = ttk.Combobox(
+            dlg_product,
+            textvariable=brand_var,
+            values=[b["name"] for b in brands],
+            state="readonly",
+            width=28,
+        )
+        brand_combo.grid(row=2, column=1, padx=6, pady=4, sticky="w")
+        brand_combo.current(0)
+
+        ttk.Label(dlg_product, text="Категорія").grid(row=3, column=0, padx=6, pady=4, sticky="e")
+        category_var = tk.StringVar()
+        category_combo = ttk.Combobox(
+            dlg_product,
+            textvariable=category_var,
+            values=[c["name"] for c in categories],
+            state="readonly",
+            width=28,
+        )
+        category_combo.grid(row=3, column=1, padx=6, pady=4, sticky="w")
+        category_combo.current(0)
+
+        ttk.Label(dlg_product, text="Одиниця").grid(row=4, column=0, padx=6, pady=4, sticky="e")
+        unit_var = tk.StringVar(value="pcs")
+        ttk.Entry(dlg_product, textvariable=unit_var, width=30).grid(row=4, column=1, padx=6, pady=4, sticky="w")
+
+        result_new: tuple[int, str] | None = None
+
+        def on_save():
+            nonlocal result_new
+            sku = sku_var.get().strip()
+            name = name_var.get().strip()
+            unit = unit_var.get().strip() or "pcs"
+            if not sku or not name:
+                messagebox.showerror("Товари", "Введіть артикул і назву товару")
+                return
+            brand_idx = brand_combo.current()
+            cat_idx = category_combo.current()
+            try:
+                brand_id = brands[brand_idx]["id"]
+                category_id = categories[cat_idx]["id"]
+            except Exception:
+                messagebox.showerror("Товари", "Оберіть бренд та категорію")
+                return
+            try:
+                new_id = db.add_product(sku, name, brand_id, category_id, unit)
+            except Exception as exc:
+                messagebox.showerror("Товари", f"Не вдалося створити товар: {exc}")
+                return
+            product_full_name = f"{name} ({sku})"
+            product_lookup[product_full_name] = new_id
+            products_by_id[new_id] = product_full_name
+            product_names.append(product_full_name)
+            product_names.sort(key=str.lower)
+            product_combo["values"] = product_names
+            product_var.set(product_full_name)
+            result_new = (new_id, product_full_name)
+            dlg_product.destroy()
+
+        def on_cancel():
+            dlg_product.destroy()
+
+        btns_new = ttk.Frame(dlg_product)
+        btns_new.grid(row=5, column=0, columnspan=2, pady=8)
+        ttk.Button(btns_new, text="Зберегти", command=on_save).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns_new, text="Скасувати", command=on_cancel).pack(side=tk.LEFT, padx=4)
+        dlg_product.bind("<Return>", lambda e: on_save())
+        dlg_product.bind("<Escape>", lambda e: on_cancel())
+        dlg_product.wait_window()
+        return result_new
+
     btn_line = ttk.Frame(entry_frame)
     btn_line.grid(row=0, column=6, padx=6)
+    ttk.Button(btn_line, text="Новий товар", command=lambda: add_new_product(product_var.get()), state="normal" if editable else "disabled").pack(side=tk.LEFT, padx=4)
     ttk.Button(btn_line, text="Додати/Оновити", command=add_or_update_line, state="normal" if editable else "disabled").pack(side=tk.LEFT)
     ttk.Button(btn_line, text="Видалити", command=delete_line, state="normal" if editable else "disabled").pack(side=tk.LEFT, padx=4)
 

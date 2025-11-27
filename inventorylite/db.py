@@ -919,7 +919,8 @@ def list_sale_lines(sale_id: int) -> List[sqlite3.Row]:
 
 def _apply_purchase_line(conn: sqlite3.Connection, move_date: str, purchase_id: int, line: sqlite3.Row) -> None:
     qty = float(line["quantity"])
-    price = float(line.get("purchase_price_base", line["purchase_price"]))
+    base_price = line["purchase_price_base"] if "purchase_price_base" in line.keys() else None
+    price = float(base_price if base_price is not None else line["purchase_price"])
     product_id = int(line["product_id"])
     warehouse_id = int(line["warehouse_id"])
     old_qty, old_avg = _get_balance(conn, product_id, warehouse_id)

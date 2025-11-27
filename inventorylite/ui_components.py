@@ -38,6 +38,33 @@ class TableFrame(ttk.Frame):
     def on_select(self, callback: Callable[[], None]) -> None:
         self.tree.bind("<<TreeviewSelect>>", lambda e: callback())
 
+    def on_double_click(self, callback: Callable[[], None]) -> None:
+        def handler(event: tk.Event) -> None:
+            row_id = self.tree.identify_row(event.y)
+            if row_id:
+                self.tree.selection_set(row_id)
+                callback()
+
+        self.tree.bind("<Double-1>", handler)
+
+    def register_context_menu(self, on_edit: Callable[[], None], on_delete: Callable[[], None]) -> None:
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="Редагувати", command=on_edit)
+        menu.add_command(label="Видалити", command=on_delete)
+
+        def show_menu(event: tk.Event) -> None:
+            row_id = self.tree.identify_row(event.y)
+            if row_id:
+                self.tree.selection_set(row_id)
+                self.tree.focus(row_id)
+                try:
+                    menu.tk_popup(event.x_root, event.y_root)
+                finally:
+                    menu.grab_release()
+
+        self.tree.bind("<Button-3>", show_menu)
+        self.context_menu = menu
+
 
 def simple_prompt(title: str, fields: List[str], initial: Optional[List[str]] = None) -> Optional[List[str]]:
     """Prompt user for simple text fields; returns list of values or None."""

@@ -166,6 +166,8 @@ class InventoryApp(tk.Tk):
         columns = [("name", "Назва", 300)]
         self.brand_table = TableFrame(self.brands_frame, columns)
         self.brand_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        self.brand_table.on_double_click(self.edit_brand)
+        self.brand_table.register_context_menu(self.edit_brand, self.delete_brand)
 
         btns = ttk.Frame(self.brands_frame)
         btns.pack(pady=4)
@@ -225,6 +227,8 @@ class InventoryApp(tk.Tk):
         columns = [("name", "Назва", 300)]
         self.category_table = TableFrame(self.categories_frame, columns)
         self.category_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        self.category_table.on_double_click(self.edit_category)
+        self.category_table.register_context_menu(self.edit_category, self.delete_category)
 
         btns = ttk.Frame(self.categories_frame)
         btns.pack(pady=4)
@@ -298,6 +302,8 @@ class InventoryApp(tk.Tk):
         ]
         self.product_table = TableFrame(self.products_frame, columns)
         self.product_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        self.product_table.on_double_click(self.edit_product)
+        self.product_table.register_context_menu(self.edit_product, self.delete_product)
 
         btns = ttk.Frame(self.products_frame)
         btns.pack(pady=4)
@@ -379,6 +385,8 @@ class InventoryApp(tk.Tk):
         ]
         self.counterparty_table = TableFrame(self.counterparties_frame, columns)
         self.counterparty_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        self.counterparty_table.on_double_click(self.edit_counterparty)
+        self.counterparty_table.register_context_menu(self.edit_counterparty, self.delete_counterparty)
 
         btns = ttk.Frame(self.counterparties_frame)
         btns.pack(pady=4)
@@ -441,6 +449,8 @@ class InventoryApp(tk.Tk):
         columns = [("name", "Назва", 200), ("description", "Опис", 260), ("is_active", "Активний", 100)]
         self.warehouse_table = TableFrame(self.warehouses_frame, columns)
         self.warehouse_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        self.warehouse_table.on_double_click(self.edit_warehouse)
+        self.warehouse_table.register_context_menu(self.edit_warehouse, self.delete_warehouse)
         btns = ttk.Frame(self.warehouses_frame)
         btns.pack(pady=4)
         ttk.Button(btns, text="Додати", command=self.add_warehouse).pack(side=tk.LEFT, padx=4)
@@ -502,6 +512,8 @@ class InventoryApp(tk.Tk):
         columns = [("name", "Назва", 240), ("is_active", "Активний", 100)]
         self.channel_table = TableFrame(self.channels_frame, columns)
         self.channel_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        self.channel_table.on_double_click(self.edit_channel)
+        self.channel_table.register_context_menu(self.edit_channel, self.delete_channel)
         btns = ttk.Frame(self.channels_frame)
         btns.pack(pady=4)
         ttk.Button(btns, text="Додати", command=self.add_channel).pack(side=tk.LEFT, padx=4)
@@ -567,6 +579,8 @@ class InventoryApp(tk.Tk):
         curr_columns = [("code", "Код", 80), ("name", "Назва", 200), ("decimals", "Знаків", 60), ("is_active", "Активна", 80)]
         self.currency_table = TableFrame(top, curr_columns, height=6)
         self.currency_table.pack(fill=tk.X, pady=4)
+        self.currency_table.on_double_click(self.edit_currency)
+        self.currency_table.register_context_menu(self.edit_currency, self.delete_currency)
 
         btns = ttk.Frame(top)
         btns.pack(pady=4, anchor="w")
@@ -714,6 +728,8 @@ class InventoryApp(tk.Tk):
         ]
         self.purchase_table = TableFrame(self.purchases_frame, columns)
         self.purchase_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        self.purchase_table.on_double_click(self.edit_purchase)
+        self.purchase_table.register_context_menu(self.edit_purchase, self.delete_purchase)
 
         btns = ttk.Frame(self.purchases_frame)
         btns.pack(pady=4)
@@ -896,6 +912,8 @@ class InventoryApp(tk.Tk):
         ]
         self.sales_table = TableFrame(self.sales_frame, columns)
         self.sales_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        self.sales_table.on_double_click(self.edit_sale)
+        self.sales_table.register_context_menu(self.edit_sale, self.delete_sale)
 
         btns = ttk.Frame(self.sales_frame)
         btns.pack(pady=4)

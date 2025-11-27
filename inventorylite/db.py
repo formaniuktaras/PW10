@@ -11,8 +11,10 @@ transactions but are not added into inventory cost.
 from __future__ import annotations
 
 import logging
+import math
 import sqlite3
 from pathlib import Path
+from statistics import mean, pstdev
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from utils import BASE_CURRENCY, BASE_CURRENCY_DECIMALS, BASE_CURRENCY_NAME, get_db_path
@@ -1203,6 +1205,243 @@ def cash_flow_summary(date_from: Optional[str] = None, date_to: Optional[str] = 
     with get_connection() as conn:
         rows = conn.execute(query, params).fetchall()
     return [{"type": row["type"], "total": float(row["total"])} for row in rows]
+
+
+def dashboard_metrics(date_from: Optional[str] = None, date_to: Optional[str] = None) -> dict:
+    """Key metrics: turnover, gross profit, margin, stock value."""
+    clauses: List[str] = []
+    params: List[object] = []
+    if date_from:
+        clauses.append("date >= ?")
+        params.append(date_from)
+    if date_to:
+        clauses.append("date <= ?")
+        params.append(date_to)
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    with get_connection() as conn:
+        turnover = conn.execute(
+            "SELECT IFNULL(SUM(amount),0) FROM CashTransactions WHERE type='sale_payment'" + where,
+            params,
+        ).fetchone()[0]
+        gross_profit = sum(r["gross_profit"] for r in profit_by_product(date_from, date_to))
+        stock_value = conn.execute(
+            "SELECT IFNULL(SUM(quantity * average_cost),0) FROM StockBalances"
+        ).fetchone()[0]
+    margin_pct = (gross_profit / turnover * 100) if turnover else 0.0
+    return {
+        "turnover": float(turnover),
+        "gross_profit": float(gross_profit),
+        "margin_pct": float(margin_pct),
+        "stock_value": float(stock_value),
+    }
+
+
+def sales_analysis(
+    date_from: Optional[str] = None, date_to: Optional[str] = None
+) -> dict:
+    """Sales by channels and categories with revenue and gross profit."""
+
+    def _date_clause(prefix: str) -> Tuple[str, List[object]]:
+        clauses: List[str] = []
+        params: List[object] = []
+        if date_from:
+            clauses.append(f"{prefix} >= ?")
+            params.append(date_from)
+        if date_to:
+            clauses.append(f"{prefix} <= ?")
+            params.append(date_to)
+        sql = " WHERE " + " AND ".join(clauses) if clauses else ""
+        return sql, params
+
+    with get_connection() as conn:
+        sale_clause, sale_params = _date_clause("s.doc_date")
+        move_clause, move_params = _date_clause("move_date")
+
+        channel_rows = conn.execute(
+            "SELECT COALESCE(s.channel,'') as channel, IFNULL(SUM(sl.amount),0) as revenue, "
+            "IFNULL(SUM(sl.quantity),0) as qty "
+            "FROM SalesLines sl JOIN SalesDocuments s ON s.id = sl.sale_id "
+            "WHERE s.status='posted'" + sale_clause + " GROUP BY COALESCE(s.channel,'') ORDER BY revenue DESC",
+            sale_params,
+        ).fetchall()
+        channel_cogs = conn.execute(
+            "SELECT COALESCE(channel,'') as channel, IFNULL(SUM(amount),0) as cogs "
+            "FROM StockMoves WHERE reference_type='sale'" + move_clause + " GROUP BY COALESCE(channel,'')",
+            move_params,
+        ).fetchall()
+        cogs_map = {row["channel"]: -float(row["cogs"]) for row in channel_cogs}
+
+        category_rows = conn.execute(
+            "SELECT COALESCE(c.name,'Без категорії') as category, IFNULL(SUM(sl.amount),0) as revenue, "
+            "IFNULL(SUM(sl.quantity),0) as qty "
+            "FROM SalesLines sl "
+            "JOIN SalesDocuments s ON s.id = sl.sale_id "
+            "JOIN Products p ON p.id = sl.product_id "
+            "LEFT JOIN Categories c ON c.id = p.category_id "
+            "WHERE s.status='posted'" + sale_clause + " GROUP BY COALESCE(c.name,'Без категорії') ORDER BY revenue DESC",
+            sale_params,
+        ).fetchall()
+        category_cogs_rows = conn.execute(
+            "SELECT p.category_id, IFNULL(SUM(sm.amount),0) as cogs "
+            "FROM StockMoves sm "
+            "JOIN SalesDocuments s ON s.id = sm.reference_id "
+            "JOIN Products p ON p.id = sm.product_id "
+            "WHERE sm.reference_type='sale'" + move_clause + " GROUP BY p.category_id",
+            move_params,
+        ).fetchall()
+        category_names = {row["id"]: row["name"] for row in conn.execute("SELECT id, name FROM Categories")}
+        cogs_by_category = {}
+        for row in category_cogs_rows:
+            name = category_names.get(row["category_id"], "Без категорії")
+            cogs_by_category[name] = cogs_by_category.get(name, 0.0) - float(row["cogs"])
+
+    channels = [
+        {
+            "name": row["channel"] or "Без каналу",
+            "revenue": float(row["revenue"]),
+            "gross_profit": float(row["revenue"]) - cogs_map.get(row["channel"], 0.0),
+            "qty": float(row["qty"]),
+        }
+        for row in channel_rows
+    ]
+
+    categories = [
+        {
+            "name": row["category"],
+            "revenue": float(row["revenue"]),
+            "gross_profit": float(row["revenue"]) - cogs_by_category.get(row["category"], 0.0),
+            "qty": float(row["qty"]),
+        }
+        for row in category_rows
+    ]
+    return {"channels": channels, "categories": categories}
+
+
+def abc_xyz_report(date_from: Optional[str] = None, date_to: Optional[str] = None) -> List[dict]:
+    """ABC by revenue and XYZ by demand variability (monthly quantities)."""
+    data: Dict[int, dict] = {}
+    clauses: List[str] = ["s.status='posted'"]
+    params: List[object] = []
+    if date_from:
+        clauses.append("s.doc_date >= ?")
+        params.append(date_from)
+    if date_to:
+        clauses.append("s.doc_date <= ?")
+        params.append(date_to)
+    where = " WHERE " + " AND ".join(clauses)
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT p.id as product_id, p.name, p.sku, c.name as category, s.doc_date, sl.quantity, sl.amount "
+            "FROM SalesLines sl "
+            "JOIN SalesDocuments s ON s.id = sl.sale_id "
+            "JOIN Products p ON p.id = sl.product_id "
+            "LEFT JOIN Categories c ON c.id = p.category_id" + where,
+            params,
+        ).fetchall()
+
+    for row in rows:
+        pid = row["product_id"]
+        info = data.setdefault(
+            pid,
+            {
+                "product_id": pid,
+                "name": row["name"],
+                "sku": row["sku"],
+                "category": row["category"] or "Без категорії",
+                "revenue": 0.0,
+                "monthly_qty": {},
+            },
+        )
+        info["revenue"] += float(row["amount"])
+        month = (row["doc_date"] or "")[:7]
+        info["monthly_qty"][month] = info["monthly_qty"].get(month, 0.0) + float(row["quantity"])
+
+    total_revenue = sum(item["revenue"] for item in data.values()) or 1.0
+    sorted_products = sorted(data.values(), key=lambda x: x["revenue"], reverse=True)
+    cumulative = 0.0
+    results: List[dict] = []
+    for item in sorted_products:
+        cumulative += item["revenue"]
+        share = cumulative / total_revenue
+        if share <= 0.8:
+            abc = "A"
+        elif share <= 0.95:
+            abc = "B"
+        else:
+            abc = "C"
+
+        qty_values = list(item["monthly_qty"].values())
+        if not qty_values or math.isclose(sum(qty_values), 0.0):
+            xyz = "Z"
+        elif len(qty_values) == 1:
+            xyz = "X"
+        else:
+            qty_mean = mean(qty_values)
+            cv = (pstdev(qty_values) / qty_mean) if qty_mean else float("inf")
+            if cv <= 0.1:
+                xyz = "X"
+            elif cv <= 0.25:
+                xyz = "Y"
+            else:
+                xyz = "Z"
+        results.append(
+            {
+                "product_id": item["product_id"],
+                "name": item["name"],
+                "sku": item["sku"],
+                "category": item["category"],
+                "revenue": item["revenue"],
+                "abc": abc,
+                "xyz": xyz,
+            }
+        )
+    return results
+
+
+def cash_flow_detailed(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    ctype: Optional[str] = None,
+    channel: Optional[str] = None,
+    counterparty_id: Optional[int] = None,
+) -> List[dict]:
+    clauses: List[str] = []
+    params: List[object] = []
+    if date_from:
+        clauses.append("ct.date >= ?")
+        params.append(date_from)
+    if date_to:
+        clauses.append("ct.date <= ?")
+        params.append(date_to)
+    if ctype:
+        clauses.append("ct.type = ?")
+        params.append(ctype)
+    if channel:
+        clauses.append("ct.channel LIKE ?")
+        params.append(f"%{channel}%")
+    if counterparty_id:
+        clauses.append("ct.counterparty_id = ?")
+        params.append(counterparty_id)
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    query = (
+        "SELECT ct.id, ct.date, ct.amount, ct.type, ct.channel, ct.comment, "
+        "cp.name as counterparty FROM CashTransactions ct "
+        "LEFT JOIN Counterparties cp ON cp.id = ct.counterparty_id" + where + " ORDER BY ct.date, ct.id"
+    )
+    with get_connection() as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [
+        {
+            "id": row["id"],
+            "date": row["date"],
+            "amount": float(row["amount"]),
+            "type": row["type"],
+            "channel": row["channel"] or "",
+            "comment": row["comment"] or "",
+            "counterparty": row["counterparty"] or "",
+        }
+        for row in rows
+    ]
 
 
 def export_table_to_csv(table: str, output_path: Path) -> None:

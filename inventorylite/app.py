@@ -1161,48 +1161,222 @@ class InventoryApp(tk.Tk):
 
     # Reports
     def create_reports_tab(self) -> None:
-        frm = ttk.Frame(self.reports_frame)
-        frm.pack(fill=tk.X, padx=8, pady=6)
-        ttk.Label(frm, text="Дата з:").pack(side=tk.LEFT)
-        self.report_date_from_var = tk.StringVar()
-        ttk.Entry(frm, textvariable=self.report_date_from_var, width=10).pack(side=tk.LEFT, padx=2)
-        ttk.Label(frm, text="по:").pack(side=tk.LEFT)
-        self.report_date_to_var = tk.StringVar()
-        ttk.Entry(frm, textvariable=self.report_date_to_var, width=10).pack(side=tk.LEFT, padx=2)
-        ttk.Button(frm, text="Прибуток по товарам", command=self.show_profit_by_product).pack(side=tk.LEFT, padx=6)
-        ttk.Button(frm, text="Грошовий потік", command=self.show_cash_flow).pack(side=tk.LEFT, padx=6)
+        notebook = ttk.Notebook(self.reports_frame)
+        notebook.pack(fill=tk.BOTH, expand=True)
 
-        columns = [("name", "Назва", 260), ("metric1", "Значення 1", 160), ("metric2", "Значення 2", 160), ("metric3", "Значення 3", 160)]
-        self.report_table = TableFrame(self.reports_frame, columns)
-        self.report_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        # Dashboard
+        dashboard_tab = ttk.Frame(notebook)
+        notebook.add(dashboard_tab, text="Дашборд")
+        dash_filters = ttk.Frame(dashboard_tab)
+        dash_filters.pack(fill=tk.X, padx=8, pady=6)
+        ttk.Label(dash_filters, text="Дата з:").pack(side=tk.LEFT)
+        self.dashboard_from_var = tk.StringVar()
+        ttk.Entry(dash_filters, textvariable=self.dashboard_from_var, width=10).pack(side=tk.LEFT, padx=2)
+        ttk.Label(dash_filters, text="по:").pack(side=tk.LEFT)
+        self.dashboard_to_var = tk.StringVar()
+        ttk.Entry(dash_filters, textvariable=self.dashboard_to_var, width=10).pack(side=tk.LEFT, padx=2)
+        ttk.Button(dash_filters, text="Оновити", command=self.refresh_dashboard).pack(side=tk.LEFT, padx=6)
+        dash_columns = [("name", "Показник", 260), ("value", "Значення", 200), ("extra", "Примітка", 200)]
+        self.dashboard_table = TableFrame(dashboard_tab, dash_columns)
+        self.dashboard_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
-    def show_profit_by_product(self) -> None:
-        rows = db.profit_by_product(self.report_date_from_var.get().strip() or None, self.report_date_to_var.get().strip() or None)
-        self.report_table.set_rows(
+        # Sales analysis
+        sales_tab = ttk.Frame(notebook)
+        notebook.add(sales_tab, text="Продажі")
+        sales_filters = ttk.Frame(sales_tab)
+        sales_filters.pack(fill=tk.X, padx=8, pady=6)
+        ttk.Label(sales_filters, text="Дата з:").pack(side=tk.LEFT)
+        self.sales_from_var = tk.StringVar()
+        ttk.Entry(sales_filters, textvariable=self.sales_from_var, width=10).pack(side=tk.LEFT, padx=2)
+        ttk.Label(sales_filters, text="по:").pack(side=tk.LEFT)
+        self.sales_to_var = tk.StringVar()
+        ttk.Entry(sales_filters, textvariable=self.sales_to_var, width=10).pack(side=tk.LEFT, padx=2)
+        ttk.Button(sales_filters, text="Оновити", command=self.refresh_sales_analysis).pack(side=tk.LEFT, padx=6)
+        sales_tables = ttk.Frame(sales_tab)
+        sales_tables.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
+        channel_columns = [
+            ("name", "Канал", 180),
+            ("revenue", "Дохід", 140),
+            ("gross_profit", "Валовий прибуток", 160),
+            ("qty", "К-сть", 100),
+        ]
+        category_columns = [
+            ("name", "Категорія", 200),
+            ("revenue", "Дохід", 140),
+            ("gross_profit", "Валовий прибуток", 160),
+            ("qty", "К-сть", 100),
+        ]
+        ttk.Label(sales_tables, text="По каналах", font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        self.sales_channels_table = TableFrame(sales_tables, channel_columns)
+        self.sales_channels_table.pack(fill=tk.BOTH, expand=True, pady=4)
+        ttk.Label(sales_tables, text="По категоріях", font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(10, 0))
+        self.sales_categories_table = TableFrame(sales_tables, category_columns)
+        self.sales_categories_table.pack(fill=tk.BOTH, expand=True, pady=4)
+
+        # ABC/XYZ
+        abc_tab = ttk.Frame(notebook)
+        notebook.add(abc_tab, text="ABC/XYZ")
+        abc_filters = ttk.Frame(abc_tab)
+        abc_filters.pack(fill=tk.X, padx=8, pady=6)
+        ttk.Label(abc_filters, text="Дата з:").pack(side=tk.LEFT)
+        self.abc_from_var = tk.StringVar()
+        ttk.Entry(abc_filters, textvariable=self.abc_from_var, width=10).pack(side=tk.LEFT, padx=2)
+        ttk.Label(abc_filters, text="по:").pack(side=tk.LEFT)
+        self.abc_to_var = tk.StringVar()
+        ttk.Entry(abc_filters, textvariable=self.abc_to_var, width=10).pack(side=tk.LEFT, padx=2)
+        ttk.Button(abc_filters, text="Оновити", command=self.refresh_abc_xyz).pack(side=tk.LEFT, padx=6)
+        abc_columns = [
+            ("name", "Товар", 220),
+            ("sku", "SKU", 100),
+            ("category", "Категорія", 160),
+            ("revenue", "Дохід", 120),
+            ("abc", "ABC", 60),
+            ("xyz", "XYZ", 60),
+        ]
+        self.abc_table = TableFrame(abc_tab, abc_columns)
+        self.abc_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+        # Cash flow
+        cash_tab = ttk.Frame(notebook)
+        notebook.add(cash_tab, text="Каса")
+        cash_filters = ttk.Frame(cash_tab)
+        cash_filters.pack(fill=tk.X, padx=8, pady=6)
+        ttk.Label(cash_filters, text="Дата з:").pack(side=tk.LEFT)
+        self.cash_from_var = tk.StringVar()
+        ttk.Entry(cash_filters, textvariable=self.cash_from_var, width=10).pack(side=tk.LEFT, padx=2)
+        ttk.Label(cash_filters, text="по:").pack(side=tk.LEFT)
+        self.cash_to_var = tk.StringVar()
+        ttk.Entry(cash_filters, textvariable=self.cash_to_var, width=10).pack(side=tk.LEFT, padx=2)
+        ttk.Label(cash_filters, text="Тип:").pack(side=tk.LEFT, padx=(10, 2))
+        self.cash_type_var = tk.StringVar()
+        self.cash_type_combo = ttk.Combobox(
+            cash_filters,
+            textvariable=self.cash_type_var,
+            values=["", "sale_payment", "purchase_payment", "income", "expense", "transfer"],
+            width=15,
+        )
+        self.cash_type_combo.pack(side=tk.LEFT)
+        ttk.Label(cash_filters, text="Канал:").pack(side=tk.LEFT, padx=(10, 2))
+        self.cash_channel_var = tk.StringVar()
+        ttk.Entry(cash_filters, textvariable=self.cash_channel_var, width=12).pack(side=tk.LEFT, padx=2)
+        ttk.Label(cash_filters, text="Контрагент:").pack(side=tk.LEFT, padx=(10, 2))
+        self.cash_counterparty_var = tk.StringVar()
+        self.cash_counterparty_combo = ttk.Combobox(cash_filters, textvariable=self.cash_counterparty_var, width=25)
+        self.cash_counterparty_combo.pack(side=tk.LEFT)
+        ttk.Button(cash_filters, text="Показати", command=self.refresh_cash_flow_report).pack(side=tk.LEFT, padx=6)
+        cash_columns = [
+            ("date", "Дата", 90),
+            ("type", "Тип", 140),
+            ("amount", "Сума", 100),
+            ("counterparty", "Контрагент", 180),
+            ("channel", "Канал", 120),
+            ("comment", "Коментар", 200),
+        ]
+        self.cash_report_table = TableFrame(cash_tab, cash_columns)
+        self.cash_report_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+        self.refresh_dashboard()
+        self.refresh_sales_analysis()
+        self.refresh_abc_xyz()
+        self.refresh_cash_counterparties()
+        self.refresh_cash_flow_report()
+
+    def refresh_dashboard(self) -> None:
+        metrics = db.dashboard_metrics(
+            self.dashboard_from_var.get().strip() or None, self.dashboard_to_var.get().strip() or None
+        )
+        self.dashboard_table.set_rows(
+            [
+                {"id": 1, "name": "Оборот", "value": f"{metrics['turnover']:.2f}", "extra": "оплачені продажі"},
+                {
+                    "id": 2,
+                    "name": "Валовий прибуток",
+                    "value": f"{metrics['gross_profit']:.2f}",
+                    "extra": "дохід мінус собівартість",
+                },
+                {"id": 3, "name": "Маржа", "value": f"{metrics['margin_pct']:.2f}%", "extra": ""},
+                {"id": 4, "name": "Вартість залишків", "value": f"{metrics['stock_value']:.2f}", "extra": "на зараз"},
+            ]
+        )
+
+    def refresh_sales_analysis(self) -> None:
+        analysis = db.sales_analysis(self.sales_from_var.get().strip() or None, self.sales_to_var.get().strip() or None)
+        self.sales_channels_table.set_rows(
+            [
+                {
+                    "id": idx,
+                    "name": r["name"],
+                    "revenue": f"{r['revenue']:.2f}",
+                    "gross_profit": f"{r['gross_profit']:.2f}",
+                    "qty": f"{r['qty']:.2f}",
+                }
+                for idx, r in enumerate(analysis["channels"], 1)
+            ]
+        )
+        self.sales_categories_table.set_rows(
+            [
+                {
+                    "id": idx,
+                    "name": r["name"],
+                    "revenue": f"{r['revenue']:.2f}",
+                    "gross_profit": f"{r['gross_profit']:.2f}",
+                    "qty": f"{r['qty']:.2f}",
+                }
+                for idx, r in enumerate(analysis["categories"], 1)
+            ]
+        )
+
+    def refresh_abc_xyz(self) -> None:
+        rows = db.abc_xyz_report(self.abc_from_var.get().strip() or None, self.abc_to_var.get().strip() or None)
+        self.abc_table.set_rows(
             [
                 {
                     "id": r["product_id"],
-                    "name": r["product"],
-                    "metric1": f"Дохід: {r['income']:.2f}",
-                    "metric2": f"Собівартість: {r['cogs']:.2f}",
-                    "metric3": f"Валовий прибуток: {r['gross_profit']:.2f}",
+                    "name": r["name"],
+                    "sku": r["sku"],
+                    "category": r["category"],
+                    "revenue": f"{r['revenue']:.2f}",
+                    "abc": r["abc"],
+                    "xyz": r["xyz"],
                 }
                 for r in rows
             ]
         )
 
-    def show_cash_flow(self) -> None:
-        rows = db.cash_flow_summary(self.report_date_from_var.get().strip() or None, self.report_date_to_var.get().strip() or None)
-        self.report_table.set_rows(
+    def refresh_cash_counterparties(self) -> None:
+        counterparts = db.list_counterparties()
+        names = ["Усі"] + [c["name"] for c in counterparts]
+        self.cash_counterparty_combo["values"] = names
+        if not self.cash_counterparty_var.get():
+            self.cash_counterparty_combo.current(0) if names else None
+
+    def refresh_cash_flow_report(self) -> None:
+        cp_name = self.cash_counterparty_var.get().strip()
+        cp_id = None
+        if cp_name and cp_name != "Усі":
+            for c in db.list_counterparties():
+                if c["name"] == cp_name:
+                    cp_id = c["id"]
+                    break
+        rows = db.cash_flow_detailed(
+            self.cash_from_var.get().strip() or None,
+            self.cash_to_var.get().strip() or None,
+            self.cash_type_var.get().strip() or None,
+            self.cash_channel_var.get().strip() or None,
+            cp_id,
+        )
+        self.cash_report_table.set_rows(
             [
                 {
-                    "id": idx,
-                    "name": r["type"],
-                    "metric1": f"Сума: {r['total']:.2f}",
-                    "metric2": "",
-                    "metric3": "",
+                    "id": r["id"],
+                    "date": r["date"],
+                    "type": r["type"],
+                    "amount": f"{r['amount']:.2f}",
+                    "counterparty": r["counterparty"],
+                    "channel": r["channel"],
+                    "comment": r["comment"],
                 }
-                for idx, r in enumerate(rows, 1)
+                for r in rows
             ]
         )
 
@@ -1331,6 +1505,11 @@ class InventoryApp(tk.Tk):
         self.refresh_sales()
         self.refresh_cash()
         self.refresh_stock()
+        self.refresh_cash_counterparties()
+        self.refresh_dashboard()
+        self.refresh_sales_analysis()
+        self.refresh_abc_xyz()
+        self.refresh_cash_flow_report()
 
 
 # Dialogs

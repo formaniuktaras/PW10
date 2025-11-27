@@ -98,6 +98,24 @@ def _enable_undo(widget: tk.Widget) -> None:
         return
 
 
+def _select_all_text(widget: tk.Widget) -> bool:
+    """Select all content for entry-like and text widgets."""
+
+    try:
+        if isinstance(widget, tk.Text):
+            widget.tag_add("sel", "1.0", "end-1c")
+            widget.mark_set("insert", "end-1c")
+            widget.see("insert")
+            return True
+        if hasattr(widget, "selection_range"):
+            widget.selection_range(0, tk.END)
+            widget.icursor(tk.END)
+            return True
+    except tk.TclError:
+        return False
+    return False
+
+
 def bind_common_shortcuts(root: tk.Tk) -> None:
     """Bind copy/paste/select-all/undo shortcuts application-wide."""
 
@@ -105,6 +123,13 @@ def bind_common_shortcuts(root: tk.Tk) -> None:
         widget = event.widget
         if _is_text_input(widget):
             widget.event_generate("<<Copy>>")
+            return "break"
+        return None
+
+    def handle_cut(event: tk.Event) -> str | None:
+        widget = event.widget
+        if _is_text_input(widget):
+            widget.event_generate("<<Cut>>")
             return "break"
         return None
 
@@ -117,13 +142,8 @@ def bind_common_shortcuts(root: tk.Tk) -> None:
 
     def handle_select_all(event: tk.Event) -> str | None:
         widget = event.widget
-        if _is_text_input(widget):
-            try:
-                widget.selection_range(0, tk.END)
-                widget.icursor(tk.END)
-                return "break"
-            except tk.TclError:
-                return None
+        if _is_text_input(widget) and _select_all_text(widget):
+            return "break"
         return None
 
     def handle_undo(event: tk.Event) -> str | None:
@@ -134,15 +154,102 @@ def bind_common_shortcuts(root: tk.Tk) -> None:
             return "break"
         return None
 
+    def handle_redo(event: tk.Event) -> str | None:
+        widget = event.widget
+        if _is_text_input(widget):
+            _enable_undo(widget)
+            widget.event_generate("<<Redo>>")
+            return "break"
+        return None
+
+    def show_context_menu(event: tk.Event) -> str | None:
+        widget = event.widget
+        if not _is_text_input(widget):
+            return None
+
+        def popup(x: int, y: int) -> None:
+            menu.tk_popup(x, y)
+            menu.grab_release()
+
+        popup(event.x_root, event.y_root)
+        return "break"
+
+    def show_context_menu_keyboard(event: tk.Event) -> str | None:
+        widget = root.focus_get()
+        if not widget or not _is_text_input(widget):
+            return None
+
+        x = widget.winfo_rootx() + widget.winfo_width() // 2
+        y = widget.winfo_rooty() + widget.winfo_height() // 2
+        menu.tk_popup(x, y)
+        menu.grab_release()
+        return "break"
+
+    menu = tk.Menu(root, tearoff=0)
+
+    def focused_widget() -> tk.Widget | None:
+        widget = root.focus_get()
+        return widget if widget and _is_text_input(widget) else None
+
+    def menu_cut() -> None:
+        widget = focused_widget()
+        if widget:
+            widget.event_generate("<<Cut>>")
+
+    def menu_copy() -> None:
+        widget = focused_widget()
+        if widget:
+            widget.event_generate("<<Copy>>")
+
+    def menu_paste() -> None:
+        widget = focused_widget()
+        if widget:
+            widget.event_generate("<<Paste>>")
+
+    def menu_undo() -> None:
+        widget = focused_widget()
+        if widget:
+            _enable_undo(widget)
+            widget.event_generate("<<Undo>>")
+
+    def menu_redo() -> None:
+        widget = focused_widget()
+        if widget:
+            _enable_undo(widget)
+            widget.event_generate("<<Redo>>")
+
+    def menu_select_all() -> None:
+        widget = focused_widget()
+        if widget:
+            _select_all_text(widget)
+
+    menu.add_command(label="Вирізати", command=menu_cut, accelerator="Ctrl+X")
+    menu.add_command(label="Копіювати", command=menu_copy, accelerator="Ctrl+C")
+    menu.add_command(label="Вставити", command=menu_paste, accelerator="Ctrl+V")
+    menu.add_separator()
+    menu.add_command(label="Скасувати", command=menu_undo, accelerator="Ctrl+Z")
+    menu.add_command(label="Повернути", command=menu_redo, accelerator="Ctrl+Y")
+    menu.add_separator()
+    menu.add_command(label="Виділити все", command=menu_select_all, accelerator="Ctrl+A")
+
     for sequence, handler in (
         ("<Control-c>", handle_copy),
         ("<Control-C>", handle_copy),
+        ("<Control-Insert>", handle_copy),
         ("<Control-v>", handle_paste),
         ("<Control-V>", handle_paste),
+        ("<Shift-Insert>", handle_paste),
+        ("<Control-x>", handle_cut),
+        ("<Control-X>", handle_cut),
+        ("<Shift-Delete>", handle_cut),
         ("<Control-a>", handle_select_all),
         ("<Control-A>", handle_select_all),
         ("<Control-z>", handle_undo),
         ("<Control-Z>", handle_undo),
+        ("<Control-y>", handle_redo),
+        ("<Control-Y>", handle_redo),
+        ("<Button-3>", show_context_menu),
+        ("<Shift-F10>", show_context_menu_keyboard),
     ):
         root.bind_all(sequence, handler, add="+")
 

@@ -1538,6 +1538,9 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
     dlg.grab_set()
     editable = not doc or doc["status"] == "draft"
 
+    if doc and isinstance(doc, sqlite3.Row):
+        doc = dict(doc)
+
     dlg.columnconfigure(0, weight=1)
     dlg.rowconfigure(0, weight=1)
     content = ttk.Frame(dlg, padding=10)

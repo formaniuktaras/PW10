@@ -1115,7 +1115,7 @@ class InventoryApp(tk.Tk):
                     "rate": f"{r['exchange_rate']:.4f}",
                     "total_doc": f"{r['total_amount_doc']:.2f}",
                     "total_base": f"{r['total_amount_base']:.2f}",
-                    "status": "Чернетка" if r["status"] == "draft" else "Проведений",
+                    "status": "Чернетка" if (r["status"] or "draft").strip() == "draft" else "Проведений",
                     "comment": r["comment"] or "",
                 }
                 for r in rows
@@ -1198,7 +1198,11 @@ class InventoryApp(tk.Tk):
         if not doc_id:
             return
         doc = db.get_extra_cost_document(doc_id)
-        if not doc or doc["status"] != "draft":
+        status = (doc["status"] or "draft").strip() if doc else None
+        if not doc:
+            show_error("Супутні витрати", "Документ не знайдено")
+            return
+        if status != "draft":
             show_error("Супутні витрати", "Проводити можна лише чернетку")
             return
         counterparties = db.list_counterparties()

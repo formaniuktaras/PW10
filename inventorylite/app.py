@@ -505,12 +505,12 @@ class InventoryApp(tk.Tk):
             categories,
             "Редагувати товар",
             (
-                p["sku"],
-                p["name"],
-                p["brand_id"],
-                p["category_id"],
-                p["unit"],
-                bool(p["is_active"]),
+                product["sku"],
+                product["name"],
+                product["brand_id"],
+                product["category_id"],
+                product["unit"],
+                bool(product["is_active"]),
                 db.get_product_additional_categories(product_id),
             ),
         )
@@ -2438,7 +2438,7 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
                 messagebox.showerror("Товари", "Оберіть бренд та категорію")
                 return
             try:
-                new_id = db.add_product(sku, name, brand_id, category_id, unit, True, [])
+                new_id = db.add_product(sku, name, brand_id, category_id, unit, True)
             except Exception as exc:
                 messagebox.showerror("Товари", f"Не вдалося створити товар: {exc}")
                 return

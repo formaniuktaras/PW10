@@ -1814,23 +1814,50 @@ def product_prompt(brands, categories, title: str, initial=None):
 
     ttk.Label(dlg, text="Головна категорія").grid(row=3, column=0, padx=6, pady=4, sticky="w")
     category_var = tk.StringVar()
-    category_combo = ttk.Combobox(dlg, textvariable=category_var, state="readonly", values=[c["label"] for c in categories])
+    category_combo = ttk.Combobox(dlg, textvariable=category_var, values=[c["label"] for c in categories])
     category_combo.grid(row=3, column=1, padx=6, pady=4, sticky="ew")
+
+    def refresh_category_options(*_args):
+        search = category_var.get().strip().lower()
+        filtered = [c["label"] for c in categories if search in c["label"].lower()]
+        category_combo["values"] = filtered or [c["label"] for c in categories]
+
+    category_combo.bind("<KeyRelease>", refresh_category_options)
 
     ttk.Label(dlg, text="Додаткові категорії").grid(row=4, column=0, padx=6, pady=4, sticky="nw")
     extras_frame = ttk.Frame(dlg)
     extras_frame.grid(row=4, column=1, padx=6, pady=4, sticky="nsew")
     extras_frame.columnconfigure(0, weight=1)
-    extras_frame.rowconfigure(0, weight=1)
+    extras_frame.rowconfigure(1, weight=1)
+    extras_search_var = tk.StringVar()
+    ttk.Entry(extras_frame, textvariable=extras_search_var).grid(
+        row=0, column=0, columnspan=2, padx=(0, 8), pady=(0, 4), sticky="ew"
+    )
     extras_box = tk.Listbox(
         extras_frame, selectmode=tk.MULTIPLE, height=min(10, max(6, len(categories))), exportselection=False
     )
     extras_scroll = ttk.Scrollbar(extras_frame, orient="vertical", command=extras_box.yview)
     extras_box.configure(yscrollcommand=extras_scroll.set)
-    extras_box.grid(row=0, column=0, sticky="nsew")
-    extras_scroll.grid(row=0, column=1, sticky="ns")
-    for item in categories:
-        extras_box.insert(tk.END, item["label"])
+    extras_box.grid(row=1, column=0, sticky="nsew")
+    extras_scroll.grid(row=1, column=1, sticky="ns")
+
+    filtered_extra_categories = list(categories)
+    initial_extra_ids = set(initial[6] if initial and len(initial) > 6 else [])
+
+    def refresh_extra_list(*_args):
+        selected_labels = {extras_box.get(i) for i in extras_box.curselection()}
+        search = extras_search_var.get().strip().lower()
+        extras_box.delete(0, tk.END)
+        filtered_extra_categories.clear()
+        filtered_extra_categories.extend([c for c in categories if search in c["label"].lower()])
+        for idx, cat in enumerate(filtered_extra_categories):
+            extras_box.insert(tk.END, cat["label"])
+            if cat["label"] in selected_labels or cat["id"] in initial_extra_ids:
+                extras_box.selection_set(idx)
+        initial_extra_ids.difference_update({c["id"] for c in filtered_extra_categories})
+
+    extras_search_var.trace_add("write", refresh_extra_list)
+    refresh_extra_list()
 
     dlg.rowconfigure(4, weight=1)
 
@@ -1843,16 +1870,18 @@ def product_prompt(brands, categories, title: str, initial=None):
 
     if initial:
         brand_combo.current(next((i for i, b in enumerate(brands) if b["id"] == initial[2]), 0))
-        category_combo.current(next((i for i, c in enumerate(categories) if c["id"] == initial[3]), 0))
+        category_var.set(next((c["label"] for c in categories if c["id"] == initial[3]), ""))
+        refresh_category_options()
         extras = set(initial[6] if len(initial) > 6 else [])
-        for idx, cat in enumerate(categories):
+        for idx, cat in enumerate(filtered_extra_categories):
             if cat["id"] in extras:
                 extras_box.selection_set(idx)
     else:
         if brands:
             brand_combo.current(0)
         if categories:
-            category_combo.current(0)
+            category_var.set(categories[0]["label"])
+            refresh_category_options()
 
     result = None
 
@@ -1868,16 +1897,22 @@ def product_prompt(brands, categories, title: str, initial=None):
             return
         try:
             brand_id = brands[brand_combo.current()]["id"]
-            category_id = categories[category_combo.current()]["id"]
         except IndexError:
             messagebox.showerror("Валідація", "Оберіть бренд і категорію")
             return
-        selected = [categories[i]["id"] for i in extras_box.curselection() if i < len(categories)]
+        selected_label = category_var.get().strip()
+        matched_category = next((c for c in categories if c["label"].lower() == selected_label.lower()), None)
+        if not matched_category:
+            matched_category = next((c for c in categories if selected_label.lower() in c["label"].lower()), None)
+        if not matched_category:
+            messagebox.showerror("Валідація", "Оберіть бренд і категорію")
+            return
+        selected = [filtered_extra_categories[i]["id"] for i in extras_box.curselection() if i < len(filtered_extra_categories)]
         result = (
             sku,
             name,
             brand_id,
-            category_id,
+            matched_category["id"],
             unit_var.get().strip() or "pcs",
             bool(is_active_var.get()),
             selected,

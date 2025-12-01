@@ -668,7 +668,7 @@ def list_products(
     base_query = (
         "SELECT p.id, p.sku, p.name, p.unit, p.is_active, b.name AS brand, c.name AS category, "
         "p.brand_id, p.category_id, "
-        "GROUP_CONCAT(DISTINCT c2.name, ', ') AS extra_categories "
+        "REPLACE(GROUP_CONCAT(DISTINCT c2.name), ',', ', ') AS extra_categories "
         "FROM Products p "
         "JOIN Brands b ON p.brand_id = b.id "
         "JOIN Categories c ON p.category_id = c.id "

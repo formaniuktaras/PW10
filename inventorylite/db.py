@@ -42,7 +42,14 @@ def init_db() -> None:
 
             CREATE TABLE IF NOT EXISTS Categories (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT UNIQUE NOT NULL
+                name TEXT UNIQUE NOT NULL,
+                parent_id INTEGER REFERENCES Categories(id) ON DELETE SET NULL,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                is_service INTEGER NOT NULL DEFAULT 0,
+                is_hidden INTEGER NOT NULL DEFAULT 0,
+                icon TEXT,
+                color TEXT,
+                typical_attributes TEXT
             );
 
             CREATE TABLE IF NOT EXISTS Warehouses (
@@ -83,6 +90,14 @@ def init_db() -> None:
                 category_id INTEGER NOT NULL,
                 is_active INTEGER NOT NULL DEFAULT 1,
                 FOREIGN KEY (brand_id) REFERENCES Brands(id) ON DELETE CASCADE,
+                FOREIGN KEY (category_id) REFERENCES Categories(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS AdditionalProductCategories (
+                product_id INTEGER NOT NULL,
+                category_id INTEGER NOT NULL,
+                PRIMARY KEY (product_id, category_id),
+                FOREIGN KEY (product_id) REFERENCES Products(id) ON DELETE CASCADE,
                 FOREIGN KEY (category_id) REFERENCES Categories(id) ON DELETE CASCADE
             );
 
@@ -217,6 +232,14 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "Products", "unit", "TEXT NOT NULL DEFAULT 'pcs'")
     _ensure_column(conn, "Products", "is_active", "INTEGER NOT NULL DEFAULT 1")
 
+    _ensure_column(conn, "Categories", "parent_id", "INTEGER REFERENCES Categories(id) ON DELETE SET NULL")
+    _ensure_column(conn, "Categories", "sort_order", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "Categories", "is_service", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "Categories", "is_hidden", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "Categories", "icon", "TEXT")
+    _ensure_column(conn, "Categories", "color", "TEXT")
+    _ensure_column(conn, "Categories", "typical_attributes", "TEXT")
+
     _ensure_column(conn, "Counterparties", "type", "TEXT NOT NULL DEFAULT 'other'")
     _ensure_column(conn, "Counterparties", "phone", "TEXT")
     _ensure_column(conn, "Counterparties", "email", "TEXT")
@@ -238,6 +261,18 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "PurchaseLines", "amount", "REAL NOT NULL DEFAULT 0")
     _ensure_column(conn, "PurchaseLines", "amount_doc", "REAL NOT NULL DEFAULT 0")
     _ensure_column(conn, "PurchaseLines", "purchase_price_base", "REAL NOT NULL DEFAULT 0")
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS AdditionalProductCategories (
+            product_id INTEGER NOT NULL,
+            category_id INTEGER NOT NULL,
+            PRIMARY KEY (product_id, category_id),
+            FOREIGN KEY (product_id) REFERENCES Products(id) ON DELETE CASCADE,
+            FOREIGN KEY (category_id) REFERENCES Categories(id) ON DELETE CASCADE
+        )
+        """
+    )
 
     _ensure_column(conn, "SalesDocuments", "channel", "TEXT")
     _ensure_column(conn, "SalesDocuments", "status", "TEXT NOT NULL DEFAULT 'draft'")
@@ -365,69 +400,330 @@ def delete_brand(brand_id: int) -> None:
         conn.commit()
 
 
-# Category CRUD
+# Category CRUD with hierarchy and flags
 
-def list_categories() -> List[sqlite3.Row]:
+def _next_sort_order(conn: sqlite3.Connection, parent_id: Optional[int]) -> int:
+    if parent_id is None:
+        row = conn.execute("SELECT IFNULL(MAX(sort_order),0) FROM Categories WHERE parent_id IS NULL").fetchone()
+    else:
+        row = conn.execute("SELECT IFNULL(MAX(sort_order),0) FROM Categories WHERE parent_id=?", (parent_id,)).fetchone()
+    return int(row[0]) + 1
+
+
+def _category_tree_map(include_hidden: bool = True) -> Dict[Optional[int], List[sqlite3.Row]]:
     with get_connection() as conn:
-        return list(conn.execute("SELECT id, name FROM Categories ORDER BY name"))
+        rows = conn.execute(
+            "SELECT id, name, parent_id, sort_order, is_service, is_hidden, icon, color, typical_attributes "
+            "FROM Categories "
+            + ("" if include_hidden else "WHERE is_hidden=0 ")
+            + "ORDER BY sort_order, name"
+        ).fetchall()
+    tree: Dict[Optional[int], List[sqlite3.Row]] = {}
+    for row in rows:
+        tree.setdefault(row["parent_id"], []).append(row)
+    return tree
 
 
-def add_category(name: str) -> int:
+def _collect_descendants(tree: Dict[Optional[int], List[sqlite3.Row]], root_id: int) -> List[int]:
+    result: List[int] = []
+    for child in tree.get(root_id, []):
+        result.append(child["id"])
+        result.extend(_collect_descendants(tree, child["id"]))
+    return result
+
+
+def list_categories_tree(include_hidden: bool = True) -> List[dict]:
+    tree = _category_tree_map(include_hidden)
+    result: List[dict] = []
+
+    def walk(parent_id: Optional[int], depth: int, parent_node: Optional[int]) -> None:
+        for row in tree.get(parent_id, []):
+            result.append(
+                {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "parent_id": row["parent_id"],
+                    "sort_order": row["sort_order"],
+                    "is_service": bool(row["is_service"]),
+                    "is_hidden": bool(row["is_hidden"]),
+                    "icon": row["icon"],
+                    "color": row["color"],
+                    "typical_attributes": row["typical_attributes"],
+                    "depth": depth,
+                }
+            )
+            walk(row["id"], depth + 1, row["parent_id"])
+
+    walk(None, 0, None)
+    return result
+
+
+def category_tree_with_counts(include_hidden: bool = True) -> List[dict]:
+    base = list_categories_tree(include_hidden)
     with get_connection() as conn:
-        cur = conn.execute("INSERT INTO Categories (name) VALUES (?)", (name.strip(),))
+        main_counts = {
+            row["category_id"]: row["cnt"]
+            for row in conn.execute(
+                "SELECT category_id, COUNT(*) as cnt FROM Products GROUP BY category_id"
+            ).fetchall()
+        }
+        extra_counts = {
+            row["category_id"]: row["cnt"]
+            for row in conn.execute(
+                "SELECT category_id, COUNT(*) as cnt FROM AdditionalProductCategories GROUP BY category_id"
+            ).fetchall()
+        }
+        child_counts = {
+            row["parent_id"]: row["cnt"]
+            for row in conn.execute(
+                "SELECT parent_id, COUNT(*) as cnt FROM Categories GROUP BY parent_id"
+            ).fetchall()
+        }
+    for item in base:
+        cid = item["id"]
+        item["products"] = int(main_counts.get(cid, 0) + extra_counts.get(cid, 0))
+        item["children_count"] = int(child_counts.get(cid, 0))
+    return base
+
+
+def category_usage(category_id: int) -> dict:
+    with get_connection() as conn:
+        product_main = conn.execute(
+            "SELECT COUNT(*) FROM Products WHERE category_id=?", (category_id,)
+        ).fetchone()[0]
+        product_extra = conn.execute(
+            "SELECT COUNT(*) FROM AdditionalProductCategories WHERE category_id=?", (category_id,)
+        ).fetchone()[0]
+        children = conn.execute(
+            "SELECT COUNT(*) FROM Categories WHERE parent_id=?", (category_id,)
+        ).fetchone()[0]
+        is_service = conn.execute(
+            "SELECT IFNULL(is_service,0) FROM Categories WHERE id=?", (category_id,)
+        ).fetchone()
+    return {
+        "main_products": int(product_main),
+        "extra_products": int(product_extra),
+        "children": int(children),
+        "is_service": bool(is_service[0]) if is_service else False,
+    }
+
+
+def add_category(
+    name: str,
+    parent_id: Optional[int] = None,
+    sort_order: Optional[int] = None,
+    is_service: bool = False,
+    is_hidden: bool = False,
+    icon: Optional[str] = None,
+    color: Optional[str] = None,
+    typical_attributes: str | None = None,
+) -> int:
+    with get_connection() as conn:
+        order = sort_order if sort_order is not None else _next_sort_order(conn, parent_id)
+        cur = conn.execute(
+            "INSERT INTO Categories (name, parent_id, sort_order, is_service, is_hidden, icon, color, typical_attributes) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                name.strip(),
+                parent_id,
+                order,
+                1 if is_service else 0,
+                1 if is_hidden else 0,
+                icon.strip() if icon else None,
+                color.strip() if color else None,
+                (typical_attributes or "").strip() or None,
+            ),
+        )
         conn.commit()
         return cur.lastrowid
 
 
-def update_category(category_id: int, name: str) -> None:
+def update_category(
+    category_id: int,
+    name: str,
+    parent_id: Optional[int] = None,
+    sort_order: Optional[int] = None,
+    is_service: bool = False,
+    is_hidden: bool = False,
+    icon: Optional[str] = None,
+    color: Optional[str] = None,
+    typical_attributes: str | None = None,
+) -> None:
+    tree = _category_tree_map()
+    forbidden_parents = {category_id, *set(_collect_descendants(tree, category_id))}
+    if parent_id in forbidden_parents:
+        raise ValueError("Неможливо зробити нащадка батьком категорії")
     with get_connection() as conn:
-        conn.execute("UPDATE Categories SET name=? WHERE id=?", (name.strip(), category_id))
+        order = sort_order if sort_order is not None else _next_sort_order(conn, parent_id)
+        conn.execute(
+            "UPDATE Categories SET name=?, parent_id=?, sort_order=?, is_service=?, is_hidden=?, icon=?, color=?, typical_attributes=? "
+            "WHERE id=?",
+            (
+                name.strip(),
+                parent_id,
+                order,
+                1 if is_service else 0,
+                1 if is_hidden else 0,
+                icon.strip() if icon else None,
+                color.strip() if color else None,
+                (typical_attributes or "").strip() or None,
+                category_id,
+            ),
+        )
         conn.commit()
 
 
-def delete_category(category_id: int) -> None:
+def bump_category_order(category_id: int, direction: str) -> None:
     with get_connection() as conn:
-        conn.execute("DELETE FROM Categories WHERE id=?", (category_id,))
+        row = conn.execute(
+            "SELECT parent_id, sort_order FROM Categories WHERE id=?", (category_id,)
+        ).fetchone()
+        if not row:
+            return
+        parent_id, current_order = row["parent_id"], row["sort_order"]
+        comparator = ">" if direction == "down" else "<"
+        ordering = "ASC" if direction == "down" else "DESC"
+        if parent_id is None:
+            swap = conn.execute(
+                f"SELECT id, sort_order FROM Categories WHERE parent_id IS NULL AND sort_order {comparator} ? "
+                f"ORDER BY sort_order {ordering} LIMIT 1",
+                (current_order,),
+            ).fetchone()
+        else:
+            swap = conn.execute(
+                f"SELECT id, sort_order FROM Categories WHERE parent_id=? AND sort_order {comparator} ? "
+                f"ORDER BY sort_order {ordering} LIMIT 1",
+                (parent_id, current_order),
+            ).fetchone()
+        if not swap:
+            return
+        conn.execute(
+            "UPDATE Categories SET sort_order=? WHERE id=?",
+            (swap["sort_order"], category_id),
+        )
+        conn.execute(
+            "UPDATE Categories SET sort_order=? WHERE id=?",
+            (current_order, swap["id"]),
+        )
         conn.commit()
+
+
+def merge_or_delete_category(source_id: int, target_id: Optional[int] = None) -> None:
+    usage = category_usage(source_id)
+    if usage["is_service"]:
+        raise ValueError("Службові категорії не можна видаляти")
+    if target_id and target_id in descendant_categories(source_id, include_self=True):
+        raise ValueError("Цільова категорія не може бути нащадком поточної")
+    if target_id is None and (usage["children"] or usage["main_products"] or usage["extra_products"]):
+        raise ValueError("Категорія містить товари або підкатегорії")
+    with get_connection() as conn:
+        if target_id:
+            conn.execute("UPDATE Products SET category_id=? WHERE category_id=?", (target_id, source_id))
+            conn.execute(
+                "INSERT OR IGNORE INTO AdditionalProductCategories (product_id, category_id) "
+                "SELECT product_id, ? FROM AdditionalProductCategories WHERE category_id=?",
+                (target_id, source_id),
+            )
+            conn.execute(
+                "DELETE FROM AdditionalProductCategories WHERE category_id=?",
+                (source_id,),
+            )
+            conn.execute(
+                "UPDATE Categories SET parent_id=? WHERE parent_id=?",
+                (target_id, source_id),
+            )
+        conn.execute("DELETE FROM Categories WHERE id=?", (source_id,))
+        conn.commit()
+
+
+def descendant_categories(category_id: int, include_self: bool = False, include_hidden: bool = True) -> List[int]:
+    tree = _category_tree_map(include_hidden)
+    ids = _collect_descendants(tree, category_id)
+    if include_self:
+        ids.insert(0, category_id)
+    return ids
 
 
 # Product CRUD
 
-def list_products(search: Optional[str] = None) -> List[sqlite3.Row]:
+def list_products(
+    search: Optional[str] = None, category_id: Optional[int] = None, include_subtree: bool = False
+) -> List[sqlite3.Row]:
     query = (
-        "SELECT p.id, p.sku, p.name, p.unit, p.is_active, b.name AS brand, c.name AS category, p.brand_id, p.category_id "
+        "SELECT DISTINCT p.id, p.sku, p.name, p.unit, p.is_active, b.name AS brand, c.name AS category, p.brand_id, p.category_id "
         "FROM Products p "
         "JOIN Brands b ON p.brand_id = b.id "
         "JOIN Categories c ON p.category_id = c.id "
-        "ORDER BY p.name"
+        "LEFT JOIN AdditionalProductCategories apc ON apc.product_id = p.id "
     )
-    params: Tuple[str, ...] = ()
+    clauses: List[str] = []
+    params: List[object] = []
     if search:
         term = f"%{search.lower()}%"
-        query = query.replace("ORDER BY p.name", "WHERE lower(p.sku) LIKE ? OR lower(p.name) LIKE ? ORDER BY p.name")
-        params = (term, term)
+        clauses.append("(lower(p.sku) LIKE ? OR lower(p.name) LIKE ?)")
+        params.extend([term, term])
+    if category_id:
+        ids = [category_id]
+        if include_subtree:
+            ids.extend(descendant_categories(category_id, include_hidden=False))
+        placeholders = ",".join("?" for _ in ids)
+        clauses.append(
+            f"(p.category_id IN ({placeholders}) OR apc.category_id IN ({placeholders}))"
+        )
+        params.extend(ids + ids)
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    query += " ORDER BY p.name"
     with get_connection() as conn:
         return list(conn.execute(query, params))
 
 
-def add_product(sku: str, name: str, brand_id: int, category_id: int, unit: str = "pcs", is_active: bool = True) -> int:
+def add_product(
+    sku: str,
+    name: str,
+    brand_id: int,
+    category_id: int,
+    unit: str = "pcs",
+    is_active: bool = True,
+    extra_categories: Optional[Sequence[int]] = None,
+) -> int:
+    extras = list(dict.fromkeys(extra_categories or []))
     with get_connection() as conn:
         cur = conn.execute(
             "INSERT INTO Products (sku, name, brand_id, category_id, unit, is_active) VALUES (?, ?, ?, ?, ?, ?)",
             (sku.strip(), name.strip(), brand_id, category_id, unit.strip() or "pcs", 1 if is_active else 0),
         )
+        for cid in extras:
+            conn.execute(
+                "INSERT OR IGNORE INTO AdditionalProductCategories (product_id, category_id) VALUES (?, ?)",
+                (cur.lastrowid, cid),
+            )
         conn.commit()
         return cur.lastrowid
 
 
 def update_product(
-    product_id: int, sku: str, name: str, brand_id: int, category_id: int, unit: str = "pcs", is_active: bool = True
+    product_id: int,
+    sku: str,
+    name: str,
+    brand_id: int,
+    category_id: int,
+    unit: str = "pcs",
+    is_active: bool = True,
+    extra_categories: Optional[Sequence[int]] = None,
 ) -> None:
+    extras = list(dict.fromkeys(extra_categories or []))
     with get_connection() as conn:
         conn.execute(
             "UPDATE Products SET sku=?, name=?, brand_id=?, category_id=?, unit=?, is_active=? WHERE id=?",
             (sku.strip(), name.strip(), brand_id, category_id, unit.strip() or "pcs", 1 if is_active else 0, product_id),
         )
+        conn.execute("DELETE FROM AdditionalProductCategories WHERE product_id=?", (product_id,))
+        for cid in extras:
+            conn.execute(
+                "INSERT OR IGNORE INTO AdditionalProductCategories (product_id, category_id) VALUES (?, ?)",
+                (product_id, cid),
+            )
         conn.commit()
 
 
@@ -435,6 +731,29 @@ def delete_product(product_id: int) -> None:
     with get_connection() as conn:
         conn.execute("DELETE FROM Products WHERE id=?", (product_id,))
         conn.commit()
+
+
+def get_product(product_id: int) -> Optional[dict]:
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT id, sku, name, brand_id, category_id, unit, is_active FROM Products WHERE id=?",
+            (product_id,),
+        ).fetchone()
+        if not row:
+            return None
+        extra = [r[0] for r in conn.execute(
+            "SELECT category_id FROM AdditionalProductCategories WHERE product_id=?", (product_id,)
+        ).fetchall()]
+    return {
+        "id": row["id"],
+        "sku": row["sku"],
+        "name": row["name"],
+        "brand_id": row["brand_id"],
+        "category_id": row["category_id"],
+        "unit": row["unit"],
+        "is_active": bool(row["is_active"]),
+        "extra_categories": extra,
+    }
 
 
 # Warehouses and channels

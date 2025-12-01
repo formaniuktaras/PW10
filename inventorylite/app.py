@@ -16,6 +16,7 @@ import sys
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import sqlite3
+from typing import Optional
 
 import db
 from utils import (
@@ -224,73 +225,61 @@ class InventoryApp(tk.Tk):
 
     # Categories
     def create_categories_tab(self) -> None:
-        columns = ("products", "service", "hidden")
+        top = ttk.Frame(self.categories_frame)
+        top.pack(fill=tk.X, padx=8, pady=4)
+        ttk.Label(top, text="Пошук").pack(side=tk.LEFT)
+        self.category_search_var = tk.StringVar()
+        ttk.Entry(top, textvariable=self.category_search_var, width=30).pack(side=tk.LEFT, padx=4)
+        ttk.Button(top, text="Знайти", command=self.refresh_categories).pack(side=tk.LEFT)
+
+        btns = ttk.Frame(self.categories_frame)
+        btns.pack(fill=tk.X, padx=8)
+        ttk.Button(btns, text="Коренева", command=lambda: self.add_category(parent_id=None)).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Підкатегорія", command=lambda: self.add_category(parent_id=self.selected_category_id())).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Перейменувати", command=self.edit_category).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Перемістити", command=self.move_category_ui).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Вище", command=lambda: self.bump_category(-1)).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Нижче", command=lambda: self.bump_category(1)).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Службова/Прихована", command=self.toggle_category_flags).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Видалити/Злити", command=self.delete_category).pack(side=tk.LEFT, padx=4)
+
+        columns = ("products", "flags")
         self.category_tree = ttk.Treeview(
             self.categories_frame,
             columns=columns,
             show="tree headings",
             selectmode="browse",
         )
+        self.category_tree.heading("#0", text="Категорія")
         self.category_tree.heading("products", text="Товарів")
-        self.category_tree.heading("service", text="Службова")
-        self.category_tree.heading("hidden", text="Прихована")
         self.category_tree.column("products", width=90, anchor="center")
-        self.category_tree.column("service", width=100, anchor="center")
-        self.category_tree.column("hidden", width=100, anchor="center")
-        yscroll = ttk.Scrollbar(self.categories_frame, orient="vertical", command=self.category_tree.yview)
-        self.category_tree.configure(yscrollcommand=yscroll.set)
-        self.category_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=8, pady=8)
-        yscroll.pack(side=tk.LEFT, fill=tk.Y)
+        self.category_tree.heading("flags", text="Статус")
+        self.category_tree.column("flags", width=160, anchor="w")
+        self.category_tree.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
         self.category_tree.bind("<Double-1>", lambda e: self.edit_category())
-
-        menu = tk.Menu(self.categories_frame, tearoff=0)
-        menu.add_command(label="Створити підкатегорію", command=lambda: self.add_category(as_child=True))
-        menu.add_command(label="Змінити", command=self.edit_category)
-        menu.add_command(label="Пересунути вище", command=lambda: self.bump_category("up"))
-        menu.add_command(label="Пересунути нижче", command=lambda: self.bump_category("down"))
-        menu.add_separator()
-        menu.add_command(label="Видалити/злити", command=self.delete_category)
-
-        def show_menu(event: tk.Event) -> None:
-            row_id = self.category_tree.identify_row(event.y)
-            if row_id:
-                self.category_tree.selection_set(row_id)
-                try:
-                    menu.tk_popup(event.x_root, event.y_root)
-                finally:
-                    menu.grab_release()
-
-        self.category_tree.bind("<Button-3>", show_menu)
-        self.category_menu = menu
-
-        btns = ttk.Frame(self.categories_frame)
-        btns.pack(side=tk.LEFT, pady=8)
-        ttk.Button(btns, text="Коренева", command=self.add_category).pack(fill=tk.X, padx=4, pady=2)
-        ttk.Button(btns, text="Підкатегорія", command=lambda: self.add_category(as_child=True)).pack(
-            fill=tk.X, padx=4, pady=2
+        self.category_tree.bind(
+            "<Button-3>",
+            lambda e: self.category_tree.event_generate("<<TreeviewSelect>>") or self.category_tree.tk.call(
+                self.category_tree, "identify", "row", e.y
+            ),
         )
-        ttk.Button(btns, text="Змінити", command=self.edit_category).pack(fill=tk.X, padx=4, pady=2)
-        ttk.Button(btns, text="Вище", command=lambda: self.bump_category("up")).pack(fill=tk.X, padx=4, pady=2)
-        ttk.Button(btns, text="Нижче", command=lambda: self.bump_category("down")).pack(fill=tk.X, padx=4, pady=2)
-        ttk.Button(btns, text="Видалити/злити", command=self.delete_category).pack(fill=tk.X, padx=4, pady=2)
 
-    def selected_category_id(self) -> int | None:
-        selected = self.category_tree.selection()
-        if not selected:
+    def selected_category_id(self) -> Optional[int]:
+        sel = self.category_tree.selection()
+        if not sel:
             return None
         try:
-            return int(selected[0])
+            return int(sel[0])
         except ValueError:
             return None
 
-    def add_category(self, as_child: bool = False) -> None:
-        parent_id = self.selected_category_id() if as_child else None
-        categories = db.list_categories_tree()
-        data = category_prompt(categories, "Нова категорія", parent_id=parent_id)
-        if not data:
+    def add_category(self, parent_id: Optional[int]) -> None:
+        values = category_prompt("Нова категорія", None)
+        if not values:
             return
         try:
-            db.add_category(**data)
+            name, color, icon, attrs, is_service, is_hidden = values
+            db.add_category(name, parent_id, color, icon, attrs, is_service, is_hidden)
             self.refresh_categories()
         except sqlite3.IntegrityError:
             show_error("Категорії", "Категорія з такою назвою вже існує.")
@@ -303,13 +292,33 @@ class InventoryApp(tk.Tk):
         if not category_id:
             show_error("Категорії", "Оберіть категорію для редагування.")
             return
-        categories = db.list_categories_tree()
-        current = next((c for c in categories if c["id"] == category_id), None)
-        data = category_prompt(categories, "Редагувати категорію", current)
-        if not data:
+        current = self.categories_index.get(category_id)
+        values = category_prompt(
+            "Редагувати категорію",
+            (
+                current.get("name", "") if current else "",
+                current.get("color") if current else "",
+                current.get("icon") if current else "",
+                current.get("typical_attributes") if current else "",
+                bool(current.get("is_service")) if current else False,
+                bool(current.get("is_hidden")) if current else False,
+            ),
+        )
+        if not values:
             return
         try:
-            db.update_category(category_id, **data)
+            name, color, icon, attrs, is_service, is_hidden = values
+            db.update_category(
+                category_id,
+                name,
+                parent_id=current.get("parent_id") if current else None,
+                color=color,
+                icon=icon,
+                typical_attributes=attrs,
+                is_service=is_service,
+                is_hidden=is_hidden,
+                sort_order=current.get("sort_order") if current else None,
+            )
             self.refresh_categories()
             self.refresh_products()
         except sqlite3.IntegrityError:
@@ -326,31 +335,88 @@ class InventoryApp(tk.Tk):
         db.bump_category_order(category_id, direction)
         self.refresh_categories()
 
+    def move_category_ui(self) -> None:
+        category_id = self.selected_category_id()
+        if not category_id:
+            show_error("Категорії", "Оберіть категорію для переміщення.")
+            return
+        exclude = {category_id}
+        exclude.update(db.get_category_descendants(category_id))
+        options = [(None, "(Корінь)")]
+        for cat in self.flatten_categories():
+            if cat["id"] in exclude:
+                continue
+            options.append((cat["id"], cat["label"]))
+        choice = select_category_dialog("Новий батько", options)
+        if choice is None:
+            return
+        try:
+            db.move_category(category_id, choice)
+            self.refresh_categories()
+            self.refresh_products()
+        except Exception:
+            logging.exception("Move category error")
+            show_error("Категорії", "Не вдалося перемістити категорію.")
+
+    def bump_category(self, delta: int) -> None:
+        category_id = self.selected_category_id()
+        if not category_id:
+            show_error("Категорії", "Оберіть категорію для зміни порядку.")
+            return
+        db.bump_category_order(category_id, delta)
+        self.refresh_categories()
+
+    def toggle_category_flags(self) -> None:
+        category_id = self.selected_category_id()
+        if not category_id:
+            show_error("Категорії", "Оберіть категорію.")
+            return
+        current = self.categories_index.get(category_id)
+        if not current:
+            return
+        try:
+            db.update_category(
+                category_id,
+                current["name"],
+                parent_id=current.get("parent_id"),
+                color=current.get("color"),
+                icon=current.get("icon"),
+                typical_attributes=current.get("typical_attributes"),
+                is_service=not bool(current.get("is_service")) if messagebox.askyesno(
+                    "Статус", "Позначити/зняти позначку 'службова'?"
+                )
+                else bool(current.get("is_service")),
+                is_hidden=not bool(current.get("is_hidden")) if messagebox.askyesno(
+                    "Статус", "Приховати/показати категорію?"
+                )
+                else bool(current.get("is_hidden")),
+                sort_order=current.get("sort_order"),
+            )
+            self.refresh_categories()
+        except Exception:
+            logging.exception("Toggle flags error")
+            show_error("Категорії", "Не вдалося змінити статус.")
+
     def delete_category(self) -> None:
         category_id = self.selected_category_id()
         if not category_id:
             show_error("Категорії", "Оберіть категорію для видалення.")
             return
-        usage = db.category_usage(category_id)
-        if usage["is_service"]:
-            show_error("Категорії", "Службову категорію можна лише приховати.")
-            return
-        target_id: int | None = None
-        if usage["children"] or usage["main_products"] or usage["extra_products"]:
-            if not messagebox.askyesno(
-                "Злиття/перенесення",
-                "Категорія містить товари або підкатегорії. Перенести все до іншої категорії?",
-            ):
-                return
-            categories = [c for c in db.list_categories_tree() if c["id"] != category_id]
-            target_id = choose_category_dialog(categories, "Виберіть ціль для злиття")
-            if not target_id:
-                return
+        target = None
+        if messagebox.askyesno("Злиття", "Злити категорію з іншою (рекомендовано для категорій з товарами)?"):
+            options = [(None, "(видалити, якщо порожня)")]
+            for cat in self.flatten_categories():
+                if cat["id"] == category_id:
+                    continue
+                options.append((cat["id"], cat["label"]))
+            target = select_category_dialog("Цільова категорія", options)
         try:
-            db.merge_or_delete_category(category_id, target_id)
+            db.delete_category(category_id, target)
             self.refresh_categories()
             self.refresh_products()
-        except Exception as exc:
+        except ValueError as exc:
+            show_error("Категорії", str(exc))
+        except Exception:
             logging.exception("Delete category error")
             show_error("Категорії", f"Не вдалося видалити категорію: {exc}")
 
@@ -361,26 +427,24 @@ class InventoryApp(tk.Tk):
         ttk.Label(top, text="Пошук:").pack(side=tk.LEFT)
         self.product_search_var = tk.StringVar()
         ttk.Entry(top, textvariable=self.product_search_var, width=30).pack(side=tk.LEFT, padx=4)
-        ttk.Label(top, text="Категорія:").pack(side=tk.LEFT, padx=(12, 4))
+        ttk.Label(top, text="Категорія:").pack(side=tk.LEFT, padx=6)
         self.product_category_filter_var = tk.StringVar()
-        self.product_category_combo = ttk.Combobox(
+        self.product_category_filter_combo = ttk.Combobox(
             top, textvariable=self.product_category_filter_var, state="readonly", width=30
         )
-        self.product_category_combo.pack(side=tk.LEFT)
+        self.product_category_filter_combo.pack(side=tk.LEFT)
         self.include_subcategories_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
-            top,
-            text="З підкатегоріями",
-            variable=self.include_subcategories_var,
-            command=self.on_search_products,
-        ).pack(side=tk.LEFT, padx=6)
-        ttk.Button(top, text="Оновити", command=self.on_search_products).pack(side=tk.LEFT)
+        ttk.Checkbutton(top, text="Включно з підкатегоріями", variable=self.include_subcategories_var).pack(
+            side=tk.LEFT, padx=6
+        )
+        ttk.Button(top, text="Оновити", command=self.on_search_products).pack(side=tk.LEFT, padx=6)
 
         columns = [
             ("sku", "SKU", 120),
             ("name", "Назва", 230),
             ("brand", "Бренд", 140),
             ("category", "Категорія", 140),
+            ("extra_categories", "Додаткові категорії", 200),
             ("unit", "Одиниця", 90),
             ("is_active", "Активний", 90),
         ]
@@ -411,13 +475,14 @@ class InventoryApp(tk.Tk):
 
     def add_product(self) -> None:
         brands = db.list_brands()
-        categories = [c for c in getattr(self, "category_choices", []) if c.get("id")]
+        categories = self.flatten_categories()
         values = product_prompt(brands, categories, "Новий товар")
         if not values:
             return
-        sku, name, brand_id, category_id, unit, is_active, extra_categories = values
+        sku, name, brand_id, category_id, unit, is_active, extras = values
         try:
-            db.add_product(sku, name, brand_id, category_id, unit, is_active, extra_categories)
+            product_id = db.add_product(sku, name, brand_id, category_id, unit, is_active)
+            db.set_product_categories(product_id, category_id, extras)
             self.refresh_products()
         except sqlite3.IntegrityError:
             show_error("Товари", "SKU або назва вже існує.")
@@ -434,13 +499,27 @@ class InventoryApp(tk.Tk):
         if not product:
             return
         brands = db.list_brands()
-        categories = [c for c in getattr(self, "category_choices", []) if c.get("id")]
-        values = product_prompt(brands, categories, "Редагувати товар", product)
+        categories = self.flatten_categories()
+        values = product_prompt(
+            brands,
+            categories,
+            "Редагувати товар",
+            (
+                p["sku"],
+                p["name"],
+                p["brand_id"],
+                p["category_id"],
+                p["unit"],
+                bool(p["is_active"]),
+                db.get_product_additional_categories(product_id),
+            ),
+        )
         if not values:
             return
-        sku, name, brand_id, category_id, unit, is_active, extra_categories = values
+        sku, name, brand_id, category_id, unit, is_active, extras = values
         try:
-            db.update_product(product_id, sku, name, brand_id, category_id, unit, is_active, extra_categories)
+            db.update_product(product_id, sku, name, brand_id, category_id, unit, is_active)
+            db.set_product_categories(product_id, category_id, extras)
             self.refresh_products()
         except sqlite3.IntegrityError:
             show_error("Товари", "SKU або назва вже існує.")
@@ -1531,33 +1610,101 @@ class InventoryApp(tk.Tk):
         self.brand_table.set_rows([{"id": r["id"], "name": r["name"]} for r in rows])
 
     def refresh_categories(self) -> None:
-        rows = db.category_tree_with_counts()
-        self.category_tree.delete(*self.category_tree.get_children())
-        node_map: dict[int | None, str] = {None: ""}
-        self.category_choices = [{"id": None, "label": "Усі категорії"}]
-        for cat in rows:
-            parent_item = node_map.get(cat["parent_id"], "")
-            iid = str(cat["id"])
-            node_map[cat["id"]] = iid
-            label = ("    " * cat["depth"]) + cat["name"]
-            self.category_choices.append({"id": cat["id"], "label": label})
-            self.category_tree.insert(
-                parent_item,
-                "end",
-                iid=iid,
-                text=cat["name"],
-                values=(cat["products"], "Так" if cat["is_service"] else "Ні", "Так" if cat["is_hidden"] else "Ні"),
-            )
-        if hasattr(self, "product_category_combo"):
-            current_label = self.product_category_filter_var.get()
-            self.product_category_combo.configure(values=[c["label"] for c in self.category_choices])
-            if current_label not in [c["label"] for c in self.category_choices]:
-                self.product_category_combo.current(0)
+        rows = db.list_categories(include_hidden=True)
+        self.categories_index = {int(r["id"]): dict(r) for r in rows}
+        search = getattr(self, "category_search_var", tk.StringVar(value="")).get().lower().strip()
+        counts = db.category_product_counts()
 
-    def refresh_products(
-        self, search: str | None = None, category_id: int | None = None, include_subtree: bool = False
-    ) -> None:
-        rows = db.list_products(search, category_id=category_id, include_subtree=include_subtree)
+        children_map: dict[Optional[int], list[dict]] = {}
+        for row in rows:
+            children_map.setdefault(row["parent_id"], []).append(dict(row))
+
+        for lst in children_map.values():
+            lst.sort(key=lambda c: (c.get("sort_order", 0), c.get("name", "")))
+
+        subtree_counts: dict[int, int] = {}
+
+        def calc_total(cid: int) -> int:
+            total = counts.get(cid, 0)
+            for child in children_map.get(cid, []):
+                total += calc_total(child["id"])
+            subtree_counts[cid] = total
+            return total
+
+        for root in children_map.get(None, []):
+            calc_total(root["id"])
+
+        match_cache: dict[int, bool] = {}
+
+        def has_match(cid: int) -> bool:
+            if cid in match_cache:
+                return match_cache[cid]
+            cat = self.categories_index.get(cid, {})
+            own_match = not search or search in cat.get("name", "").lower()
+            child_match = any(has_match(child["id"]) for child in children_map.get(cid, []))
+            match_cache[cid] = bool(own_match or child_match)
+            return match_cache[cid]
+
+        self.category_tree.delete(*self.category_tree.get_children())
+
+        def render(parent_id: Optional[int], tree_parent: str) -> None:
+            for cat in children_map.get(parent_id, []):
+                if not has_match(cat["id"]):
+                    continue
+                flags = []
+                if cat.get("is_service"):
+                    flags.append("службова")
+                if cat.get("is_hidden"):
+                    flags.append("прихована")
+                node_id = self.category_tree.insert(
+                    tree_parent,
+                    "end",
+                    iid=str(cat["id"]),
+                    text=cat["name"],
+                    values=(subtree_counts.get(cat["id"], counts.get(cat["id"], 0)), ", ".join(flags)),
+                )
+                render(cat["id"], node_id)
+
+        render(None, "")
+        self.update_category_filters()
+
+    def flatten_categories(self) -> list[dict]:
+        rows = db.list_categories(include_hidden=False)
+        children_map: dict[Optional[int], list[dict]] = {}
+        for row in rows:
+            children_map.setdefault(row["parent_id"], []).append(dict(row))
+        for lst in children_map.values():
+            lst.sort(key=lambda c: (c.get("sort_order", 0), c.get("name", "")))
+
+        result: list[dict] = []
+
+        def walk(parent_id: Optional[int], depth: int) -> None:
+            for cat in children_map.get(parent_id, []):
+                label = "  " * depth + ("• " if depth else "") + cat.get("name", "")
+                result.append({"id": cat["id"], "label": label, "name": cat.get("name", "")})
+                walk(cat["id"], depth + 1)
+
+        walk(None, 0)
+        return result
+
+    def update_category_filters(self) -> None:
+        self.category_filter_options = self.flatten_categories()
+        values = ["Усі категорії"] + [c["label"] for c in self.category_filter_options]
+        if hasattr(self, "product_category_filter_combo"):
+            self.product_category_filter_combo.configure(values=values)
+            current = self.product_category_filter_var.get()
+            if current not in values:
+                self.product_category_filter_combo.current(0)
+
+    def refresh_products(self, search: str | None = None) -> None:
+        category_id = None
+        selected_label = self.product_category_filter_var.get()
+        for option in getattr(self, "category_filter_options", []):
+            if option["label"] == selected_label:
+                category_id = option["id"]
+                break
+
+        rows = db.list_products(search, category_id, self.include_subcategories_var.get())
         self.product_table.set_rows(
             [
                 {
@@ -1566,6 +1713,7 @@ class InventoryApp(tk.Tk):
                     "name": r["name"],
                     "brand": r["brand"],
                     "category": r["category"],
+                    "extra_categories": r["extra_categories"] or "",
                     "unit": r["unit"],
                     "is_active": "Так" if r["is_active"] else "Ні",
                 }
@@ -1663,19 +1811,23 @@ def product_prompt(brands, categories, title: str, initial=None):
     brand_combo = ttk.Combobox(dlg, textvariable=brand_var, state="readonly", values=[b["name"] for b in brands])
     brand_combo.grid(row=2, column=1, padx=6, pady=4)
 
-    ttk.Label(dlg, text="Основна категорія").grid(row=3, column=0, padx=6, pady=4, sticky="w")
+    ttk.Label(dlg, text="Головна категорія").grid(row=3, column=0, padx=6, pady=4, sticky="w")
     category_var = tk.StringVar()
-    category_combo = ttk.Combobox(
-        dlg, textvariable=category_var, state="readonly", values=[c["label"] for c in categories]
-    )
+    category_combo = ttk.Combobox(dlg, textvariable=category_var, state="readonly", values=[c["label"] for c in categories])
     category_combo.grid(row=3, column=1, padx=6, pady=4)
 
-    ttk.Label(dlg, text="Одиниця").grid(row=4, column=0, padx=6, pady=4, sticky="w")
-    unit_var = tk.StringVar(value=initial.get("unit") if initial else "pcs")
-    ttk.Entry(dlg, textvariable=unit_var, width=10).grid(row=4, column=1, padx=6, pady=4, sticky="w")
+    ttk.Label(dlg, text="Додаткові категорії").grid(row=4, column=0, padx=6, pady=4, sticky="nw")
+    extras_box = tk.Listbox(dlg, selectmode=tk.MULTIPLE, height=8, exportselection=False)
+    extras_box.grid(row=4, column=1, padx=6, pady=4, sticky="nsew")
+    for item in categories:
+        extras_box.insert(tk.END, item["label"])
 
-    is_active_var = tk.BooleanVar(value=initial.get("is_active") if initial else True)
-    ttk.Checkbutton(dlg, text="Активний", variable=is_active_var).grid(row=5, column=1, padx=6, pady=4, sticky="w")
+    ttk.Label(dlg, text="Одиниця").grid(row=5, column=0, padx=6, pady=4, sticky="w")
+    unit_var = tk.StringVar(value=initial[4] if initial else "pcs")
+    ttk.Entry(dlg, textvariable=unit_var, width=10).grid(row=5, column=1, padx=6, pady=4, sticky="w")
+
+    is_active_var = tk.BooleanVar(value=initial[5] if initial else True)
+    ttk.Checkbutton(dlg, text="Активний", variable=is_active_var).grid(row=6, column=1, padx=6, pady=4, sticky="w")
 
     ttk.Label(dlg, text="Додаткові категорії").grid(row=6, column=0, padx=6, pady=4, sticky="nw")
     extras = tk.Listbox(dlg, selectmode="multiple", height=min(8, len(categories)), exportselection=False)
@@ -1684,15 +1836,12 @@ def product_prompt(brands, categories, title: str, initial=None):
     extras.grid(row=6, column=1, padx=6, pady=4, sticky="w")
 
     if initial:
-        if brands:
-            brand_combo.current(next((i for i, b in enumerate(brands) if b["id"] == initial.get("brand_id")), 0))
-        if categories:
-            category_combo.current(next((i for i, c in enumerate(categories) if c["id"] == initial.get("category_id")), 0))
-        extras_selection = {
-            idx for idx, cat in enumerate(categories) if cat["id"] in (initial.get("extra_categories") or [])
-        }
-        for idx in extras_selection:
-            extras.selection_set(idx)
+        brand_combo.current(next((i for i, b in enumerate(brands) if b["id"] == initial[2]), 0))
+        category_combo.current(next((i for i, c in enumerate(categories) if c["id"] == initial[3]), 0))
+        extras = set(initial[6] if len(initial) > 6 else [])
+        for idx, cat in enumerate(categories):
+            if cat["id"] in extras:
+                extras_box.selection_set(idx)
     else:
         if brands:
             brand_combo.current(0)
@@ -1717,7 +1866,7 @@ def product_prompt(brands, categories, title: str, initial=None):
         except IndexError:
             messagebox.showerror("Валідація", "Оберіть бренд і категорію")
             return
-        selected_extras = [categories[i]["id"] for i in extras.curselection() if categories[i]["id"] != category_id]
+        selected = [categories[i]["id"] for i in extras_box.curselection() if i < len(categories)]
         result = (
             sku,
             name,
@@ -1725,7 +1874,7 @@ def product_prompt(brands, categories, title: str, initial=None):
             category_id,
             unit_var.get().strip() or "pcs",
             bool(is_active_var.get()),
-            selected_extras,
+            selected,
         )
         dlg.destroy()
 
@@ -1733,7 +1882,7 @@ def product_prompt(brands, categories, title: str, initial=None):
         dlg.destroy()
 
     btns = ttk.Frame(dlg)
-    btns.grid(row=8, column=0, columnspan=2, pady=8)
+    btns.grid(row=7, column=0, columnspan=2, pady=8)
     ttk.Button(btns, text="OK", command=on_ok).pack(side=tk.LEFT, padx=4)
     ttk.Button(btns, text="Скасувати", command=on_cancel).pack(side=tk.LEFT, padx=4)
     dlg.bind("<Return>", lambda e: on_ok())
@@ -1742,112 +1891,78 @@ def product_prompt(brands, categories, title: str, initial=None):
     return result
 
 
-def choose_category_dialog(categories, title: str) -> int | None:
+def category_prompt(title: str, initial=None):
     dlg = tk.Toplevel()
     dlg.title(title)
     dlg.grab_set()
-    ttk.Label(dlg, text=title).grid(row=0, column=0, padx=6, pady=6)
-    combo_var = tk.StringVar()
-    options = [c.get("label") or ("    " * c.get("depth", 0) + c.get("name", "")) for c in categories]
-    combo = ttk.Combobox(dlg, textvariable=combo_var, state="readonly", values=options)
-    combo.grid(row=1, column=0, padx=6, pady=4)
-    if categories:
-        combo.current(0)
-    result: int | None = None
 
-    def on_ok() -> None:
+    ttk.Label(dlg, text="Назва").grid(row=0, column=0, padx=6, pady=4, sticky="w")
+    name_var = tk.StringVar(value=initial[0] if initial else "")
+    ttk.Entry(dlg, textvariable=name_var, width=30).grid(row=0, column=1, padx=6, pady=4)
+
+    ttk.Label(dlg, text="Колір (hex)").grid(row=1, column=0, padx=6, pady=4, sticky="w")
+    color_var = tk.StringVar(value=initial[1] if initial else "")
+    ttk.Entry(dlg, textvariable=color_var, width=20).grid(row=1, column=1, padx=6, pady=4, sticky="w")
+
+    ttk.Label(dlg, text="Іконка/emoji").grid(row=2, column=0, padx=6, pady=4, sticky="w")
+    icon_var = tk.StringVar(value=initial[2] if initial else "")
+    ttk.Entry(dlg, textvariable=icon_var, width=20).grid(row=2, column=1, padx=6, pady=4, sticky="w")
+
+    ttk.Label(dlg, text="Типові атрибути (через кому)").grid(row=3, column=0, padx=6, pady=4, sticky="w")
+    attrs_var = tk.StringVar(value=initial[3] if initial else "")
+    ttk.Entry(dlg, textvariable=attrs_var, width=40).grid(row=3, column=1, padx=6, pady=4, sticky="w")
+
+    service_var = tk.BooleanVar(value=initial[4] if initial else False)
+    hidden_var = tk.BooleanVar(value=initial[5] if initial else False)
+    ttk.Checkbutton(dlg, text="Службова", variable=service_var).grid(row=4, column=1, padx=6, pady=4, sticky="w")
+    ttk.Checkbutton(dlg, text="Прихована", variable=hidden_var).grid(row=5, column=1, padx=6, pady=4, sticky="w")
+
+    result = None
+
+    def on_ok():
         nonlocal result
-        if not categories:
-            dlg.destroy()
+        name = name_var.get().strip()
+        if not name:
+            messagebox.showerror("Валідація", "Назва обов'язкова")
             return
-        result = categories[combo.current()]["id"]
+        result = (name, color_var.get().strip(), icon_var.get().strip(), attrs_var.get().strip(), service_var.get(), hidden_var.get())
         dlg.destroy()
 
-    ttk.Button(dlg, text="OK", command=on_ok).grid(row=2, column=0, pady=8)
+    ttk.Button(dlg, text="OK", command=on_ok).grid(row=6, column=0, padx=6, pady=8)
+    ttk.Button(dlg, text="Скасувати", command=dlg.destroy).grid(row=6, column=1, padx=6, pady=8)
     dlg.bind("<Return>", lambda e: on_ok())
+    dlg.bind("<Escape>", lambda e: dlg.destroy())
     dlg.wait_window()
     return result
 
 
-def category_prompt(categories, title: str, initial=None, parent_id=None):
-    initial = initial or {}
+def select_category_dialog(title: str, options: list[tuple[Optional[int], str]]):
     dlg = tk.Toplevel()
     dlg.title(title)
     dlg.grab_set()
 
-    ttk.Label(dlg, text="Назва категорії").grid(row=0, column=0, padx=6, pady=4, sticky="w")
-    name_var = tk.StringVar(value=initial.get("name") if initial else "")
-    ttk.Entry(dlg, textvariable=name_var, width=30).grid(row=0, column=1, padx=6, pady=4, sticky="w")
+    ttk.Label(dlg, text="Категорія").grid(row=0, column=0, padx=6, pady=4, sticky="w")
+    values = [opt[1] for opt in options]
+    combo_var = tk.StringVar()
+    combo = ttk.Combobox(dlg, textvariable=combo_var, state="readonly", values=values)
+    combo.grid(row=0, column=1, padx=6, pady=4)
+    combo.current(0 if values else -1)
 
-    formatted = [
-        {
-            **c,
-            "label": c.get("label") or ("    " * c.get("depth", 0) + c.get("name", "")),
-        }
-        for c in categories
-    ]
-    exclude_ids = set()
-    if initial:
-        exclude_ids.update(db.descendant_categories(initial["id"], include_self=True))
-    parent_options = [c for c in formatted if c["id"] not in exclude_ids]
-    parent_options.insert(0, {"id": None, "label": "(Корінь)"})
+    result: Optional[int] = None
 
-    ttk.Label(dlg, text="Батьківська категорія").grid(row=1, column=0, padx=6, pady=4, sticky="w")
-    parent_var = tk.StringVar()
-    parent_combo = ttk.Combobox(dlg, textvariable=parent_var, state="readonly", values=[c["label"] for c in parent_options])
-    parent_combo.grid(row=1, column=1, padx=6, pady=4, sticky="w")
-
-    default_parent = parent_id if parent_id is not None else (initial.get("parent_id") if initial else None)
-    parent_idx = next((i for i, c in enumerate(parent_options) if c["id"] == default_parent), 0)
-    parent_combo.current(parent_idx)
-
-    ttk.Label(dlg, text="Колір").grid(row=2, column=0, padx=6, pady=4, sticky="w")
-    color_var = tk.StringVar(value=initial.get("color") if initial else "")
-    ttk.Entry(dlg, textvariable=color_var, width=20).grid(row=2, column=1, padx=6, pady=4, sticky="w")
-
-    ttk.Label(dlg, text="Іконка").grid(row=3, column=0, padx=6, pady=4, sticky="w")
-    icon_var = tk.StringVar(value=initial.get("icon") if initial else "")
-    ttk.Entry(dlg, textvariable=icon_var, width=20).grid(row=3, column=1, padx=6, pady=4, sticky="w")
-
-    ttk.Label(dlg, text="Типові атрибути").grid(row=4, column=0, padx=6, pady=4, sticky="nw")
-    attr_text = tk.Text(dlg, width=40, height=4)
-    if initial and initial.get("typical_attributes"):
-        attr_text.insert("1.0", initial.get("typical_attributes"))
-    attr_text.grid(row=4, column=1, padx=6, pady=4, sticky="w")
-
-    is_service_var = tk.BooleanVar(value=initial.get("is_service") if initial else False)
-    is_hidden_var = tk.BooleanVar(value=initial.get("is_hidden") if initial else False)
-    ttk.Checkbutton(dlg, text="Службова", variable=is_service_var).grid(row=5, column=1, padx=6, pady=2, sticky="w")
-    ttk.Checkbutton(dlg, text="Прихована", variable=is_hidden_var).grid(row=6, column=1, padx=6, pady=2, sticky="w")
-
-    result = None
-
-    def on_ok() -> None:
+    def on_ok():
         nonlocal result
-        name = name_var.get().strip()
-        if not name:
-            messagebox.showerror("Категорії", "Вкажіть назву категорії")
-            return
-        parent_idx_sel = parent_combo.current()
-        parent_choice = parent_options[parent_idx_sel] if parent_options else {"id": None}
-        target_parent = parent_choice["id"]
-        sort_order = None
-        if initial and target_parent == initial.get("parent_id"):
-            sort_order = initial.get("sort_order")
-        result = {
-            "name": name,
-            "parent_id": target_parent,
-            "sort_order": sort_order,
-            "is_service": bool(is_service_var.get()),
-            "is_hidden": bool(is_hidden_var.get()),
-            "icon": icon_var.get().strip() or None,
-            "color": color_var.get().strip() or None,
-            "typical_attributes": attr_text.get("1.0", "end").strip(),
-        }
+        if not values:
+            result = None
+        else:
+            idx = combo.current()
+            result = options[idx][0]
         dlg.destroy()
 
-    ttk.Button(dlg, text="OK", command=on_ok).grid(row=7, column=0, columnspan=2, pady=8)
+    ttk.Button(dlg, text="OK", command=on_ok).grid(row=1, column=0, padx=6, pady=8)
+    ttk.Button(dlg, text="Скасувати", command=dlg.destroy).grid(row=1, column=1, padx=6, pady=8)
     dlg.bind("<Return>", lambda e: on_ok())
+    dlg.bind("<Escape>", lambda e: dlg.destroy())
     dlg.wait_window()
     return result
 

@@ -218,6 +218,40 @@ def init_db() -> None:
                 FOREIGN KEY(counterparty_id) REFERENCES Counterparties(id)
             );
             CREATE INDEX IF NOT EXISTS idx_cash_date ON CashTransactions(date);
+
+            CREATE TABLE IF NOT EXISTS ExtraCostDocuments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                doc_date TEXT NOT NULL,
+                currency_code TEXT NOT NULL DEFAULT 'UAH',
+                exchange_rate REAL NOT NULL DEFAULT 1,
+                partner_id INTEGER,
+                status TEXT NOT NULL CHECK(status IN ('draft','posted')) DEFAULT 'draft',
+                total_amount_doc REAL NOT NULL DEFAULT 0,
+                total_amount_base REAL NOT NULL DEFAULT 0,
+                comment TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (partner_id) REFERENCES Counterparties(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS ExtraCostLines (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                extra_cost_id INTEGER NOT NULL,
+                cost_type TEXT NOT NULL,
+                amount_doc REAL NOT NULL,
+                amount_base REAL NOT NULL,
+                FOREIGN KEY (extra_cost_id) REFERENCES ExtraCostDocuments(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_extra_cost_lines_doc ON ExtraCostLines(extra_cost_id);
+
+            CREATE TABLE IF NOT EXISTS ExtraCostAllocations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                extra_cost_id INTEGER NOT NULL,
+                purchase_line_id INTEGER NOT NULL,
+                amount_allocated_base REAL NOT NULL,
+                FOREIGN KEY (extra_cost_id) REFERENCES ExtraCostDocuments(id) ON DELETE CASCADE,
+                FOREIGN KEY (purchase_line_id) REFERENCES PurchaseLines(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_extra_cost_allocations_doc ON ExtraCostAllocations(extra_cost_id);
             """
         )
         _migrate_schema(conn)
@@ -270,6 +304,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "PurchaseLines", "amount", "REAL NOT NULL DEFAULT 0")
     _ensure_column(conn, "PurchaseLines", "amount_doc", "REAL NOT NULL DEFAULT 0")
     _ensure_column(conn, "PurchaseLines", "purchase_price_base", "REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "PurchaseLines", "extra_cost_allocated_base", "REAL NOT NULL DEFAULT 0")
 
     conn.execute(
         """
@@ -1095,6 +1130,12 @@ def replace_purchase_lines(purchase_id: int, lines: Iterable[Tuple[int, float, f
         status = conn.execute("SELECT status FROM PurchaseDocuments WHERE id=?", (purchase_id,)).fetchone()
         if not status or status[0] != "draft":
             raise ValueError("Рядки можна змінювати лише у чернетці")
+        allocated = conn.execute(
+            "SELECT COUNT(*) FROM ExtraCostAllocations eca JOIN PurchaseLines pl ON pl.id = eca.purchase_line_id WHERE pl.purchase_id=?",
+            (purchase_id,),
+        ).fetchone()[0]
+        if allocated:
+            raise ValueError("Спочатку відмініть супутні витрати, розподілені на цю закупівлю")
         conn.execute("DELETE FROM PurchaseLines WHERE purchase_id=?", (purchase_id,))
         for product_id, qty, price in lines:
             amount_doc = qty * price
@@ -1111,7 +1152,7 @@ def replace_purchase_lines(purchase_id: int, lines: Iterable[Tuple[int, float, f
 def list_purchases(status: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None) -> List[sqlite3.Row]:
     query = (
         "SELECT p.id, p.doc_date, p.status, p.comment, p.channel, p.supplier_id, c.name as supplier, w.name as warehouse, p.currency_code, p.exchange_rate, "
-        "IFNULL(SUM(pl.amount),0) as total, IFNULL(SUM(pl.amount_doc),0) as total_doc "
+        "IFNULL(SUM(pl.amount),0) as total, IFNULL(SUM(pl.amount_doc),0) as total_doc, IFNULL(SUM(pl.extra_cost_allocated_base),0) as total_extra_base "
         "FROM PurchaseDocuments p "
         "LEFT JOIN Counterparties c ON c.id = p.supplier_id "
         "LEFT JOIN Warehouses w ON w.id = p.warehouse_id "
@@ -1144,11 +1185,267 @@ def list_purchase_lines(purchase_id: int) -> List[sqlite3.Row]:
     with get_connection() as conn:
         return list(
             conn.execute(
-                "SELECT pl.id, pl.product_id, pl.quantity, pl.purchase_price, pl.amount_doc, pl.purchase_price_base, pl.amount, p.name as product_name, p.sku "
+                "SELECT pl.id, pl.product_id, pl.quantity, pl.purchase_price, pl.amount_doc, pl.purchase_price_base, pl.amount, pl.extra_cost_allocated_base, p.name as product_name, p.sku "
                 "FROM PurchaseLines pl JOIN Products p ON p.id = pl.product_id WHERE pl.purchase_id=?",
                 (purchase_id,),
             )
         )
+
+
+# Extra cost documents
+
+
+def create_extra_cost_document(
+    doc_date: str,
+    currency_code: str = BASE_CURRENCY,
+    exchange_rate: float = 1.0,
+    partner_id: Optional[int] = None,
+    comment: str = "",
+) -> int:
+    with get_connection() as conn:
+        cur = conn.execute(
+            "INSERT INTO ExtraCostDocuments (doc_date, currency_code, exchange_rate, partner_id, status, comment) VALUES (?, ?, ?, ?, 'draft', ?)",
+            (doc_date, currency_code.strip().upper(), exchange_rate, partner_id, comment.strip()),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def update_extra_cost_document(
+    doc_id: int,
+    doc_date: str,
+    currency_code: str,
+    exchange_rate: float,
+    partner_id: Optional[int],
+    comment: str,
+) -> None:
+    with get_connection() as conn:
+        status = conn.execute("SELECT status FROM ExtraCostDocuments WHERE id=?", (doc_id,)).fetchone()
+        if not status:
+            raise ValueError("Документ не знайдено")
+        if status[0] != "draft":
+            raise ValueError("Редагування можливе лише у чернетці")
+        conn.execute(
+            "UPDATE ExtraCostDocuments SET doc_date=?, currency_code=?, exchange_rate=?, partner_id=?, comment=? WHERE id=?",
+            (doc_date, currency_code.strip().upper(), exchange_rate, partner_id, comment.strip(), doc_id),
+        )
+        conn.commit()
+
+
+def delete_extra_cost_document(doc_id: int) -> None:
+    with get_connection() as conn:
+        status = conn.execute("SELECT status FROM ExtraCostDocuments WHERE id=?", (doc_id,)).fetchone()
+        if not status:
+            return
+        if status[0] != "draft":
+            raise ValueError("Спочатку відмініть проведення документа")
+        conn.execute("DELETE FROM ExtraCostLines WHERE extra_cost_id=?", (doc_id,))
+        conn.execute("DELETE FROM ExtraCostDocuments WHERE id=?", (doc_id,))
+        conn.commit()
+
+
+def _recalc_extra_cost_totals(conn: sqlite3.Connection, doc_id: int) -> None:
+    totals = conn.execute(
+        "SELECT IFNULL(SUM(amount_doc),0) as total_doc, IFNULL(SUM(amount_base),0) as total_base FROM ExtraCostLines WHERE extra_cost_id=?",
+        (doc_id,),
+    ).fetchone()
+    conn.execute(
+        "UPDATE ExtraCostDocuments SET total_amount_doc=?, total_amount_base=? WHERE id=?",
+        (totals["total_doc"], totals["total_base"], doc_id),
+    )
+
+
+def replace_extra_cost_lines(doc_id: int, lines: Iterable[Tuple[str, float]], exchange_rate: float) -> None:
+    with get_connection() as conn:
+        status = conn.execute("SELECT status FROM ExtraCostDocuments WHERE id=?", (doc_id,)).fetchone()
+        if not status:
+            raise ValueError("Документ не знайдено")
+        if status[0] != "draft":
+            raise ValueError("Рядки можна змінювати лише у чернетці")
+        conn.execute("DELETE FROM ExtraCostLines WHERE extra_cost_id=?", (doc_id,))
+        for cost_type, amount_doc in lines:
+            amount_base = amount_doc * exchange_rate
+            conn.execute(
+                "INSERT INTO ExtraCostLines (extra_cost_id, cost_type, amount_doc, amount_base) VALUES (?,?,?,?)",
+                (doc_id, cost_type.strip(), amount_doc, amount_base),
+            )
+        _recalc_extra_cost_totals(conn, doc_id)
+        conn.commit()
+
+
+def list_extra_cost_documents(
+    status: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    partner_id: Optional[int] = None,
+) -> List[sqlite3.Row]:
+    query = (
+        "SELECT e.id, e.doc_date, e.currency_code, e.exchange_rate, e.partner_id, e.status, e.total_amount_doc, e.total_amount_base, e.comment, c.name as partner "
+        "FROM ExtraCostDocuments e "
+        "LEFT JOIN Counterparties c ON c.id = e.partner_id"
+    )
+    clauses: List[str] = []
+    params: List[object] = []
+    if status:
+        clauses.append("e.status=?")
+        params.append(status)
+    if date_from:
+        clauses.append("e.doc_date >= ?")
+        params.append(date_from)
+    if date_to:
+        clauses.append("e.doc_date <= ?")
+        params.append(date_to)
+    if partner_id:
+        clauses.append("e.partner_id=?")
+        params.append(partner_id)
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    query += " ORDER BY e.doc_date, e.id"
+    with get_connection() as conn:
+        return list(conn.execute(query, params))
+
+
+def get_extra_cost_document(doc_id: int) -> Optional[sqlite3.Row]:
+    with get_connection() as conn:
+        return conn.execute("SELECT * FROM ExtraCostDocuments WHERE id=?", (doc_id,)).fetchone()
+
+
+def list_extra_cost_lines(doc_id: int) -> List[sqlite3.Row]:
+    with get_connection() as conn:
+        return list(
+            conn.execute(
+                "SELECT id, cost_type, amount_doc, amount_base FROM ExtraCostLines WHERE extra_cost_id=?",
+                (doc_id,),
+            )
+        )
+
+
+def list_extra_cost_allocations(doc_id: int) -> List[sqlite3.Row]:
+    with get_connection() as conn:
+        return list(
+            conn.execute(
+                "SELECT eca.id, eca.purchase_line_id, eca.amount_allocated_base, pl.product_id, pl.quantity, pl.amount, pl.extra_cost_allocated_base, pl.purchase_id "
+                "FROM ExtraCostAllocations eca JOIN PurchaseLines pl ON pl.id = eca.purchase_line_id WHERE eca.extra_cost_id=?",
+                (doc_id,),
+            )
+        )
+
+
+def _revert_extra_cost_allocations(conn: sqlite3.Connection, doc_id: int) -> None:
+    allocations = list(
+        conn.execute(
+            "SELECT purchase_line_id, amount_allocated_base FROM ExtraCostAllocations WHERE extra_cost_id=?",
+            (doc_id,),
+        )
+    )
+    for alloc in allocations:
+        conn.execute(
+            "UPDATE PurchaseLines SET extra_cost_allocated_base = extra_cost_allocated_base - ? WHERE id=?",
+            (alloc["amount_allocated_base"], alloc["purchase_line_id"]),
+        )
+    conn.execute("DELETE FROM ExtraCostAllocations WHERE extra_cost_id=?", (doc_id,))
+    conn.execute(
+        "DELETE FROM StockMoves WHERE reference_type='extra_cost' AND reference_id=?",
+        (doc_id,),
+    )
+
+
+def allocate_extra_costs(doc_id: int, purchase_ids: Sequence[int]) -> None:
+    if not purchase_ids:
+        raise ValueError("Не вибрано жодної закупівлі для розподілу")
+    with get_connection() as conn:
+        doc = conn.execute("SELECT * FROM ExtraCostDocuments WHERE id=?", (doc_id,)).fetchone()
+        if not doc:
+            raise ValueError("Документ не знайдено")
+        if doc["status"] != "posted":
+            raise ValueError("Розподіл можливий лише для проведеного документа")
+        extra_total_base = conn.execute(
+            "SELECT IFNULL(SUM(amount_base),0) FROM ExtraCostLines WHERE extra_cost_id=?",
+            (doc_id,),
+        ).fetchone()[0]
+        if extra_total_base <= 0:
+            raise ValueError("Сума витрат повинна бути більшою за 0")
+        placeholders = ",".join("?" for _ in purchase_ids)
+        purchase_lines = list(
+            conn.execute(
+                f"SELECT pl.id, pl.amount as amount_base, pl.product_id, pl.quantity, pd.warehouse_id FROM PurchaseLines pl JOIN PurchaseDocuments pd ON pd.id = pl.purchase_id WHERE pl.purchase_id IN ({placeholders}) AND pd.status='posted'",
+                purchase_ids,
+            )
+        )
+        if not purchase_lines:
+            raise ValueError("Немає рядків закупівель для розподілу")
+        total_base = sum(float(ln["amount_base"]) for ln in purchase_lines)
+        if total_base <= 0:
+            raise ValueError("Немає бази для розподілу")
+        _revert_extra_cost_allocations(conn, doc_id)
+        # Validate balances
+        involved_pairs = {(ln["product_id"], ln["warehouse_id"]) for ln in purchase_lines}
+        for product_id, warehouse_id in involved_pairs:
+            current_qty, _ = _get_balance(conn, product_id, warehouse_id)
+            if current_qty <= 0:
+                raise ValueError("Немає залишку для розподілу супутніх витрат")
+
+        per_pair_extra: Dict[Tuple[int, int], float] = {}
+        for ln in purchase_lines:
+            share = float(ln["amount_base"]) / total_base
+            allocated = extra_total_base * share
+            per_pair_extra[(ln["product_id"], ln["warehouse_id"])] = per_pair_extra.get((ln["product_id"], ln["warehouse_id"]), 0) + allocated
+            conn.execute(
+                "INSERT INTO ExtraCostAllocations (extra_cost_id, purchase_line_id, amount_allocated_base) VALUES (?,?,?)",
+                (doc_id, ln["id"], allocated),
+            )
+            conn.execute(
+                "UPDATE PurchaseLines SET extra_cost_allocated_base = extra_cost_allocated_base + ? WHERE id=?",
+                (allocated, ln["id"]),
+            )
+        # Apply to stock balances
+        for (product_id, warehouse_id), extra_amount in per_pair_extra.items():
+            current_qty, current_avg = _get_balance(conn, product_id, warehouse_id)
+            if current_qty <= 0:
+                raise ValueError("Немає залишку для розподілу супутніх витрат")
+            new_avg = (current_qty * current_avg + extra_amount) / current_qty
+            _set_balance(conn, product_id, warehouse_id, current_qty, new_avg)
+            conn.execute(
+                "INSERT INTO StockMoves (move_date, product_id, warehouse_id, qty_in, qty_out, cost_per_unit, amount, reference_type, reference_id, channel, counterparty_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (doc["doc_date"], product_id, warehouse_id, 0, 0, new_avg, extra_amount, "extra_cost", doc_id, "", doc["partner_id"]),
+            )
+        conn.commit()
+
+
+def post_extra_cost(doc_id: int, purchase_ids: Sequence[int]) -> None:
+    if not purchase_ids:
+        raise ValueError("Не вибрано жодної закупівлі")
+    with get_connection() as conn:
+        doc = conn.execute("SELECT * FROM ExtraCostDocuments WHERE id=?", (doc_id,)).fetchone()
+        if not doc:
+            raise ValueError("Документ не знайдено")
+        if doc["status"] != "draft":
+            raise ValueError("Документ вже проведено")
+        has_lines = conn.execute("SELECT COUNT(*) FROM ExtraCostLines WHERE extra_cost_id=?", (doc_id,)).fetchone()[0]
+        if not has_lines:
+            raise ValueError("Немає рядків витрат")
+        _recalc_extra_cost_totals(conn, doc_id)
+        totals = conn.execute("SELECT total_amount_base FROM ExtraCostDocuments WHERE id=?", (doc_id,)).fetchone()["total_amount_base"]
+        if totals <= 0:
+            raise ValueError("Сума витрат повинна бути більшою за 0")
+        conn.execute("UPDATE ExtraCostDocuments SET status='posted' WHERE id=?", (doc_id,))
+        conn.commit()
+    allocate_extra_costs(doc_id, purchase_ids)
+    recalc_stock()
+
+
+def unpost_extra_cost(doc_id: int) -> None:
+    with get_connection() as conn:
+        doc = conn.execute("SELECT status FROM ExtraCostDocuments WHERE id=?", (doc_id,)).fetchone()
+        if not doc:
+            raise ValueError("Документ не знайдено")
+        if doc["status"] != "posted":
+            raise ValueError("Документ не проведено")
+        _revert_extra_cost_allocations(conn, doc_id)
+        conn.execute("UPDATE ExtraCostDocuments SET status='draft' WHERE id=?", (doc_id,))
+        conn.commit()
+    recalc_stock()
 
 
 # Sales
@@ -1305,6 +1602,7 @@ def recalc_stock(allow_negative: bool = False) -> None:
     with get_connection() as conn:
         conn.execute("DELETE FROM StockBalances")
         conn.execute("DELETE FROM StockMoves")
+        conn.execute("UPDATE PurchaseLines SET extra_cost_allocated_base=0")
         # process purchases then sales ordered by date/id to preserve moving average
         purchases = conn.execute(
             "SELECT p.id, p.doc_date, p.supplier_id, p.warehouse_id, p.channel FROM PurchaseDocuments p WHERE p.status='posted' ORDER BY p.doc_date, p.id"
@@ -1316,6 +1614,37 @@ def recalc_stock(allow_negative: bool = False) -> None:
             ).fetchall()
             for ln in lines:
                 _apply_purchase_line(conn, pdoc["doc_date"], pdoc["id"], ln)
+        extra_docs = conn.execute(
+            "SELECT id, doc_date, partner_id FROM ExtraCostDocuments WHERE status='posted' ORDER BY doc_date, id"
+        ).fetchall()
+        for edoc in extra_docs:
+            allocations = conn.execute(
+                "SELECT eca.amount_allocated_base, pl.id as purchase_line_id, pl.product_id, pd.warehouse_id "
+                "FROM ExtraCostAllocations eca "
+                "JOIN PurchaseLines pl ON pl.id = eca.purchase_line_id "
+                "JOIN PurchaseDocuments pd ON pd.id = pl.purchase_id "
+                "WHERE eca.extra_cost_id=?",
+                (edoc["id"],),
+            ).fetchall()
+            per_pair: Dict[Tuple[int, int], float] = {}
+            for alloc in allocations:
+                conn.execute(
+                    "UPDATE PurchaseLines SET extra_cost_allocated_base = extra_cost_allocated_base + ? WHERE id=?",
+                    (alloc["amount_allocated_base"], alloc["purchase_line_id"]),
+                )
+                key = (alloc["product_id"], alloc["warehouse_id"])
+                per_pair[key] = per_pair.get(key, 0) + alloc["amount_allocated_base"]
+            for (product_id, warehouse_id), extra_amount in per_pair.items():
+                current_qty, current_avg = _get_balance(conn, product_id, warehouse_id)
+                if current_qty <= 0:
+                    raise ValueError("Немає залишку для розподілу супутніх витрат")
+                new_avg = (current_qty * current_avg + extra_amount) / current_qty
+                _set_balance(conn, product_id, warehouse_id, current_qty, new_avg)
+                conn.execute(
+                    "INSERT INTO StockMoves (move_date, product_id, warehouse_id, qty_in, qty_out, cost_per_unit, amount, reference_type, reference_id, channel, counterparty_id) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (edoc["doc_date"], product_id, warehouse_id, 0, 0, new_avg, extra_amount, "extra_cost", edoc["id"], "", edoc["partner_id"]),
+                )
         sales = conn.execute(
             "SELECT s.id, s.doc_date, s.customer_id, s.warehouse_id, s.channel FROM SalesDocuments s WHERE s.status='posted' ORDER BY s.doc_date, s.id"
         ).fetchall()

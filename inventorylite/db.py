@@ -1420,7 +1420,8 @@ def post_extra_cost(doc_id: int, purchase_ids: Sequence[int]) -> None:
         doc = conn.execute("SELECT * FROM ExtraCostDocuments WHERE id=?", (doc_id,)).fetchone()
         if not doc:
             raise ValueError("Документ не знайдено")
-        if doc["status"] != "draft":
+        status = (doc["status"] or "draft").strip()
+        if status != "draft":
             raise ValueError("Документ вже проведено")
         has_lines = conn.execute("SELECT COUNT(*) FROM ExtraCostLines WHERE extra_cost_id=?", (doc_id,)).fetchone()[0]
         if not has_lines:
@@ -1440,7 +1441,8 @@ def unpost_extra_cost(doc_id: int) -> None:
         doc = conn.execute("SELECT status FROM ExtraCostDocuments WHERE id=?", (doc_id,)).fetchone()
         if not doc:
             raise ValueError("Документ не знайдено")
-        if doc["status"] != "posted":
+        status = (doc["status"] or "draft").strip()
+        if status != "posted":
             raise ValueError("Документ не проведено")
         _revert_extra_cost_allocations(conn, doc_id)
         conn.execute("UPDATE ExtraCostDocuments SET status='draft' WHERE id=?", (doc_id,))

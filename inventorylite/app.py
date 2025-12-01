@@ -1205,7 +1205,15 @@ class InventoryApp(tk.Tk):
         currencies = db.list_currencies()
         purchases = db.list_purchases(status="posted")
         lines = db.list_extra_cost_lines(doc_id)
-        result = extra_cost_prompt(counterparties, currencies, purchases, doc=doc, lines=lines)
+        selected_ids = [row["purchase_id"] for row in db.list_extra_cost_allocations(doc_id)]
+        result = extra_cost_prompt(
+            counterparties,
+            currencies,
+            purchases,
+            doc=doc,
+            lines=lines,
+            selected_purchase_ids=selected_ids,
+        )
         if not result:
             return
         info, new_lines, purchase_ids, _ = result

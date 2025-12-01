@@ -94,6 +94,14 @@ def init_db() -> None:
                 FOREIGN KEY (category_id) REFERENCES Categories(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS AdditionalProductCategories (
+                product_id INTEGER NOT NULL,
+                category_id INTEGER NOT NULL,
+                PRIMARY KEY (product_id, category_id),
+                FOREIGN KEY (product_id) REFERENCES Products(id) ON DELETE CASCADE,
+                FOREIGN KEY (category_id) REFERENCES Categories(id) ON DELETE CASCADE
+            );
+
             CREATE INDEX IF NOT EXISTS idx_products_sku_lower ON Products(lower(sku));
             CREATE INDEX IF NOT EXISTS idx_products_name_lower ON Products(lower(name));
 
@@ -263,6 +271,18 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "PurchaseLines", "amount_doc", "REAL NOT NULL DEFAULT 0")
     _ensure_column(conn, "PurchaseLines", "purchase_price_base", "REAL NOT NULL DEFAULT 0")
 
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS AdditionalProductCategories (
+            product_id INTEGER NOT NULL,
+            category_id INTEGER NOT NULL,
+            PRIMARY KEY (product_id, category_id),
+            FOREIGN KEY (product_id) REFERENCES Products(id) ON DELETE CASCADE,
+            FOREIGN KEY (category_id) REFERENCES Categories(id) ON DELETE CASCADE
+        )
+        """
+    )
+
     _ensure_column(conn, "SalesDocuments", "channel", "TEXT")
     _ensure_column(conn, "SalesDocuments", "status", "TEXT NOT NULL DEFAULT 'draft'")
     _ensure_column(conn, "SalesDocuments", "comment", "TEXT")
@@ -401,7 +421,15 @@ def delete_brand(brand_id: int) -> None:
         conn.commit()
 
 
-# Category CRUD
+# Category CRUD with hierarchy and flags
+
+def _next_sort_order(conn: sqlite3.Connection, parent_id: Optional[int]) -> int:
+    if parent_id is None:
+        row = conn.execute("SELECT IFNULL(MAX(sort_order),0) FROM Categories WHERE parent_id IS NULL").fetchone()
+    else:
+        row = conn.execute("SELECT IFNULL(MAX(sort_order),0) FROM Categories WHERE parent_id=?", (parent_id,)).fetchone()
+    return int(row[0]) + 1
+
 
 def list_categories(include_hidden: bool = True) -> List[sqlite3.Row]:
     query = "SELECT id, name, parent_id, sort_order, is_service, is_hidden, color, icon, typical_attributes FROM Categories"
@@ -664,24 +692,52 @@ def list_products(
         return list(conn.execute(query, tuple(params)))
 
 
-def add_product(sku: str, name: str, brand_id: int, category_id: int, unit: str = "pcs", is_active: bool = True) -> int:
+def add_product(
+    sku: str,
+    name: str,
+    brand_id: int,
+    category_id: int,
+    unit: str = "pcs",
+    is_active: bool = True,
+    extra_categories: Optional[Sequence[int]] = None,
+) -> int:
+    extras = list(dict.fromkeys(extra_categories or []))
     with get_connection() as conn:
         cur = conn.execute(
             "INSERT INTO Products (sku, name, brand_id, category_id, unit, is_active) VALUES (?, ?, ?, ?, ?, ?)",
             (sku.strip(), name.strip(), brand_id, category_id, unit.strip() or "pcs", 1 if is_active else 0),
         )
+        for cid in extras:
+            conn.execute(
+                "INSERT OR IGNORE INTO AdditionalProductCategories (product_id, category_id) VALUES (?, ?)",
+                (cur.lastrowid, cid),
+            )
         conn.commit()
         return cur.lastrowid
 
 
 def update_product(
-    product_id: int, sku: str, name: str, brand_id: int, category_id: int, unit: str = "pcs", is_active: bool = True
+    product_id: int,
+    sku: str,
+    name: str,
+    brand_id: int,
+    category_id: int,
+    unit: str = "pcs",
+    is_active: bool = True,
+    extra_categories: Optional[Sequence[int]] = None,
 ) -> None:
+    extras = list(dict.fromkeys(extra_categories or []))
     with get_connection() as conn:
         conn.execute(
             "UPDATE Products SET sku=?, name=?, brand_id=?, category_id=?, unit=?, is_active=? WHERE id=?",
             (sku.strip(), name.strip(), brand_id, category_id, unit.strip() or "pcs", 1 if is_active else 0, product_id),
         )
+        conn.execute("DELETE FROM AdditionalProductCategories WHERE product_id=?", (product_id,))
+        for cid in extras:
+            conn.execute(
+                "INSERT OR IGNORE INTO AdditionalProductCategories (product_id, category_id) VALUES (?, ?)",
+                (product_id, cid),
+            )
         conn.commit()
 
 
@@ -709,6 +765,29 @@ def delete_product(product_id: int) -> None:
     with get_connection() as conn:
         conn.execute("DELETE FROM Products WHERE id=?", (product_id,))
         conn.commit()
+
+
+def get_product(product_id: int) -> Optional[dict]:
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT id, sku, name, brand_id, category_id, unit, is_active FROM Products WHERE id=?",
+            (product_id,),
+        ).fetchone()
+        if not row:
+            return None
+        extra = [r[0] for r in conn.execute(
+            "SELECT category_id FROM AdditionalProductCategories WHERE product_id=?", (product_id,)
+        ).fetchall()]
+    return {
+        "id": row["id"],
+        "sku": row["sku"],
+        "name": row["name"],
+        "brand_id": row["brand_id"],
+        "category_id": row["category_id"],
+        "unit": row["unit"],
+        "is_active": bool(row["is_active"]),
+        "extra_categories": extra,
+    }
 
 
 # Warehouses and channels

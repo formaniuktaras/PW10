@@ -1797,43 +1797,49 @@ def product_prompt(brands, categories, title: str, initial=None):
     dlg = tk.Toplevel()
     dlg.title(title)
     dlg.grab_set()
+    dlg.columnconfigure(1, weight=1)
 
     ttk.Label(dlg, text="SKU").grid(row=0, column=0, padx=6, pady=4, sticky="w")
     sku_var = tk.StringVar(value=initial.get("sku") if initial else "")
-    ttk.Entry(dlg, textvariable=sku_var, width=30).grid(row=0, column=1, padx=6, pady=4)
+    ttk.Entry(dlg, textvariable=sku_var, width=30).grid(row=0, column=1, padx=6, pady=4, sticky="ew")
 
     ttk.Label(dlg, text="Назва").grid(row=1, column=0, padx=6, pady=4, sticky="w")
     name_var = tk.StringVar(value=initial.get("name") if initial else "")
-    ttk.Entry(dlg, textvariable=name_var, width=30).grid(row=1, column=1, padx=6, pady=4)
+    ttk.Entry(dlg, textvariable=name_var, width=30).grid(row=1, column=1, padx=6, pady=4, sticky="ew")
 
     ttk.Label(dlg, text="Бренд").grid(row=2, column=0, padx=6, pady=4, sticky="w")
     brand_var = tk.StringVar()
     brand_combo = ttk.Combobox(dlg, textvariable=brand_var, state="readonly", values=[b["name"] for b in brands])
-    brand_combo.grid(row=2, column=1, padx=6, pady=4)
+    brand_combo.grid(row=2, column=1, padx=6, pady=4, sticky="ew")
 
     ttk.Label(dlg, text="Головна категорія").grid(row=3, column=0, padx=6, pady=4, sticky="w")
     category_var = tk.StringVar()
     category_combo = ttk.Combobox(dlg, textvariable=category_var, state="readonly", values=[c["label"] for c in categories])
-    category_combo.grid(row=3, column=1, padx=6, pady=4)
+    category_combo.grid(row=3, column=1, padx=6, pady=4, sticky="ew")
 
     ttk.Label(dlg, text="Додаткові категорії").grid(row=4, column=0, padx=6, pady=4, sticky="nw")
-    extras_box = tk.Listbox(dlg, selectmode=tk.MULTIPLE, height=8, exportselection=False)
-    extras_box.grid(row=4, column=1, padx=6, pady=4, sticky="nsew")
+    extras_frame = ttk.Frame(dlg)
+    extras_frame.grid(row=4, column=1, padx=6, pady=4, sticky="nsew")
+    extras_frame.columnconfigure(0, weight=1)
+    extras_frame.rowconfigure(0, weight=1)
+    extras_box = tk.Listbox(
+        extras_frame, selectmode=tk.MULTIPLE, height=min(10, max(6, len(categories))), exportselection=False
+    )
+    extras_scroll = ttk.Scrollbar(extras_frame, orient="vertical", command=extras_box.yview)
+    extras_box.configure(yscrollcommand=extras_scroll.set)
+    extras_box.grid(row=0, column=0, sticky="nsew")
+    extras_scroll.grid(row=0, column=1, sticky="ns")
     for item in categories:
         extras_box.insert(tk.END, item["label"])
 
+    dlg.rowconfigure(4, weight=1)
+
     ttk.Label(dlg, text="Одиниця").grid(row=5, column=0, padx=6, pady=4, sticky="w")
     unit_var = tk.StringVar(value=initial[4] if initial else "pcs")
-    ttk.Entry(dlg, textvariable=unit_var, width=10).grid(row=5, column=1, padx=6, pady=4, sticky="w")
+    ttk.Entry(dlg, textvariable=unit_var, width=12).grid(row=5, column=1, padx=6, pady=4, sticky="w")
 
     is_active_var = tk.BooleanVar(value=initial[5] if initial else True)
     ttk.Checkbutton(dlg, text="Активний", variable=is_active_var).grid(row=6, column=1, padx=6, pady=4, sticky="w")
-
-    ttk.Label(dlg, text="Додаткові категорії").grid(row=6, column=0, padx=6, pady=4, sticky="nw")
-    extras = tk.Listbox(dlg, selectmode="multiple", height=min(8, len(categories)), exportselection=False)
-    for cat in categories:
-        extras.insert(tk.END, cat["label"])
-    extras.grid(row=6, column=1, padx=6, pady=4, sticky="w")
 
     if initial:
         brand_combo.current(next((i for i, b in enumerate(brands) if b["id"] == initial[2]), 0))
@@ -1882,7 +1888,7 @@ def product_prompt(brands, categories, title: str, initial=None):
         dlg.destroy()
 
     btns = ttk.Frame(dlg)
-    btns.grid(row=7, column=0, columnspan=2, pady=8)
+    btns.grid(row=7, column=0, columnspan=2, pady=8, sticky="e")
     ttk.Button(btns, text="OK", command=on_ok).pack(side=tk.LEFT, padx=4)
     ttk.Button(btns, text="Скасувати", command=on_cancel).pack(side=tk.LEFT, padx=4)
     dlg.bind("<Return>", lambda e: on_ok())

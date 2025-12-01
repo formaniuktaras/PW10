@@ -1603,60 +1603,71 @@ def recalc_stock(allow_negative: bool = False) -> None:
         conn.execute("DELETE FROM StockBalances")
         conn.execute("DELETE FROM StockMoves")
         conn.execute("UPDATE PurchaseLines SET extra_cost_allocated_base=0")
-        # process purchases then sales ordered by date/id to preserve moving average
-        purchases = conn.execute(
-            "SELECT p.id, p.doc_date, p.supplier_id, p.warehouse_id, p.channel FROM PurchaseDocuments p WHERE p.status='posted' ORDER BY p.doc_date, p.id"
-        ).fetchall()
-        for pdoc in purchases:
-            lines = conn.execute(
-                "SELECT pl.product_id, pl.quantity, pl.purchase_price, pl.purchase_price_base, ? as warehouse_id, ? as channel, ? as supplier_id FROM PurchaseLines pl WHERE pl.purchase_id=?",
-                (pdoc["warehouse_id"], pdoc["channel"], pdoc["supplier_id"], pdoc["id"]),
-            ).fetchall()
-            for ln in lines:
-                _apply_purchase_line(conn, pdoc["doc_date"], pdoc["id"], ln)
-        extra_docs = conn.execute(
-            "SELECT id, doc_date, partner_id FROM ExtraCostDocuments WHERE status='posted' ORDER BY doc_date, id"
-        ).fetchall()
-        for edoc in extra_docs:
-            allocations = conn.execute(
-                "SELECT eca.amount_allocated_base, pl.id as purchase_line_id, pl.product_id, pd.warehouse_id "
-                "FROM ExtraCostAllocations eca "
-                "JOIN PurchaseLines pl ON pl.id = eca.purchase_line_id "
-                "JOIN PurchaseDocuments pd ON pd.id = pl.purchase_id "
-                "WHERE eca.extra_cost_id=?",
-                (edoc["id"],),
-            ).fetchall()
-            per_pair: Dict[Tuple[int, int], float] = {}
-            for alloc in allocations:
-                conn.execute(
-                    "UPDATE PurchaseLines SET extra_cost_allocated_base = extra_cost_allocated_base + ? WHERE id=?",
-                    (alloc["amount_allocated_base"], alloc["purchase_line_id"]),
-                )
-                key = (alloc["product_id"], alloc["warehouse_id"])
-                per_pair[key] = per_pair.get(key, 0) + alloc["amount_allocated_base"]
-            for (product_id, warehouse_id), extra_amount in per_pair.items():
-                current_qty, current_avg = _get_balance(conn, product_id, warehouse_id)
-                if current_qty <= 0:
-                    raise ValueError("Немає залишку для розподілу супутніх витрат")
-                new_avg = (current_qty * current_avg + extra_amount) / current_qty
-                _set_balance(conn, product_id, warehouse_id, current_qty, new_avg)
-                conn.execute(
-                    "INSERT INTO StockMoves (move_date, product_id, warehouse_id, qty_in, qty_out, cost_per_unit, amount, reference_type, reference_id, channel, counterparty_id) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                    (edoc["doc_date"], product_id, warehouse_id, 0, 0, new_avg, extra_amount, "extra_cost", edoc["id"], "", edoc["partner_id"]),
-                )
-        sales = conn.execute(
-            "SELECT s.id, s.doc_date, s.customer_id, s.warehouse_id, s.channel FROM SalesDocuments s WHERE s.status='posted' ORDER BY s.doc_date, s.id"
-        ).fetchall()
-        for sdoc in sales:
-            lines = conn.execute(
-                "SELECT sl.product_id, sl.quantity, sl.sale_price, sl.sale_price_base, ? as warehouse_id, ? as channel, ? as customer_id FROM SalesLines sl WHERE sl.sale_id=?",
-                (sdoc["warehouse_id"], sdoc["channel"], sdoc["customer_id"], sdoc["id"]),
-            ).fetchall()
-            for ln in lines:
-                _apply_sale_line(conn, sdoc["doc_date"], sdoc["id"], ln, allow_negative)
-        conn.commit()
 
+        purchase_docs = conn.execute(
+            "SELECT p.id, p.doc_date, p.supplier_id, p.warehouse_id, p.channel FROM PurchaseDocuments p WHERE p.status='posted'",
+        ).fetchall()
+        extra_docs = conn.execute(
+            "SELECT id, doc_date, partner_id FROM ExtraCostDocuments WHERE status='posted'",
+        ).fetchall()
+        sales_docs = conn.execute(
+            "SELECT s.id, s.doc_date, s.customer_id, s.warehouse_id, s.channel FROM SalesDocuments s WHERE s.status='posted'",
+        ).fetchall()
+
+        order_rank = {"purchase": 0, "extra": 1, "sale": 2}
+        events: List[Tuple[str, sqlite3.Row]] = [
+            ("purchase", doc) for doc in purchase_docs
+        ] + [
+            ("extra", doc) for doc in extra_docs
+        ] + [
+            ("sale", doc) for doc in sales_docs
+        ]
+        events.sort(key=lambda item: (item[1]["doc_date"], order_rank[item[0]], item[1]["id"]))
+
+        for etype, doc in events:
+            if etype == "purchase":
+                lines = conn.execute(
+                    "SELECT pl.product_id, pl.quantity, pl.purchase_price, pl.purchase_price_base, ? as warehouse_id, ? as channel, ? as supplier_id FROM PurchaseLines pl WHERE pl.purchase_id=?",
+                    (doc["warehouse_id"], doc["channel"], doc["supplier_id"], doc["id"]),
+                ).fetchall()
+                for ln in lines:
+                    _apply_purchase_line(conn, doc["doc_date"], doc["id"], ln)
+            elif etype == "extra":
+                allocations = conn.execute(
+                    "SELECT eca.amount_allocated_base, pl.id as purchase_line_id, pl.product_id, pd.warehouse_id "
+                    "FROM ExtraCostAllocations eca "
+                    "JOIN PurchaseLines pl ON pl.id = eca.purchase_line_id "
+                    "JOIN PurchaseDocuments pd ON pd.id = pl.purchase_id "
+                    "WHERE eca.extra_cost_id=?",
+                    (doc["id"],),
+                ).fetchall()
+                per_pair: Dict[Tuple[int, int], float] = {}
+                for alloc in allocations:
+                    conn.execute(
+                        "UPDATE PurchaseLines SET extra_cost_allocated_base = extra_cost_allocated_base + ? WHERE id=?",
+                        (alloc["amount_allocated_base"], alloc["purchase_line_id"]),
+                    )
+                    key = (alloc["product_id"], alloc["warehouse_id"])
+                    per_pair[key] = per_pair.get(key, 0) + alloc["amount_allocated_base"]
+                for (product_id, warehouse_id), extra_amount in per_pair.items():
+                    current_qty, current_avg = _get_balance(conn, product_id, warehouse_id)
+                    if current_qty <= 0:
+                        raise ValueError("Немає залишку для розподілу супутніх витрат")
+                    new_avg = (current_qty * current_avg + extra_amount) / current_qty
+                    _set_balance(conn, product_id, warehouse_id, current_qty, new_avg)
+                    conn.execute(
+                        "INSERT INTO StockMoves (move_date, product_id, warehouse_id, qty_in, qty_out, cost_per_unit, amount, reference_type, reference_id, channel, counterparty_id) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                        (doc["doc_date"], product_id, warehouse_id, 0, 0, new_avg, extra_amount, "extra_cost", doc["id"], "", doc["partner_id"]),
+                    )
+            elif etype == "sale":
+                lines = conn.execute(
+                    "SELECT sl.product_id, sl.quantity, sl.sale_price, sl.sale_price_base, ? as warehouse_id, ? as channel, ? as customer_id FROM SalesLines sl WHERE sl.sale_id=?",
+                    (doc["warehouse_id"], doc["channel"], doc["customer_id"], doc["id"]),
+                ).fetchall()
+                for ln in lines:
+                    _apply_sale_line(conn, doc["doc_date"], doc["id"], ln, allow_negative)
+        conn.commit()
 
 def post_purchase(purchase_id: int) -> None:
     with get_connection() as conn:

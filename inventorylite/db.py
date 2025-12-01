@@ -316,6 +316,15 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         """
     )
 
+    # Preserve legacy additional category links stored in the deprecated
+    # AdditionalProductCategories table.
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO ProductCategoryLinks (product_id, category_id)
+        SELECT product_id, category_id FROM AdditionalProductCategories
+        """
+    )
+
     _migrate_stock_balances(conn)
 
     _ensure_currency_tables(conn)
@@ -699,19 +708,12 @@ def add_product(
     category_id: int,
     unit: str = "pcs",
     is_active: bool = True,
-    extra_categories: Optional[Sequence[int]] = None,
 ) -> int:
-    extras = list(dict.fromkeys(extra_categories or []))
     with get_connection() as conn:
         cur = conn.execute(
             "INSERT INTO Products (sku, name, brand_id, category_id, unit, is_active) VALUES (?, ?, ?, ?, ?, ?)",
             (sku.strip(), name.strip(), brand_id, category_id, unit.strip() or "pcs", 1 if is_active else 0),
         )
-        for cid in extras:
-            conn.execute(
-                "INSERT OR IGNORE INTO AdditionalProductCategories (product_id, category_id) VALUES (?, ?)",
-                (cur.lastrowid, cid),
-            )
         conn.commit()
         return cur.lastrowid
 
@@ -724,20 +726,12 @@ def update_product(
     category_id: int,
     unit: str = "pcs",
     is_active: bool = True,
-    extra_categories: Optional[Sequence[int]] = None,
 ) -> None:
-    extras = list(dict.fromkeys(extra_categories or []))
     with get_connection() as conn:
         conn.execute(
             "UPDATE Products SET sku=?, name=?, brand_id=?, category_id=?, unit=?, is_active=? WHERE id=?",
             (sku.strip(), name.strip(), brand_id, category_id, unit.strip() or "pcs", 1 if is_active else 0, product_id),
         )
-        conn.execute("DELETE FROM AdditionalProductCategories WHERE product_id=?", (product_id,))
-        for cid in extras:
-            conn.execute(
-                "INSERT OR IGNORE INTO AdditionalProductCategories (product_id, category_id) VALUES (?, ?)",
-                (product_id, cid),
-            )
         conn.commit()
 
 

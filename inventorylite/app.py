@@ -2016,18 +2016,46 @@ class InventoryApp(tk.Tk):
 # Dialogs
 
 def product_prompt(brands, categories, title: str, initial=None):
-    initial = initial or {}
+    base_initial = {
+        "sku": "",
+        "name": "",
+        "brand_id": None,
+        "category_id": None,
+        "unit": "pcs",
+        "is_active": True,
+        "extras": [],
+    }
+
+    if isinstance(initial, dict):
+        normalized_initial = {**base_initial, **initial}
+    elif initial:
+        # Support tuples/lists passed by the callers
+        normalized_initial = base_initial.copy()
+        normalized_initial.update(
+            {
+                "sku": initial[0] if len(initial) > 0 else "",
+                "name": initial[1] if len(initial) > 1 else "",
+                "brand_id": initial[2] if len(initial) > 2 else None,
+                "category_id": initial[3] if len(initial) > 3 else None,
+                "unit": initial[4] if len(initial) > 4 else "pcs",
+                "is_active": bool(initial[5]) if len(initial) > 5 else True,
+                "extras": initial[6] if len(initial) > 6 else [],
+            }
+        )
+    else:
+        normalized_initial = base_initial
+
     dlg = tk.Toplevel()
     dlg.title(title)
     dlg.grab_set()
     dlg.columnconfigure(1, weight=1)
 
     ttk.Label(dlg, text="SKU").grid(row=0, column=0, padx=6, pady=4, sticky="w")
-    sku_var = tk.StringVar(value=initial.get("sku") if initial else "")
+    sku_var = tk.StringVar(value=normalized_initial.get("sku", ""))
     ttk.Entry(dlg, textvariable=sku_var, width=30).grid(row=0, column=1, padx=6, pady=4, sticky="ew")
 
     ttk.Label(dlg, text="Назва").grid(row=1, column=0, padx=6, pady=4, sticky="w")
-    name_var = tk.StringVar(value=initial.get("name") if initial else "")
+    name_var = tk.StringVar(value=normalized_initial.get("name", ""))
     ttk.Entry(dlg, textvariable=name_var, width=30).grid(row=1, column=1, padx=6, pady=4, sticky="ew")
 
     ttk.Label(dlg, text="Бренд").grid(row=2, column=0, padx=6, pady=4, sticky="w")
@@ -2065,7 +2093,7 @@ def product_prompt(brands, categories, title: str, initial=None):
     extras_scroll.grid(row=1, column=1, sticky="ns")
 
     filtered_extra_categories = list(categories)
-    initial_extra_ids = set(initial[6] if initial and len(initial) > 6 else [])
+    initial_extra_ids = set(normalized_initial.get("extras") or [])
 
     def refresh_extra_list(*_args):
         selected_labels = {extras_box.get(i) for i in extras_box.curselection()}
@@ -2085,17 +2113,17 @@ def product_prompt(brands, categories, title: str, initial=None):
     dlg.rowconfigure(4, weight=1)
 
     ttk.Label(dlg, text="Одиниця").grid(row=5, column=0, padx=6, pady=4, sticky="w")
-    unit_var = tk.StringVar(value=initial[4] if initial else "pcs")
+    unit_var = tk.StringVar(value=normalized_initial.get("unit", "pcs"))
     ttk.Entry(dlg, textvariable=unit_var, width=12).grid(row=5, column=1, padx=6, pady=4, sticky="w")
 
-    is_active_var = tk.BooleanVar(value=initial[5] if initial else True)
+    is_active_var = tk.BooleanVar(value=normalized_initial.get("is_active", True))
     ttk.Checkbutton(dlg, text="Активний", variable=is_active_var).grid(row=6, column=1, padx=6, pady=4, sticky="w")
 
     if initial:
-        brand_combo.current(next((i for i, b in enumerate(brands) if b["id"] == initial[2]), 0))
-        category_var.set(next((c["label"] for c in categories if c["id"] == initial[3]), ""))
+        brand_combo.current(next((i for i, b in enumerate(brands) if b["id"] == normalized_initial["brand_id"]), 0))
+        category_var.set(next((c["label"] for c in categories if c["id"] == normalized_initial["category_id"]), ""))
         refresh_category_options()
-        extras = set(initial[6] if len(initial) > 6 else [])
+        extras = set(normalized_initial.get("extras") or [])
         for idx, cat in enumerate(filtered_extra_categories):
             if cat["id"] in extras:
                 extras_box.selection_set(idx)

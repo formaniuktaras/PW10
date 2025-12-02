@@ -65,7 +65,6 @@ class InventoryApp(tk.Tk):
         self.stock_frame = ttk.Frame(notebook)
         self.reports_frame = ttk.Frame(notebook)
         self.export_frame = ttk.Frame(notebook)
-        self.about_frame = ttk.Frame(notebook)
 
         notebook.add(self.brands_frame, text="Бренди")
         notebook.add(self.categories_frame, text="Категорії")
@@ -81,7 +80,6 @@ class InventoryApp(tk.Tk):
         notebook.add(self.stock_frame, text="Залишки")
         notebook.add(self.reports_frame, text="Звіти")
         notebook.add(self.export_frame, text="Експорт")
-        notebook.add(self.about_frame, text="Про програму")
 
         self.create_brands_tab()
         self.create_categories_tab()
@@ -97,7 +95,7 @@ class InventoryApp(tk.Tk):
         self.create_stock_tab()
         self.create_reports_tab()
         self.create_export_tab()
-        self.create_about_tab()
+        # "Про програму" is opened from the File menu
 
         self.refresh_all()
 
@@ -109,6 +107,8 @@ class InventoryApp(tk.Tk):
         file_menu.add_command(label="Відновлення з резервної копії", command=self.on_restore_all)
         file_menu.add_separator()
         file_menu.add_command(label="Резервна копія БД", command=self.on_backup)
+        file_menu.add_separator()
+        file_menu.add_command(label="Про програму", command=self.show_about)
         file_menu.add_separator()
         file_menu.add_command(label="Вихід", command=self.destroy)
         menubar.add_cascade(label="Файл", menu=file_menu)
@@ -1800,11 +1800,31 @@ class InventoryApp(tk.Tk):
             show_error("Експорт", "Не вдалося експортувати таблицю.")
 
     # About
-    def create_about_tab(self) -> None:
-        ttk.Label(self.about_frame, text=f"{APP_NAME} v{VERSION}", font=("Segoe UI", 12, "bold")).pack(pady=10)
-        ttk.Label(self.about_frame, text="Облік лише за касовим методом. Собівартість за середньозваженим методом.").pack(pady=4)
-        ttk.Label(self.about_frame, text=f"База даних: {get_db_path()}").pack(pady=4)
-        ttk.Button(self.about_frame, text="Відкрити папку даних", command=lambda: open_data_folder(get_data_dir())).pack(pady=4)
+    def show_about(self) -> None:
+        about_window = tk.Toplevel(self)
+        about_window.title("Про програму")
+        about_window.resizable(False, False)
+        about_window.transient(self)
+        about_window.grab_set()
+
+        frame = ttk.Frame(about_window, padding=12)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(frame, text=f"{APP_NAME} v{VERSION}", font=("Segoe UI", 12, "bold")).pack(pady=(0, 8))
+        ttk.Label(
+            frame,
+            text="Облік лише за касовим методом. Собівартість за середньозваженим методом.",
+            wraplength=360,
+            justify=tk.CENTER,
+        ).pack(pady=4)
+        ttk.Label(frame, text=f"База даних: {get_db_path()}").pack(pady=4)
+
+        actions = ttk.Frame(frame)
+        actions.pack(pady=(8, 0))
+        ttk.Button(actions, text="Відкрити папку даних", command=lambda: open_data_folder(get_data_dir())).pack(
+            side=tk.LEFT, padx=4
+        )
+        ttk.Button(actions, text="Закрити", command=about_window.destroy).pack(side=tk.LEFT, padx=4)
 
     # Refresh helpers
     def refresh_brands(self) -> None:

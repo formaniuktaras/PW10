@@ -13,7 +13,7 @@ import logging
 import traceback
 import webbrowser
 from collections import defaultdict
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 import sys
 import tkinter as tk
@@ -21,6 +21,8 @@ import tkinter.font as tkfont
 from tkinter import ttk, messagebox, filedialog
 import sqlite3
 from typing import Optional
+
+from openpyxl import load_workbook
 
 import db
 from utils import (
@@ -1789,7 +1791,7 @@ class InventoryApp(tk.Tk):
     def import_sales_from_file(self) -> None:
         file_path = filedialog.askopenfilename(
             title="Файл замовлень",
-            filetypes=[("CSV", "*.csv"), ("Усі файли", "*.*")],
+            filetypes=[("CSV", "*.csv"), ("Excel", "*.xlsx"), ("Усі файли", "*.*")],
             initialdir=self.default_workdir(),
         )
         if not file_path:
@@ -1799,7 +1801,10 @@ class InventoryApp(tk.Tk):
             orders = parse_sales_file(Path(file_path), encoding=self.settings.get("files", "encoding") or "utf-8")
         except Exception:
             logging.exception("Не вдалося прочитати файл імпорту")
-            show_error("Імпорт продажів", "Не вдалося прочитати файл. Перевірте кодування та структуру CSV.")
+            show_error(
+                "Імпорт продажів",
+                "Не вдалося прочитати файл. Перевірте формат, кодування та структуру даних.",
+            )
             return
 
         if not orders:
@@ -2592,7 +2597,48 @@ def _parse_float_value(raw: str) -> float:
         return 0.0
 
 
-def parse_sales_file(path: Path, encoding: str = "utf-8") -> list[dict]:
+def _format_cell_value(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d")
+    if isinstance(value, date):
+        return datetime.combine(value, datetime.min.time()).strftime("%Y-%m-%d")
+    return str(value)
+
+
+def _normalize_sales_records(rows: list[dict[str, object]]) -> list[dict]:
+    records: list[dict] = []
+    for row in rows:
+        normalized = {(k or "").strip().lower(): _format_cell_value(v).strip() for k, v in row.items()}
+
+        def pick(*aliases: str) -> str:
+            for alias in aliases:
+                if alias in normalized and normalized[alias]:
+                    return normalized[alias]
+            return ""
+
+        records.append(
+            {
+                "order_no": pick("номер", "замовлення", "order", "order_id", "order_no", "id"),
+                "doc_date": _parse_date_value(pick("дата", "date", "order_date", "дата оформлення")),
+                "customer": pick("клієнт", "покупець", "customer", "контрагент"),
+                "phone": pick("телефон", "phone"),
+                "email": pick("email", "e-mail"),
+                "sku": pick("sku", "артикул", "код"),
+                "product_name": pick("товар", "product", "назва", "item"),
+                "quantity": _parse_float_value(pick("кількість", "к-сть", "qty", "quantity", "шт")),
+                "price": _parse_float_value(pick("ціна", "price", "amount")),
+                "amount": _parse_float_value(pick("сума", "amount", "total")),
+                "discount": _parse_float_value(pick("знижка", "discount")),
+                "comment": pick("коментар", "примітка", "comment", "note"),
+                "channel": pick("канал", "channel", "майданчик", "площадка", "platform"),
+            }
+        )
+    return records
+
+
+def _read_sales_csv(path: Path, encoding: str) -> list[dict[str, object]]:
     with path.open("r", encoding=encoding, newline="") as f:
         sample = f.read(2048)
         f.seek(0)
@@ -2601,33 +2647,35 @@ def parse_sales_file(path: Path, encoding: str = "utf-8") -> list[dict]:
         except Exception:
             dialect = csv.excel
         reader = csv.DictReader(f, dialect=dialect)
-        records: list[dict] = []
-        for row in reader:
-            normalized = {(k or "").strip().lower(): (v or "").strip() for k, v in row.items()}
+        return [{k or "": v for k, v in row.items()} for row in reader]
 
-            def pick(*aliases: str) -> str:
-                for alias in aliases:
-                    if alias in normalized and normalized[alias]:
-                        return normalized[alias]
-                return ""
 
-            records.append(
-                {
-                    "order_no": pick("номер", "замовлення", "order", "order_id", "order_no", "id"),
-                    "doc_date": _parse_date_value(pick("дата", "date", "order_date", "дата оформлення")),
-                    "customer": pick("клієнт", "покупець", "customer", "контрагент"),
-                    "phone": pick("телефон", "phone"),
-                    "email": pick("email", "e-mail"),
-                    "sku": pick("sku", "артикул", "код"),
-                    "product_name": pick("товар", "product", "назва", "item"),
-                    "quantity": _parse_float_value(pick("кількість", "qty", "quantity")),
-                    "price": _parse_float_value(pick("ціна", "price")),
-                    "amount": _parse_float_value(pick("сума", "amount", "total")),
-                    "channel": pick("канал", "channel", "майданчик", "площадка"),
-                    "comment": pick("коментар", "note", "примітка"),
-                }
-            )
+def _read_sales_xlsx(path: Path) -> list[dict[str, object]]:
+    workbook = load_workbook(path, data_only=True, read_only=True)
+    sheet = workbook.active
+    rows = list(sheet.iter_rows(values_only=True))
+    if not rows:
+        return []
+
+    headers = [_format_cell_value(cell).strip() for cell in rows[0]]
+    records: list[dict[str, object]] = []
+    for row in rows[1:]:
+        record: dict[str, object] = {}
+        for idx, value in enumerate(row):
+            header = headers[idx] if idx < len(headers) else ""
+            record[header] = value
+        records.append(record)
     return records
+
+
+def parse_sales_file(path: Path, encoding: str = "utf-8") -> list[dict]:
+    suffix = path.suffix.lower()
+    if suffix == ".xlsx":
+        raw_rows = _read_sales_xlsx(path)
+    else:
+        raw_rows = _read_sales_csv(path, encoding)
+
+    return _normalize_sales_records(raw_rows)
 
 
 class SalesImportDialog(tk.Toplevel):

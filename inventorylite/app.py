@@ -156,15 +156,147 @@ class InventoryApp(tk.Tk):
         style = ttk.Style()
         try:
             if theme == "dark":
-                self._apply_dark_theme(style)
-            elif theme == "light" and "default" in style.theme_names():
-                style.theme_use("default")
+                palette = self._apply_dark_theme(style)
+            elif theme == "light":
+                palette = self._apply_light_theme(style)
             else:
-                style.theme_use(style.theme_use())
+                palette = self._apply_system_theme(style)
+            self._apply_palette(palette)
         except tk.TclError:
             logging.warning("Не вдалося застосувати тему %s", theme)
 
-    def _apply_dark_theme(self, style: ttk.Style) -> None:
+    def _preferred_base_theme(self, style: ttk.Style) -> str:
+        for candidate in ("vista", "xpnative", "clam", "default"):
+            if candidate in style.theme_names():
+                return candidate
+        return style.theme_use()
+
+    def _apply_system_theme(self, style: ttk.Style) -> dict[str, str]:
+        base_theme = self._preferred_base_theme(style)
+        style.theme_use(base_theme)
+        return {
+            "bg": style.lookup("TFrame", "background") or style.lookup(".", "background") or "#f0f0f0",
+            "surface": style.lookup("TNotebook", "background") or "#e6e6e6",
+            "surface_alt": style.lookup("TButton", "background") or "#d9d9d9",
+            "text": style.lookup("TLabel", "foreground") or "#000000",
+            "muted": "#555555",
+            "accent": "#4a90e2",
+        }
+
+    def _apply_light_theme(self, style: ttk.Style) -> dict[str, str]:
+        base_theme = self._preferred_base_theme(style)
+        palette = {
+            "bg": "#f7f7f7",
+            "surface": "#ffffff",
+            "surface_alt": "#ededed",
+            "text": "#202020",
+            "muted": "#5b5b5b",
+            "accent": "#4a90e2",
+        }
+
+        if "inventorylite-light" not in style.theme_names():
+            style.theme_create(
+                "inventorylite-light",
+                parent=base_theme,
+                settings={
+                    ".": {
+                        "configure": {
+                            "background": palette["bg"],
+                            "foreground": palette["text"],
+                            "fieldbackground": palette["surface"],
+                            "troughcolor": palette["surface_alt"],
+                            "bordercolor": palette["surface_alt"],
+                            "focuscolor": palette["accent"],
+                        }
+                    },
+                    "TFrame": {"configure": {"background": palette["bg"]}},
+                    "TLabel": {
+                        "configure": {
+                            "background": palette["bg"],
+                            "foreground": palette["text"],
+                        }
+                    },
+                    "TButton": {
+                        "configure": {
+                            "background": palette["surface_alt"],
+                            "foreground": palette["text"],
+                            "padding": (10, 6),
+                        },
+                        "map": {
+                            "background": [
+                                ("pressed", palette["accent"]),
+                                ("active", palette["surface"]),
+                            ]
+                        },
+                    },
+                    "TEntry": {
+                        "configure": {
+                            "fieldbackground": palette["surface"],
+                            "foreground": palette["text"],
+                            "insertcolor": palette["text"],
+                        }
+                    },
+                    "TCombobox": {
+                        "configure": {
+                            "fieldbackground": palette["surface"],
+                            "foreground": palette["text"],
+                            "background": palette["surface_alt"],
+                            "arrowsize": 14,
+                        },
+                        "map": {
+                            "fieldbackground": [("readonly", palette["surface"])],
+                            "background": [
+                                ("active", palette["surface_alt"]),
+                                ("readonly", palette["surface_alt"]),
+                            ],
+                        },
+                    },
+                    "TNotebook": {
+                        "configure": {
+                            "background": palette["bg"],
+                            "tabmargins": (6, 3, 6, 0),
+                        }
+                    },
+                    "TNotebook.Tab": {
+                        "configure": {
+                            "background": palette["surface_alt"],
+                            "foreground": palette["muted"],
+                            "padding": (12, 6),
+                        },
+                        "map": {
+                            "background": [("selected", palette["surface"])],
+                            "foreground": [("selected", palette["text"])],
+                        },
+                    },
+                    "Treeview": {
+                        "configure": {
+                            "background": palette["surface"],
+                            "fieldbackground": palette["surface"],
+                            "foreground": palette["text"],
+                            "bordercolor": palette["surface_alt"],
+                            "lightcolor": palette["surface"],
+                            "darkcolor": palette["surface_alt"],
+                        },
+                        "map": {
+                            "background": [("selected", palette["accent"])],
+                            "foreground": [("selected", palette["surface"]), ("!selected", palette["text"])],
+                        },
+                    },
+                    "Treeview.Heading": {
+                        "configure": {
+                            "background": palette["surface_alt"],
+                            "foreground": palette["text"],
+                            "relief": "flat",
+                        },
+                        "map": {"background": [("active", palette["surface_alt"])]},
+                    },
+                },
+            )
+
+        style.theme_use("inventorylite-light")
+        return palette
+
+    def _apply_dark_theme(self, style: ttk.Style) -> dict[str, str]:
         base_theme = "clam" if "clam" in style.theme_names() else style.theme_use()
         palette = {
             "bg": "#2b2b2b",
@@ -275,17 +407,23 @@ class InventoryApp(tk.Tk):
             )
 
         style.theme_use("inventorylite-dark")
-        self.configure(background=palette["bg"])
+        return palette
+
+    def _apply_palette(self, palette: dict[str, str]) -> None:
+        try:
+            self.configure(background=palette.get("bg"))
+        except tk.TclError:
+            logging.debug("Tk configure not available for background")
         try:
             self.tk_setPalette(
-                background=palette["bg"],
-                foreground=palette["text"],
-                activeBackground=palette["surface"],
-                activeForeground=palette["text"],
-                highlightColor=palette["accent"],
-                highlightBackground=palette["surface"],
-                insertBackground=palette["text"],
-                troughColor=palette["surface"],
+                background=palette.get("bg"),
+                foreground=palette.get("text"),
+                activeBackground=palette.get("surface"),
+                activeForeground=palette.get("text"),
+                highlightColor=palette.get("accent"),
+                highlightBackground=palette.get("surface"),
+                insertBackground=palette.get("text"),
+                troughColor=palette.get("surface"),
             )
         except tk.TclError:
             logging.debug("Tk palette is not available")

@@ -8,9 +8,11 @@ The app focuses on a lightweight workflow for a trading business:
 """
 from __future__ import annotations
 
+import csv
 import logging
 import traceback
 import webbrowser
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 import sys
@@ -1636,6 +1638,7 @@ class InventoryApp(tk.Tk):
         ttk.Button(btns, text="Видалити", command=self.delete_sale).pack(side=tk.LEFT, padx=4)
         ttk.Button(btns, text="Провести", command=self.post_sale_action).pack(side=tk.LEFT, padx=4)
         ttk.Button(btns, text="Відмінити проведення", command=self.unpost_sale_action).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Імпорт із файлу", command=self.import_sales_from_file).pack(side=tk.LEFT, padx=4)
 
     def _selected_sale(self):
         doc_id = self.sales_table.selected_id()
@@ -1782,6 +1785,208 @@ class InventoryApp(tk.Tk):
         except Exception as exc:
             logging.exception("Unpost sale error")
             show_error("Продажі", str(exc))
+
+    def import_sales_from_file(self) -> None:
+        file_path = filedialog.askopenfilename(
+            title="Файл замовлень",
+            filetypes=[("CSV", "*.csv"), ("Усі файли", "*.*")],
+            initialdir=self.default_workdir(),
+        )
+        if not file_path:
+            return
+
+        try:
+            orders = parse_sales_file(Path(file_path), encoding=self.settings.get("files", "encoding") or "utf-8")
+        except Exception:
+            logging.exception("Не вдалося прочитати файл імпорту")
+            show_error("Імпорт продажів", "Не вдалося прочитати файл. Перевірте кодування та структуру CSV.")
+            return
+
+        if not orders:
+            messagebox.showinfo("Імпорт продажів", "У файлі не знайдено рядків із товарами.")
+            return
+
+        warehouses = db.list_warehouses(active_only=True)
+        if not warehouses:
+            show_error("Імпорт продажів", "Спочатку створіть хоча б один склад.")
+            return
+        channels = db.list_channels(active_only=False)
+
+        dialog = SalesImportDialog(self, orders, warehouses, channels)
+        options = dialog.result
+        if not options:
+            return
+
+        try:
+            summary = self._process_sales_import(orders, options)
+        except Exception:
+            logging.exception("Помилка під час імпорту продажів")
+            show_error("Імпорт продажів", "Імпорт перервано помилкою. Деталі у логах.")
+            return
+
+        messagebox.showinfo("Імпорт продажів", summary)
+        self.refresh_sales()
+        self.refresh_cash()
+        self.refresh_stock()
+
+    def _process_sales_import(self, orders: list[dict], options: dict) -> str:
+        warehouse_id = options["warehouse_id"]
+        channel_override = options.get("channel", "")
+        mode = options.get("mode", "draft")
+        allow_negative = bool(options.get("allow_negative"))
+        create_products = bool(options.get("create_products"))
+        create_customers = bool(options.get("create_customers"))
+        use_file_channel = bool(options.get("use_file_channel"))
+
+        product_rows = db.list_products()
+        products_by_sku = {p["sku"].lower(): dict(p) for p in product_rows if p["sku"]}
+        products_by_name = {p["name"].lower(): dict(p) for p in product_rows if p["name"]}
+        counterparties = db.list_counterparties()
+        allowed_customer_types = {"customer", "both", "other"}
+        customers_by_name = {
+            c["name"].lower(): c for c in counterparties if c["type"] in allowed_customer_types and c["name"]
+        }
+
+        brand_id, category_id = db.ensure_import_defaults()
+        stock_map = db.stock_on_hand(warehouse_id)
+
+        created_products = 0
+        created_customers = 0
+        skipped_lines = 0
+        posted_docs = 0
+        draft_docs = 0
+        total_docs = 0
+
+        grouped: dict[str, list[dict]] = defaultdict(list)
+        for idx, row in enumerate(orders):
+            key = row.get("order_no") or f"#{idx+1}"
+            grouped[key].append(row)
+
+        for order_no, lines in grouped.items():
+            doc_date = lines[0].get("doc_date") or datetime.now().strftime("%Y-%m-%d")
+            customer_name = lines[0].get("customer", "").strip()
+            phone = lines[0].get("phone", "").strip()
+            email = lines[0].get("email", "").strip()
+            customer_id = None
+
+            if customer_name:
+                existing = customers_by_name.get(customer_name.lower()) or db.find_counterparty_by_name(
+                    customer_name, allowed_customer_types
+                )
+                if existing:
+                    customer_id = existing["id"]
+                    customers_by_name[customer_name.lower()] = dict(existing)
+                elif create_customers:
+                    customer_id = db.add_counterparty(customer_name, "customer", phone, email, "", "Імпортований клієнт")
+                    new_cp = {
+                        "id": customer_id,
+                        "name": customer_name,
+                        "type": "customer",
+                        "phone": phone,
+                        "email": email,
+                        "address": "",
+                        "note": "Імпортований клієнт",
+                    }
+                    counterparties.append(new_cp)
+                    customers_by_name[customer_name.lower()] = new_cp
+                    created_customers += 1
+
+            sale_lines: list[tuple[int, float, float]] = []
+            comment = lines[0].get("comment", "").strip()
+            line_channel = lines[0].get("channel", "").strip()
+            channel_value = line_channel if (use_file_channel and line_channel) else channel_override
+
+            for row in lines:
+                sku = (row.get("sku") or "").strip()
+                name = (row.get("product_name") or sku or "Без назви").strip()
+                qty = float(row.get("quantity") or 0)
+                price = float(row.get("price") or 0)
+                amount = float(row.get("amount") or 0)
+                if not price and qty and amount:
+                    price = amount / qty
+
+                product_row = products_by_sku.get(sku.lower()) if sku else None
+                if not product_row and name:
+                    product_row = products_by_name.get(name.lower())
+                if not product_row and create_products:
+                    final_sku = sku or self._generate_unique_sku(name, set(products_by_sku.keys()))
+                    product_id = db.add_product(final_sku, name, brand_id, category_id)
+                    product_row = {
+                        "id": product_id,
+                        "sku": final_sku,
+                        "name": name,
+                    }
+                    products_by_sku[final_sku.lower()] = product_row
+                    products_by_name[name.lower()] = product_row
+                    created_products += 1
+
+                if not product_row or qty <= 0:
+                    skipped_lines += 1
+                    continue
+
+                sale_lines.append((int(product_row["id"]), qty, price))
+
+            if not sale_lines:
+                skipped_lines += len(lines)
+                continue
+
+            total_docs += 1
+            try:
+                sale_id = db.create_sale(doc_date, customer_id, warehouse_id, channel_value, comment, "UAH", 1.0)
+                db.replace_sale_lines(sale_id, sale_lines, 1.0)
+            except Exception as exc:
+                logging.warning("Не вдалося створити продаж %s: %s", order_no, exc)
+                skipped_lines += len(sale_lines)
+                continue
+
+            should_post = mode == "post"
+            if mode == "in_stock":
+                enough = True
+                for pid, qty, _ in sale_lines:
+                    current_qty = stock_map.get(pid, db.get_stock_quantity(pid, warehouse_id))
+                    if qty > current_qty:
+                        enough = False
+                        break
+                should_post = enough
+
+            if should_post:
+                try:
+                    db.post_sale(sale_id, allow_negative=allow_negative)
+                    posted_docs += 1
+                    for pid, qty, _ in sale_lines:
+                        stock_map[pid] = stock_map.get(pid, db.get_stock_quantity(pid, warehouse_id)) - qty
+                except Exception as exc:
+                    logging.warning("Проведення продажу #%s завершилось помилкою: %s", sale_id, exc)
+                    try:
+                        db.unpost_sale(sale_id)
+                    except Exception:
+                        logging.exception("Не вдалося скасувати проведення після помилки імпорту")
+                    draft_docs += 1
+            else:
+                draft_docs += 1
+
+        lines_msg = f"Пропущено рядків: {skipped_lines}" if skipped_lines else "Без пропусків"
+        created_parts = []
+        if created_products:
+            created_parts.append(f"створено товарів: {created_products}")
+        if created_customers:
+            created_parts.append(f"створено клієнтів: {created_customers}")
+        created_msg = ", ".join(created_parts) if created_parts else "без нових довідників"
+        return (
+            f"Опрацьовано документів: {total_docs}. Проведено: {posted_docs}, чернеток: {draft_docs}. "
+            f"{lines_msg}; {created_msg}."
+        )
+
+    def _generate_unique_sku(self, base: str, existing: set[str]) -> str:
+        clean = (base or "AUTO").upper().replace(" ", "")
+        if len(clean) < 3:
+            clean = f"AUTO{clean}"
+        candidate = clean[:20] or "AUTO"
+        idx = 1
+        while candidate.lower() in existing:
+            idx += 1
+            candidate = f"{clean[:15]}-{idx}"
+        return candidate
 
     # Cash
     def create_cash_tab(self) -> None:
@@ -2364,6 +2569,192 @@ class InventoryApp(tk.Tk):
 
 
 # Dialogs
+
+def _parse_date_value(raw: str) -> str:
+    raw = (raw or "").strip()
+    if not raw:
+        return datetime.now().strftime("%Y-%m-%d")
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y", "%d-%m-%Y", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(raw, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def _parse_float_value(raw: str) -> float:
+    if raw is None:
+        return 0.0
+    text = str(raw).replace(" ", "").replace(",", ".").strip()
+    try:
+        return float(text)
+    except ValueError:
+        return 0.0
+
+
+def parse_sales_file(path: Path, encoding: str = "utf-8") -> list[dict]:
+    with path.open("r", encoding=encoding, newline="") as f:
+        sample = f.read(2048)
+        f.seek(0)
+        try:
+            dialect = csv.Sniffer().sniff(sample) if sample else csv.excel
+        except Exception:
+            dialect = csv.excel
+        reader = csv.DictReader(f, dialect=dialect)
+        records: list[dict] = []
+        for row in reader:
+            normalized = {(k or "").strip().lower(): (v or "").strip() for k, v in row.items()}
+
+            def pick(*aliases: str) -> str:
+                for alias in aliases:
+                    if alias in normalized and normalized[alias]:
+                        return normalized[alias]
+                return ""
+
+            records.append(
+                {
+                    "order_no": pick("номер", "замовлення", "order", "order_id", "order_no", "id"),
+                    "doc_date": _parse_date_value(pick("дата", "date", "order_date", "дата оформлення")),
+                    "customer": pick("клієнт", "покупець", "customer", "контрагент"),
+                    "phone": pick("телефон", "phone"),
+                    "email": pick("email", "e-mail"),
+                    "sku": pick("sku", "артикул", "код"),
+                    "product_name": pick("товар", "product", "назва", "item"),
+                    "quantity": _parse_float_value(pick("кількість", "qty", "quantity")),
+                    "price": _parse_float_value(pick("ціна", "price")),
+                    "amount": _parse_float_value(pick("сума", "amount", "total")),
+                    "channel": pick("канал", "channel", "майданчик", "площадка"),
+                    "comment": pick("коментар", "note", "примітка"),
+                }
+            )
+    return records
+
+
+class SalesImportDialog(tk.Toplevel):
+    def __init__(self, app: tk.Tk, orders: list[dict], warehouses, channels) -> None:
+        super().__init__(app)
+        self.title("Імпорт продажів")
+        self.resizable(True, True)
+        self.grab_set()
+        self.result: Optional[dict] = None
+        self.orders = orders
+        self.warehouses = warehouses
+        self.channels = channels
+
+        main = ttk.Frame(self, padding=10)
+        main.pack(fill=tk.BOTH, expand=True)
+
+        info = ttk.Label(main, text=f"Рядків у файлі: {len(orders)}")
+        info.grid(row=0, column=0, columnspan=2, sticky="w")
+
+        ttk.Label(main, text="Склад для імпорту:").grid(row=1, column=0, sticky="w", pady=4)
+        self.wh_var = tk.StringVar(value=warehouses[0]["name"] if warehouses else "")
+        wh_combo = ttk.Combobox(main, textvariable=self.wh_var, values=[w["name"] for w in warehouses], state="readonly")
+        wh_combo.grid(row=1, column=1, sticky="ew", pady=4)
+
+        ttk.Label(main, text="Канал (якщо не вказано у файлі):").grid(row=2, column=0, sticky="w", pady=4)
+        self.channel_var = tk.StringVar()
+        channel_values = [c["name"] for c in channels]
+        ttk.Combobox(main, textvariable=self.channel_var, values=channel_values).grid(row=2, column=1, sticky="ew", pady=4)
+
+        self.use_file_channel_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(main, text="Брати канал із файлу, якщо він є", variable=self.use_file_channel_var).grid(
+            row=3, column=1, sticky="w"
+        )
+
+        ttk.Label(main, text="Режим проведення:").grid(row=4, column=0, sticky="nw", pady=4)
+        mode_frame = ttk.Frame(main)
+        mode_frame.grid(row=4, column=1, sticky="w", pady=4)
+        self.mode_var = tk.StringVar(value="post")
+        ttk.Radiobutton(mode_frame, text="Провести всі", variable=self.mode_var, value="post").pack(anchor="w")
+        ttk.Radiobutton(mode_frame, text="Тільки чернетки", variable=self.mode_var, value="draft").pack(anchor="w")
+        ttk.Radiobutton(
+            mode_frame, text="Проводити, лише якщо є залишок", variable=self.mode_var, value="in_stock"
+        ).pack(anchor="w")
+
+        self.allow_negative_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            main,
+            text="Дозволити від'ємний залишок під час проведення",
+            variable=self.allow_negative_var,
+        ).grid(row=5, column=1, sticky="w")
+
+        self.create_products_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(main, text="Створювати відсутні товари", variable=self.create_products_var).grid(
+            row=6, column=1, sticky="w", pady=(4, 0)
+        )
+        self.create_customers_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(main, text="Створювати відсутніх клієнтів", variable=self.create_customers_var).grid(
+            row=7, column=1, sticky="w"
+        )
+
+        ttk.Label(main, text="Попередній перегляд (перші 30 рядків):").grid(row=8, column=0, columnspan=2, sticky="w", pady=6)
+        preview = ttk.Treeview(
+            main,
+            columns=("order", "date", "customer", "sku", "name", "qty", "price"),
+            show="headings",
+            height=10,
+        )
+        headings = {
+            "order": ("Замовлення", 120),
+            "date": ("Дата", 90),
+            "customer": ("Клієнт", 160),
+            "sku": ("SKU", 90),
+            "name": ("Товар", 200),
+            "qty": ("К-сть", 70),
+            "price": ("Ціна", 90),
+        }
+        for col, (title, width) in headings.items():
+            preview.heading(col, text=title)
+            preview.column(col, width=width, anchor="w")
+        preview.grid(row=9, column=0, columnspan=2, sticky="nsew")
+        main.grid_rowconfigure(9, weight=1)
+        main.grid_columnconfigure(1, weight=1)
+        scroll = ttk.Scrollbar(main, orient="vertical", command=preview.yview)
+        preview.configure(yscrollcommand=scroll.set)
+        scroll.grid(row=9, column=2, sticky="ns")
+
+        for row in orders[:30]:
+            preview.insert(
+                "",
+                "end",
+                values=(
+                    row.get("order_no") or "-",
+                    row.get("doc_date"),
+                    row.get("customer"),
+                    row.get("sku"),
+                    row.get("product_name"),
+                    f"{float(row.get('quantity') or 0):.2f}",
+                    f"{float(row.get('price') or 0):.2f}",
+                ),
+            )
+
+        btns = ttk.Frame(main)
+        btns.grid(row=10, column=0, columnspan=2, pady=8, sticky="e")
+        ttk.Button(btns, text="Скасувати", command=self.destroy).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btns, text="Імпортувати", command=self._on_ok).pack(side=tk.RIGHT, padx=4)
+
+        self.bind("<Return>", lambda _e: self._on_ok())
+        self.bind("<Escape>", lambda _e: self.destroy())
+        self.wait_window(self)
+
+    def _on_ok(self) -> None:
+        warehouse = next((w for w in self.warehouses if w["name"] == self.wh_var.get()), None)
+        if not warehouse:
+            show_error("Імпорт", "Оберіть склад")
+            return
+
+        self.result = {
+            "warehouse_id": warehouse["id"],
+            "channel": self.channel_var.get().strip(),
+            "mode": self.mode_var.get(),
+            "allow_negative": bool(self.allow_negative_var.get()),
+            "create_products": bool(self.create_products_var.get()),
+            "create_customers": bool(self.create_customers_var.get()),
+            "use_file_channel": bool(self.use_file_channel_var.get()),
+        }
+        self.destroy()
+
 
 def product_prompt(brands, categories, title: str, initial=None):
     base_initial = {

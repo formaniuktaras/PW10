@@ -589,7 +589,7 @@ class InventoryApp(tk.Tk):
         ttk.Button(btns, text="Службова/Прихована", command=self.toggle_category_flags).pack(side=tk.LEFT, padx=4)
         ttk.Button(btns, text="Видалити/Злити", command=self.delete_category).pack(side=tk.LEFT, padx=4)
 
-        columns = ("products", "flags")
+        columns = ("products", "quantity", "flags")
         self.category_tree = ttk.Treeview(
             self.categories_frame,
             columns=columns,
@@ -597,8 +597,10 @@ class InventoryApp(tk.Tk):
             selectmode="browse",
         )
         self.category_tree.heading("#0", text="Категорія")
-        self.category_tree.heading("products", text="Товарів")
-        self.category_tree.column("products", width=90, anchor="center")
+        self.category_tree.heading("products", text="Найменувань")
+        self.category_tree.column("products", width=110, anchor="center")
+        self.category_tree.heading("quantity", text="Одиниць на складі")
+        self.category_tree.column("quantity", width=140, anchor="center")
         self.category_tree.heading("flags", text="Статус")
         self.category_tree.column("flags", width=160, anchor="w")
         self.category_tree.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
@@ -2177,7 +2179,7 @@ class InventoryApp(tk.Tk):
         rows = db.list_categories(include_hidden=True)
         self.categories_index = {int(r["id"]): dict(r) for r in rows}
         search = getattr(self, "category_search_var", tk.StringVar(value="")).get().lower().strip()
-        counts = db.category_product_counts()
+        category_products, product_quantities = db.category_inventory_data()
 
         children_map: dict[Optional[int], list[dict]] = {}
         for row in rows:
@@ -2187,13 +2189,15 @@ class InventoryApp(tk.Tk):
             lst.sort(key=lambda c: (c.get("sort_order", 0), c.get("name", "")))
 
         subtree_counts: dict[int, int] = {}
+        subtree_quantities: dict[int, float] = {}
 
-        def calc_total(cid: int) -> int:
-            total = counts.get(cid, 0)
+        def calc_total(cid: int) -> set[int]:
+            products = set(category_products.get(cid, set()))
             for child in children_map.get(cid, []):
-                total += calc_total(child["id"])
-            subtree_counts[cid] = total
-            return total
+                products |= calc_total(child["id"])
+            subtree_counts[cid] = len(products)
+            subtree_quantities[cid] = sum(product_quantities.get(pid, 0.0) for pid in products)
+            return products
 
         for root in children_map.get(None, []):
             calc_total(root["id"])
@@ -2225,7 +2229,11 @@ class InventoryApp(tk.Tk):
                     "end",
                     iid=str(cat["id"]),
                     text=cat["name"],
-                    values=(subtree_counts.get(cat["id"], counts.get(cat["id"], 0)), ", ".join(flags)),
+                    values=(
+                        subtree_counts.get(cat["id"], len(category_products.get(cat["id"], set()))),
+                        f"{subtree_quantities.get(cat['id'], 0.0):.2f}",
+                        ", ".join(flags),
+                    ),
                 )
                 render(cat["id"], node_id)
 

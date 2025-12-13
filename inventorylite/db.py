@@ -15,7 +15,7 @@ import math
 import sqlite3
 from pathlib import Path
 from statistics import mean, pstdev
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from utils import BASE_CURRENCY, BASE_CURRENCY_DECIMALS, BASE_CURRENCY_NAME, get_db_path
 
@@ -665,32 +665,51 @@ def delete_category(category_id: int, target_category_id: Optional[int] = None) 
 
 
 def category_product_counts(include_hidden: bool = True) -> Dict[int, int]:
-    """Return dict of category_id -> products count (main + additional)."""
+    stats = category_inventory_stats(include_hidden)
+    return {cid: values["products"] for cid, values in stats.items()}
+
+
+def category_inventory_data(include_hidden: bool = True) -> Tuple[Dict[int, Set[int]], Dict[int, float]]:
+    """Return category -> products mapping and product -> total quantity.
+
+    Both main and additional category links are included. Hidden categories can be
+    excluded with ``include_hidden=False``.
+    """
 
     where_clause = ""
     if not include_hidden:
         where_clause = "WHERE IFNULL(c.is_hidden,0)=0"
 
     with get_connection() as conn:
-        main_counts = {
-            row["category_id"]: row["cnt"]
-            for row in conn.execute(
-                f"SELECT p.category_id, COUNT(*) as cnt FROM Products p JOIN Categories c ON c.id=p.category_id {where_clause} GROUP BY p.category_id"
-            )
-        }
-        link_counts = {
-            row["category_id"]: row["cnt"]
-            for row in conn.execute(
-                f"SELECT l.category_id, COUNT(*) as cnt FROM ProductCategoryLinks l JOIN Categories c ON c.id=l.category_id {where_clause} GROUP BY l.category_id"
-            )
-        }
+        rows = conn.execute(
+            f"SELECT p.id AS product_id, p.category_id AS category_id FROM Products p JOIN Categories c ON c.id = p.category_id {where_clause}"
+        ).fetchall()
+        linked_rows = conn.execute(
+            f"SELECT l.product_id, l.category_id FROM ProductCategoryLinks l JOIN Categories c ON c.id = l.category_id {where_clause}"
+        ).fetchall()
+        quantities = conn.execute(
+            "SELECT product_id, IFNULL(SUM(quantity), 0) AS qty FROM StockBalances GROUP BY product_id"
+        ).fetchall()
 
-    counts: Dict[int, int] = {}
-    for cid, cnt in main_counts.items():
-        counts[cid] = counts.get(cid, 0) + int(cnt)
-    for cid, cnt in link_counts.items():
-        counts[cid] = counts.get(cid, 0) + int(cnt)
-    return counts
+    category_products: Dict[int, Set[int]] = {}
+    for row in rows + linked_rows:
+        category_products.setdefault(int(row["category_id"]), set()).add(int(row["product_id"]))
+
+    product_quantities = {int(row["product_id"]): float(row["qty"]) for row in quantities}
+    return category_products, product_quantities
+
+
+def category_inventory_stats(include_hidden: bool = True) -> Dict[int, Dict[str, float | int]]:
+    """Return per-category stats: product count and total stock quantity."""
+
+    category_products, product_quantities = category_inventory_data(include_hidden)
+    stats: Dict[int, Dict[str, float | int]] = {}
+    for cid, products in category_products.items():
+        stats[cid] = {
+            "products": len(products),
+            "quantity": sum(product_quantities.get(pid, 0.0) for pid in products),
+        }
+    return stats
 
 
 # Product CRUD

@@ -21,8 +21,6 @@ import tkinter.font as tkfont
 from tkinter import ttk, messagebox, filedialog
 import sqlite3
 from typing import Optional
-import xlrd
-
 from openpyxl import load_workbook
 
 import db
@@ -1800,11 +1798,11 @@ class InventoryApp(tk.Tk):
 
         try:
             orders = parse_sales_file(Path(file_path), encoding=self.settings.get("files", "encoding") or "utf-8")
-        except Exception:
+        except Exception as exc:
             logging.exception("Не вдалося прочитати файл імпорту")
             show_error(
                 "Імпорт продажів",
-                "Не вдалося прочитати файл. Перевірте формат, кодування та структуру даних.",
+                "Не вдалося прочитати файл. Перевірте формат, кодування та структуру даних.\n" + str(exc),
             )
             return
 
@@ -2670,6 +2668,13 @@ def _read_sales_xlsx(path: Path) -> list[dict[str, object]]:
 
 
 def _read_sales_xls(path: Path) -> list[dict[str, object]]:
+    try:
+        import xlrd
+    except ImportError as exc:
+        raise ImportError(
+            "Для імпорту XLS-файлів потрібно встановити залежність 'xlrd'."
+        ) from exc
+
     workbook = xlrd.open_workbook(path)
     sheet = workbook.sheet_by_index(0)
     if sheet.nrows == 0:

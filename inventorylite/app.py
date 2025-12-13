@@ -21,6 +21,7 @@ import tkinter.font as tkfont
 from tkinter import ttk, messagebox, filedialog
 import sqlite3
 from typing import Optional
+import xlrd
 
 from openpyxl import load_workbook
 
@@ -1791,7 +1792,7 @@ class InventoryApp(tk.Tk):
     def import_sales_from_file(self) -> None:
         file_path = filedialog.askopenfilename(
             title="Файл замовлень",
-            filetypes=[("CSV", "*.csv"), ("Excel", "*.xlsx"), ("Усі файли", "*.*")],
+            filetypes=[("CSV", "*.csv"), ("Excel", "*.xlsx *.xls"), ("Усі файли", "*.*")],
             initialdir=self.default_workdir(),
         )
         if not file_path:
@@ -2668,10 +2669,36 @@ def _read_sales_xlsx(path: Path) -> list[dict[str, object]]:
     return records
 
 
+def _read_sales_xls(path: Path) -> list[dict[str, object]]:
+    workbook = xlrd.open_workbook(path)
+    sheet = workbook.sheet_by_index(0)
+    if sheet.nrows == 0:
+        return []
+
+    headers = [_format_cell_value(sheet.cell_value(0, col)).strip() for col in range(sheet.ncols)]
+    records: list[dict[str, object]] = []
+    for row_idx in range(1, sheet.nrows):
+        record: dict[str, object] = {}
+        for col_idx in range(sheet.ncols):
+            header = headers[col_idx] if col_idx < len(headers) else ""
+            cell = sheet.cell(row_idx, col_idx)
+            value: object = cell.value
+            if cell.ctype == xlrd.XL_CELL_DATE:
+                try:
+                    value = xlrd.xldate_as_datetime(value, workbook.datemode)
+                except Exception:
+                    pass
+            record[header] = value
+        records.append(record)
+    return records
+
+
 def parse_sales_file(path: Path, encoding: str = "utf-8") -> list[dict]:
     suffix = path.suffix.lower()
     if suffix == ".xlsx":
         raw_rows = _read_sales_xlsx(path)
+    elif suffix == ".xls":
+        raw_rows = _read_sales_xls(path)
     else:
         raw_rows = _read_sales_csv(path, encoding)
 

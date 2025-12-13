@@ -8,6 +8,8 @@ import shutil
 import sys
 import tempfile
 import zipfile
+import json
+from copy import deepcopy
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 import tkinter as tk
@@ -31,6 +33,44 @@ BASE_CURRENCY_NAME = "Українська гривня"
 BASE_CURRENCY_DECIMALS = 2
 
 
+DEFAULT_SETTINGS = {
+    "general": {"language": "uk", "theme": "system"},
+    "files": {
+        "working_dir": str(Path.home()),
+        "recent_limit": 10,
+        "recent_items": [],
+        "encoding": "utf-8",
+    },
+    "ui": {
+        "panel_layout": "Авто",
+        "status_bar": True,
+        "compact_mode": False,
+        "fullscreen": False,
+        "notifications_volume": 70,
+        "notifications_duration": 3,
+    },
+    "editor": {
+        "font_family": "TkDefaultFont",
+        "font_size": 10,
+        "syntax_highlighting": True,
+        "indent_with_tabs": False,
+        "tab_width": 4,
+        "line_numbers": True,
+        "minimap": False,
+        "auto_format": False,
+        "autocomplete": True,
+        "line_length_limit": 120,
+    },
+    "hotkeys": {"profile": "Типовий", "allow_custom": True},
+    "support": {
+        "log_level": "INFO",
+        "collect_system_info": True,
+        "auto_error_reports": False,
+        "docs_url": "https://example.com/docs",
+    },
+}
+
+
 def get_data_dir() -> Path:
     """Return the data directory under LOCALAPPDATA."""
     local_appdata = os.environ.get("LOCALAPPDATA") or os.path.join(Path.home(), ".local", "share")
@@ -50,6 +90,57 @@ def get_lock_path() -> Path:
 def get_log_path() -> Path:
     return get_data_dir() / "app.log"
 
+
+def get_settings_path() -> Path:
+    return get_data_dir() / "settings.json"
+
+
+class Settings:
+    """Simple JSON-based settings storage."""
+
+    def __init__(self) -> None:
+        self.path = get_settings_path()
+        self.data = deepcopy(DEFAULT_SETTINGS)
+        self._load()
+
+    def _load(self) -> None:
+        if not self.path.exists():
+            return
+        try:
+            loaded = json.loads(self.path.read_text(encoding="utf-8"))
+            self._merge(self.data, loaded)
+        except Exception:
+            logging.exception("Failed to load settings; using defaults")
+
+    def save(self) -> None:
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps(self.data, indent=2, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            logging.exception("Failed to save settings")
+
+    def _merge(self, dest: dict, src: dict) -> None:
+        for key, value in src.items():
+            if isinstance(value, dict) and isinstance(dest.get(key), dict):
+                self._merge(dest[key], value)
+            else:
+                dest[key] = value
+
+    def get(self, *keys: str, default=None):
+        cursor = self.data
+        for key in keys:
+            if not isinstance(cursor, dict):
+                return default
+            cursor = cursor.get(key)
+        return cursor if cursor is not None else default
+
+    def set(self, value, *keys: str) -> None:
+        if not keys:
+            raise ValueError("At least one key is required")
+        cursor = self.data
+        for key in keys[:-1]:
+            cursor = cursor.setdefault(key, {})
+        cursor[keys[-1]] = value
 
 def configure_logging() -> None:
     log_path = get_log_path()

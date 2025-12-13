@@ -772,6 +772,29 @@ def add_product(
         return cur.lastrowid
 
 
+def find_product_by_sku_or_name(sku: Optional[str], name: Optional[str]) -> Optional[sqlite3.Row]:
+    """Find product by SKU or name (case-insensitive)."""
+
+    sku = (sku or "").strip()
+    name = (name or "").strip()
+    clauses: List[str] = []
+    params: List[str] = []
+    if sku:
+        clauses.append("lower(sku)=?")
+        params.append(sku.lower())
+    if name:
+        clauses.append("lower(name)=?")
+        params.append(name.lower())
+    if not clauses:
+        return None
+    where = " OR ".join(clauses)
+    with get_connection() as conn:
+        return conn.execute(
+            f"SELECT id, sku, name, brand_id, category_id, unit, is_active FROM Products WHERE {where} LIMIT 1",
+            tuple(params),
+        ).fetchone()
+
+
 def update_product(
     product_id: int,
     sku: str,
@@ -1058,6 +1081,66 @@ def delete_counterparty(counterparty_id: int) -> None:
 
 
 # Helpers for balances
+
+
+def ensure_import_defaults(brand_name: str = "Імпорт", category_name: str = "Імпорт") -> Tuple[int, int]:
+    """Return (brand_id, category_id), creating placeholder entries if necessary."""
+
+    with get_connection() as conn:
+        brand_row = conn.execute("SELECT id FROM Brands ORDER BY id LIMIT 1").fetchone()
+        category_row = conn.execute("SELECT id FROM Categories ORDER BY id LIMIT 1").fetchone()
+
+        if not brand_row:
+            brand_id = conn.execute("INSERT INTO Brands (name) VALUES (?)", (brand_name,)).lastrowid
+            conn.commit()
+        else:
+            brand_id = int(brand_row["id"])
+
+        if not category_row:
+            category_id = conn.execute(
+                "INSERT INTO Categories (name, sort_order, is_service, is_hidden) VALUES (?, 0, 0, 0)",
+                (category_name,),
+            ).lastrowid
+            conn.commit()
+        else:
+            category_id = int(category_row["id"])
+
+    return brand_id, category_id
+
+
+def stock_on_hand(warehouse_id: int) -> Dict[int, float]:
+    """Return mapping product_id -> available quantity for the warehouse."""
+
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT product_id, quantity FROM StockBalances WHERE warehouse_id=?", (warehouse_id,)
+        ).fetchall()
+    return {int(row["product_id"]): float(row["quantity"]) for row in rows}
+
+
+def get_stock_quantity(product_id: int, warehouse_id: int) -> float:
+    """Convenience wrapper to fetch current balance for a product in a warehouse."""
+
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT quantity FROM StockBalances WHERE product_id=? AND warehouse_id=?",
+            (product_id, warehouse_id),
+        ).fetchone()
+    return float(row[0]) if row else 0.0
+
+
+def find_counterparty_by_name(name: str, allowed_types: Optional[Sequence[str]] = None) -> Optional[sqlite3.Row]:
+    """Find counterparty by name (case-insensitive) limited to types if provided."""
+
+    allowed_types = tuple(allowed_types or [])
+    with get_connection() as conn:
+        base_query = "SELECT id, name, type, phone, email, address, note FROM Counterparties WHERE lower(name)=?"
+        params: List[object] = [name.strip().lower()]
+        if allowed_types:
+            placeholders = ",".join("?" * len(allowed_types))
+            base_query += f" AND type IN ({placeholders})"
+            params.extend(allowed_types)
+        return conn.execute(base_query, tuple(params)).fetchone()
 
 def _get_balance(conn: sqlite3.Connection, product_id: int, warehouse_id: int) -> Tuple[float, float]:
     row = conn.execute(

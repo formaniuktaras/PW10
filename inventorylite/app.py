@@ -2669,11 +2669,17 @@ def _read_sales_xlsx(path: Path) -> list[dict[str, object]]:
 
 def _read_sales_xls(path: Path) -> list[dict[str, object]]:
     try:
-        import xlrd
-    except ImportError as exc:
-        raise ImportError(
-            "Для імпорту XLS-файлів потрібно встановити залежність 'xlrd'."
-        ) from exc
+        # Деякі сервіси експортують XLSX-файли з розширенням .xls, тому
+        # спершу пробуємо прочитати їх через openpyxl.
+        return _read_sales_xlsx(path)
+    except Exception:
+        # Якщо це справді старий XLS, повертаємося до xlrd.
+        try:
+            import xlrd
+        except ImportError as exc:
+            raise ImportError(
+                "Для імпорту XLS-файлів потрібно встановити залежність 'xlrd'."
+            ) from exc
 
     workbook = xlrd.open_workbook(path)
     sheet = workbook.sheet_by_index(0)

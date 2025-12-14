@@ -1164,19 +1164,20 @@ def ensure_import_defaults(brand_name: str = "Імпорт", category_name: str 
     entry only when no preferred name is supplied.
     """
 
+    def _find_id_casefold(conn: sqlite3.Connection, table: str, name: str) -> Optional[int]:
+        target = name.casefold()
+        for row in conn.execute(f"SELECT id, name FROM {table}"):
+            if row["name"].casefold() == target:
+                return int(row["id"])
+        return None
+
     brand_name = (brand_name or "").strip()
     category_name = (category_name or "").strip()
 
     with get_connection() as conn:
         # Brand
-        brand_row = (
-            conn.execute("SELECT id FROM Brands WHERE lower(name)=? LIMIT 1", (brand_name.lower(),)).fetchone()
-            if brand_name
-            else None
-        )
-        if brand_row:
-            brand_id = int(brand_row["id"])
-        else:
+        brand_id = _find_id_casefold(conn, "Brands", brand_name) if brand_name else None
+        if brand_id is None:
             if not brand_name:
                 fallback = conn.execute("SELECT id FROM Brands ORDER BY id LIMIT 1").fetchone()
                 if fallback:
@@ -1184,29 +1185,19 @@ def ensure_import_defaults(brand_name: str = "Імпорт", category_name: str 
                 else:
                     conn.execute("INSERT OR IGNORE INTO Brands (name) VALUES (?)", ("Імпорт",))
                     conn.commit()
-                    brand_row = conn.execute("SELECT id FROM Brands WHERE lower(name)=? LIMIT 1", ("імпорт",)).fetchone()
-                    if not brand_row:
+                    brand_id = _find_id_casefold(conn, "Brands", "Імпорт")
+                    if brand_id is None:
                         raise RuntimeError("Не вдалося створити бренд за замовчуванням для імпорту")
-                    brand_id = int(brand_row["id"])
             else:
                 conn.execute("INSERT OR IGNORE INTO Brands (name) VALUES (?)", (brand_name,))
                 conn.commit()
-                brand_row = conn.execute("SELECT id FROM Brands WHERE lower(name)=? LIMIT 1", (brand_name.lower(),)).fetchone()
-                if not brand_row:
+                brand_id = _find_id_casefold(conn, "Brands", brand_name)
+                if brand_id is None:
                     raise RuntimeError("Не вдалося визначити бренд для імпорту")
-                brand_id = int(brand_row["id"])
 
         # Category
-        category_row = (
-            conn.execute(
-                "SELECT id FROM Categories WHERE lower(name)=? LIMIT 1", (category_name.lower(),)
-            ).fetchone()
-            if category_name
-            else None
-        )
-        if category_row:
-            category_id = int(category_row["id"])
-        else:
+        category_id = _find_id_casefold(conn, "Categories", category_name) if category_name else None
+        if category_id is None:
             if not category_name:
                 fallback = conn.execute("SELECT id FROM Categories ORDER BY id LIMIT 1").fetchone()
                 if fallback:
@@ -1217,24 +1208,18 @@ def ensure_import_defaults(brand_name: str = "Імпорт", category_name: str 
                         ("Імпорт",),
                     )
                     conn.commit()
-                    category_row = conn.execute(
-                        "SELECT id FROM Categories WHERE lower(name)=? LIMIT 1", ("імпорт",)
-                    ).fetchone()
-                    if not category_row:
+                    category_id = _find_id_casefold(conn, "Categories", "Імпорт")
+                    if category_id is None:
                         raise RuntimeError("Не вдалося створити категорію за замовчуванням для імпорту")
-                    category_id = int(category_row["id"])
             else:
                 conn.execute(
                     "INSERT OR IGNORE INTO Categories (name, sort_order, is_service, is_hidden) VALUES (?, 0, 0, 0)",
                     (category_name,),
                 )
                 conn.commit()
-                category_row = conn.execute(
-                    "SELECT id FROM Categories WHERE lower(name)=? LIMIT 1", (category_name.lower(),)
-                ).fetchone()
-                if not category_row:
+                category_id = _find_id_casefold(conn, "Categories", category_name)
+                if category_id is None:
                     raise RuntimeError("Не вдалося визначити категорію для імпорту")
-                category_id = int(category_row["id"])
 
     return brand_id, category_id
 

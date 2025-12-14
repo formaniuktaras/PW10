@@ -1797,7 +1797,7 @@ class InventoryApp(tk.Tk):
             return
 
         try:
-            orders = parse_sales_file(Path(file_path), encoding=self.settings.get("files", "encoding") or "utf-8")
+            raw_rows, headers = parse_sales_file(Path(file_path), encoding=self.settings.get("files", "encoding") or "utf-8")
         except Exception as exc:
             logging.exception("Не вдалося прочитати файл імпорту")
             show_error(
@@ -1806,7 +1806,7 @@ class InventoryApp(tk.Tk):
             )
             return
 
-        if not orders:
+        if not raw_rows:
             messagebox.showinfo("Імпорт продажів", "У файлі не знайдено рядків із товарами.")
             return
 
@@ -1816,13 +1816,13 @@ class InventoryApp(tk.Tk):
             return
         channels = db.list_channels(active_only=False)
 
-        dialog = SalesImportDialog(self, orders, warehouses, channels)
-        options = dialog.result
-        if not options:
+        dialog = SalesImportDialog(self, raw_rows, headers, warehouses, channels, self.settings)
+        result = dialog.result
+        if not result:
             return
 
         try:
-            summary = self._process_sales_import(orders, options)
+            summary = self._process_sales_import(result["orders"], result["options"])
         except Exception:
             logging.exception("Помилка під час імпорту продажів")
             show_error("Імпорт продажів", "Імпорт перервано помилкою. Деталі у логах.")
@@ -2606,38 +2606,70 @@ def _format_cell_value(value: object) -> str:
     return str(value)
 
 
-def _normalize_sales_records(rows: list[dict[str, object]]) -> list[dict]:
+SalesField = tuple[str, str, tuple[str, ...]]
+
+
+SALES_FIELDS: list[SalesField] = [
+    ("order_no", "Замовлення", ("номер", "замовлення", "order", "order_id", "order_no", "id")),
+    ("doc_date", "Дата", ("дата", "date", "order_date", "дата оформлення")),
+    ("customer", "Клієнт", ("клієнт", "покупець", "customer", "контрагент")),
+    ("phone", "Телефон", ("телефон", "phone")),
+    ("email", "Email", ("email", "e-mail")),
+    ("sku", "SKU", ("sku", "артикул", "код")),
+    ("product_name", "Товар", ("товар", "product", "назва", "item")),
+    ("quantity", "Кількість", ("кількість", "к-сть", "qty", "quantity", "шт")),
+    ("price", "Ціна", ("ціна", "price", "amount")),
+    ("amount", "Сума", ("сума", "amount", "total")),
+    ("discount", "Знижка", ("знижка", "discount")),
+    ("comment", "Коментар", ("коментар", "примітка", "comment", "note")),
+    ("channel", "Канал", ("канал", "channel", "майданчик", "площадка", "platform")),
+]
+
+
+def _suggest_sales_mapping(headers: list[str]) -> dict[str, str]:
+    normalized_headers = {h.lower(): h for h in headers}
+    mapping: dict[str, str] = {}
+    for key, _label, aliases in SALES_FIELDS:
+        for alias in aliases:
+            if alias.lower() in normalized_headers:
+                mapping[key] = normalized_headers[alias.lower()]
+                break
+        else:
+            mapping[key] = ""
+    return mapping
+
+
+def _normalize_sales_records(rows: list[dict[str, object]], mapping: dict[str, str]) -> list[dict]:
     records: list[dict] = []
     for row in rows:
-        normalized = {(k or "").strip().lower(): _format_cell_value(v).strip() for k, v in row.items()}
+        normalized = {(k or "").strip(): _format_cell_value(v).strip() for k, v in row.items()}
 
-        def pick(*aliases: str) -> str:
-            for alias in aliases:
-                if alias in normalized and normalized[alias]:
-                    return normalized[alias]
-            return ""
+        def pick(field: str, parser=None):
+            header = mapping.get(field, "")
+            value = normalized.get(header, "") if header else ""
+            return parser(value) if parser else value
 
         records.append(
             {
-                "order_no": pick("номер", "замовлення", "order", "order_id", "order_no", "id"),
-                "doc_date": _parse_date_value(pick("дата", "date", "order_date", "дата оформлення")),
-                "customer": pick("клієнт", "покупець", "customer", "контрагент"),
-                "phone": pick("телефон", "phone"),
-                "email": pick("email", "e-mail"),
-                "sku": pick("sku", "артикул", "код"),
-                "product_name": pick("товар", "product", "назва", "item"),
-                "quantity": _parse_float_value(pick("кількість", "к-сть", "qty", "quantity", "шт")),
-                "price": _parse_float_value(pick("ціна", "price", "amount")),
-                "amount": _parse_float_value(pick("сума", "amount", "total")),
-                "discount": _parse_float_value(pick("знижка", "discount")),
-                "comment": pick("коментар", "примітка", "comment", "note"),
-                "channel": pick("канал", "channel", "майданчик", "площадка", "platform"),
+                "order_no": pick("order_no"),
+                "doc_date": pick("doc_date", _parse_date_value),
+                "customer": pick("customer"),
+                "phone": pick("phone"),
+                "email": pick("email"),
+                "sku": pick("sku"),
+                "product_name": pick("product_name"),
+                "quantity": pick("quantity", _parse_float_value),
+                "price": pick("price", _parse_float_value),
+                "amount": pick("amount", _parse_float_value),
+                "discount": pick("discount", _parse_float_value),
+                "comment": pick("comment"),
+                "channel": pick("channel"),
             }
         )
     return records
 
 
-def _read_sales_csv(path: Path, encoding: str) -> list[dict[str, object]]:
+def _read_sales_csv(path: Path, encoding: str) -> tuple[list[dict[str, object]], list[str]]:
     with path.open("r", encoding=encoding, newline="") as f:
         sample = f.read(2048)
         f.seek(0)
@@ -2646,15 +2678,17 @@ def _read_sales_csv(path: Path, encoding: str) -> list[dict[str, object]]:
         except Exception:
             dialect = csv.excel
         reader = csv.DictReader(f, dialect=dialect)
-        return [{k or "": v for k, v in row.items()} for row in reader]
+        rows = [{k or "": v for k, v in row.items()} for row in reader]
+        headers = list(reader.fieldnames or [])
+        return rows, [h or "" for h in headers]
 
 
-def _read_sales_xlsx(path: Path) -> list[dict[str, object]]:
+def _read_sales_xlsx(path: Path) -> tuple[list[dict[str, object]], list[str]]:
     workbook = load_workbook(path, data_only=True, read_only=True)
     sheet = workbook.active
     rows = list(sheet.iter_rows(values_only=True))
     if not rows:
-        return []
+        return [], []
 
     headers = [_format_cell_value(cell).strip() for cell in rows[0]]
     records: list[dict[str, object]] = []
@@ -2664,10 +2698,10 @@ def _read_sales_xlsx(path: Path) -> list[dict[str, object]]:
             header = headers[idx] if idx < len(headers) else ""
             record[header] = value
         records.append(record)
-    return records
+    return records, headers
 
 
-def _read_sales_xls(path: Path) -> list[dict[str, object]]:
+def _read_sales_xls(path: Path) -> tuple[list[dict[str, object]], list[str]]:
     try:
         # Деякі сервіси експортують XLSX-файли з розширенням .xls, тому
         # спершу пробуємо прочитати їх через openpyxl.
@@ -2684,7 +2718,7 @@ def _read_sales_xls(path: Path) -> list[dict[str, object]]:
     workbook = xlrd.open_workbook(path)
     sheet = workbook.sheet_by_index(0)
     if sheet.nrows == 0:
-        return []
+        return [], []
 
     headers = [_format_cell_value(sheet.cell_value(0, col)).strip() for col in range(sheet.ncols)]
     records: list[dict[str, object]] = []
@@ -2701,56 +2735,125 @@ def _read_sales_xls(path: Path) -> list[dict[str, object]]:
                     pass
             record[header] = value
         records.append(record)
-    return records
+    return records, headers
 
 
-def parse_sales_file(path: Path, encoding: str = "utf-8") -> list[dict]:
+def parse_sales_file(path: Path, encoding: str = "utf-8") -> tuple[list[dict[str, object]], list[str]]:
     suffix = path.suffix.lower()
     if suffix == ".xlsx":
-        raw_rows = _read_sales_xlsx(path)
+        raw_rows, headers = _read_sales_xlsx(path)
     elif suffix == ".xls":
-        raw_rows = _read_sales_xls(path)
+        raw_rows, headers = _read_sales_xls(path)
     else:
-        raw_rows = _read_sales_csv(path, encoding)
+        raw_rows, headers = _read_sales_csv(path, encoding)
 
-    return _normalize_sales_records(raw_rows)
+    return raw_rows, headers
 
 
 class SalesImportDialog(tk.Toplevel):
-    def __init__(self, app: tk.Tk, orders: list[dict], warehouses, channels) -> None:
+    def __init__(self, app: tk.Tk, raw_rows: list[dict[str, object]], headers: list[str], warehouses, channels, settings) -> None:
         super().__init__(app)
         self.title("Імпорт продажів")
         self.resizable(True, True)
         self.grab_set()
         self.result: Optional[dict] = None
-        self.orders = orders
+        self.raw_rows = raw_rows
+        self.headers = headers
         self.warehouses = warehouses
         self.channels = channels
+        self.settings = settings
+        self.templates: dict[str, dict[str, str]] = settings.get("sales_import", "templates") or {}
+        self.current_mapping = _suggest_sales_mapping(headers)
 
         main = ttk.Frame(self, padding=10)
         main.pack(fill=tk.BOTH, expand=True)
 
-        info = ttk.Label(main, text=f"Рядків у файлі: {len(orders)}")
-        info.grid(row=0, column=0, columnspan=2, sticky="w")
+        info = ttk.Label(main, text=f"Рядків у файлі: {len(raw_rows)}")
+        info.grid(row=0, column=0, columnspan=3, sticky="w")
 
-        ttk.Label(main, text="Склад для імпорту:").grid(row=1, column=0, sticky="w", pady=4)
-        self.wh_var = tk.StringVar(value=warehouses[0]["name"] if warehouses else "")
-        wh_combo = ttk.Combobox(main, textvariable=self.wh_var, values=[w["name"] for w in warehouses], state="readonly")
-        wh_combo.grid(row=1, column=1, sticky="ew", pady=4)
+        self._build_template_controls(main)
+        self._build_mapping_controls(main)
+        self._build_options(main)
+        self.preview = self._build_preview(main)
+        self._refresh_preview()
 
-        ttk.Label(main, text="Канал (якщо не вказано у файлі):").grid(row=2, column=0, sticky="w", pady=4)
+        btns = ttk.Frame(main)
+        btns.grid(row=12, column=0, columnspan=3, pady=8, sticky="e")
+        ttk.Button(btns, text="Скасувати", command=self.destroy).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btns, text="Імпортувати", command=self._on_ok).pack(side=tk.RIGHT, padx=4)
+
+        self.bind("<Return>", lambda _e: self._on_ok())
+        self.bind("<Escape>", lambda _e: self.destroy())
+        self.wait_window(self)
+
+    def _on_ok(self) -> None:
+        warehouse = next((w for w in self.warehouses if w["name"] == self.wh_var.get()), None)
+        if not warehouse:
+            show_error("Імпорт", "Оберіть склад")
+            return
+
+        normalized_orders = _normalize_sales_records(self.raw_rows, self.current_mapping)
+        self.result = {
+            "options": {
+                "warehouse_id": warehouse["id"],
+                "channel": self.channel_var.get().strip(),
+                "mode": self.mode_var.get(),
+                "allow_negative": bool(self.allow_negative_var.get()),
+                "create_products": bool(self.create_products_var.get()),
+                "create_customers": bool(self.create_customers_var.get()),
+                "use_file_channel": bool(self.use_file_channel_var.get()),
+            },
+            "orders": normalized_orders,
+        }
+        self.settings.set(self.current_template_name.get(), "sales_import", "last_template")
+        self.settings.save()
+        self.destroy()
+
+    def _build_template_controls(self, parent: ttk.Frame) -> None:
+        ttk.Label(parent, text="Шаблон співставлення:").grid(row=1, column=0, sticky="w", pady=4)
+        self.current_template_name = tk.StringVar(value=self.settings.get("sales_import", "last_template") or "")
+        self.template_combo = ttk.Combobox(
+            parent, textvariable=self.current_template_name, values=list(self.templates.keys()), state="readonly"
+        )
+        self.template_combo.grid(row=1, column=1, sticky="ew", pady=4)
+        ttk.Button(parent, text="Застосувати", command=self._apply_template).grid(row=1, column=2, padx=4, sticky="w")
+        ttk.Button(parent, text="Зберегти як…", command=self._save_template).grid(row=1, column=3, padx=4, sticky="w")
+
+    def _build_mapping_controls(self, parent: ttk.Frame) -> None:
+        ttk.Label(parent, text="Співставлення колонок:").grid(row=2, column=0, sticky="nw", pady=4)
+        mapping_frame = ttk.Frame(parent)
+        mapping_frame.grid(row=2, column=1, columnspan=3, sticky="ew", pady=4)
+        mapping_frame.columnconfigure(1, weight=1)
+
+        options = ["(не використовувати)"] + self.headers
+        self.mapping_vars: dict[str, tk.StringVar] = {}
+        for idx, (field_key, field_label, _aliases) in enumerate(SALES_FIELDS):
+            ttk.Label(mapping_frame, text=field_label).grid(row=idx, column=0, sticky="w", pady=2)
+            var = tk.StringVar(value=self.current_mapping.get(field_key, ""))
+            combo = ttk.Combobox(mapping_frame, textvariable=var, values=options, state="readonly")
+            combo.grid(row=idx, column=1, sticky="ew", pady=2)
+            combo.bind("<<ComboboxSelected>>", lambda _e, key=field_key, v=var: self._update_mapping(key, v.get()))
+            self.mapping_vars[field_key] = var
+
+    def _build_options(self, parent: ttk.Frame) -> None:
+        ttk.Label(parent, text="Склад для імпорту:").grid(row=3, column=0, sticky="w", pady=4)
+        self.wh_var = tk.StringVar(value=self.warehouses[0]["name"] if self.warehouses else "")
+        wh_combo = ttk.Combobox(parent, textvariable=self.wh_var, values=[w["name"] for w in self.warehouses], state="readonly")
+        wh_combo.grid(row=3, column=1, sticky="ew", pady=4)
+
+        ttk.Label(parent, text="Канал (якщо не вказано у файлі):").grid(row=4, column=0, sticky="w", pady=4)
         self.channel_var = tk.StringVar()
-        channel_values = [c["name"] for c in channels]
-        ttk.Combobox(main, textvariable=self.channel_var, values=channel_values).grid(row=2, column=1, sticky="ew", pady=4)
+        channel_values = [c["name"] for c in self.channels]
+        ttk.Combobox(parent, textvariable=self.channel_var, values=channel_values).grid(row=4, column=1, sticky="ew", pady=4)
 
         self.use_file_channel_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(main, text="Брати канал із файлу, якщо він є", variable=self.use_file_channel_var).grid(
-            row=3, column=1, sticky="w"
+        ttk.Checkbutton(parent, text="Брати канал із файлу, якщо він є", variable=self.use_file_channel_var).grid(
+            row=5, column=1, sticky="w"
         )
 
-        ttk.Label(main, text="Режим проведення:").grid(row=4, column=0, sticky="nw", pady=4)
-        mode_frame = ttk.Frame(main)
-        mode_frame.grid(row=4, column=1, sticky="w", pady=4)
+        ttk.Label(parent, text="Режим проведення:").grid(row=6, column=0, sticky="nw", pady=4)
+        mode_frame = ttk.Frame(parent)
+        mode_frame.grid(row=6, column=1, sticky="w", pady=4)
         self.mode_var = tk.StringVar(value="post")
         ttk.Radiobutton(mode_frame, text="Провести всі", variable=self.mode_var, value="post").pack(anchor="w")
         ttk.Radiobutton(mode_frame, text="Тільки чернетки", variable=self.mode_var, value="draft").pack(anchor="w")
@@ -2760,23 +2863,24 @@ class SalesImportDialog(tk.Toplevel):
 
         self.allow_negative_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
-            main,
+            parent,
             text="Дозволити від'ємний залишок під час проведення",
             variable=self.allow_negative_var,
-        ).grid(row=5, column=1, sticky="w")
+        ).grid(row=7, column=1, sticky="w")
 
         self.create_products_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(main, text="Створювати відсутні товари", variable=self.create_products_var).grid(
-            row=6, column=1, sticky="w", pady=(4, 0)
+        ttk.Checkbutton(parent, text="Створювати відсутні товари", variable=self.create_products_var).grid(
+            row=8, column=1, sticky="w", pady=(4, 0)
         )
         self.create_customers_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(main, text="Створювати відсутніх клієнтів", variable=self.create_customers_var).grid(
-            row=7, column=1, sticky="w"
+        ttk.Checkbutton(parent, text="Створювати відсутніх клієнтів", variable=self.create_customers_var).grid(
+            row=9, column=1, sticky="w"
         )
 
-        ttk.Label(main, text="Попередній перегляд (перші 30 рядків):").grid(row=8, column=0, columnspan=2, sticky="w", pady=6)
+    def _build_preview(self, parent: ttk.Frame) -> ttk.Treeview:
+        ttk.Label(parent, text="Попередній перегляд (перші 30 рядків):").grid(row=10, column=0, columnspan=3, sticky="w", pady=6)
         preview = ttk.Treeview(
-            main,
+            parent,
             columns=("order", "date", "customer", "sku", "name", "qty", "price"),
             show="headings",
             height=10,
@@ -2793,15 +2897,19 @@ class SalesImportDialog(tk.Toplevel):
         for col, (title, width) in headings.items():
             preview.heading(col, text=title)
             preview.column(col, width=width, anchor="w")
-        preview.grid(row=9, column=0, columnspan=2, sticky="nsew")
-        main.grid_rowconfigure(9, weight=1)
-        main.grid_columnconfigure(1, weight=1)
-        scroll = ttk.Scrollbar(main, orient="vertical", command=preview.yview)
+        preview.grid(row=11, column=0, columnspan=3, sticky="nsew")
+        parent.grid_rowconfigure(11, weight=1)
+        parent.grid_columnconfigure(1, weight=1)
+        scroll = ttk.Scrollbar(parent, orient="vertical", command=preview.yview)
         preview.configure(yscrollcommand=scroll.set)
-        scroll.grid(row=9, column=2, sticky="ns")
+        scroll.grid(row=11, column=3, sticky="ns")
+        return preview
 
-        for row in orders[:30]:
-            preview.insert(
+    def _refresh_preview(self) -> None:
+        self.preview.delete(*self.preview.get_children())
+        normalized = _normalize_sales_records(self.raw_rows, self.current_mapping)
+        for row in normalized[:30]:
+            self.preview.insert(
                 "",
                 "end",
                 values=(
@@ -2815,31 +2923,31 @@ class SalesImportDialog(tk.Toplevel):
                 ),
             )
 
-        btns = ttk.Frame(main)
-        btns.grid(row=10, column=0, columnspan=2, pady=8, sticky="e")
-        ttk.Button(btns, text="Скасувати", command=self.destroy).pack(side=tk.RIGHT, padx=4)
-        ttk.Button(btns, text="Імпортувати", command=self._on_ok).pack(side=tk.RIGHT, padx=4)
+    def _update_mapping(self, key: str, value: str) -> None:
+        clean_value = "" if value == "(не використовувати)" else value
+        self.current_mapping[key] = clean_value
+        self._refresh_preview()
 
-        self.bind("<Return>", lambda _e: self._on_ok())
-        self.bind("<Escape>", lambda _e: self.destroy())
-        self.wait_window(self)
-
-    def _on_ok(self) -> None:
-        warehouse = next((w for w in self.warehouses if w["name"] == self.wh_var.get()), None)
-        if not warehouse:
-            show_error("Імпорт", "Оберіть склад")
+    def _apply_template(self) -> None:
+        name = self.current_template_name.get().strip()
+        if not name or name not in self.templates:
             return
+        template = self.templates[name]
+        for key, var in self.mapping_vars.items():
+            var.set(template.get(key, ""))
+            self.current_mapping[key] = template.get(key, "")
+        self._refresh_preview()
 
-        self.result = {
-            "warehouse_id": warehouse["id"],
-            "channel": self.channel_var.get().strip(),
-            "mode": self.mode_var.get(),
-            "allow_negative": bool(self.allow_negative_var.get()),
-            "create_products": bool(self.create_products_var.get()),
-            "create_customers": bool(self.create_customers_var.get()),
-            "use_file_channel": bool(self.use_file_channel_var.get()),
-        }
-        self.destroy()
+    def _save_template(self) -> None:
+        name = simple_prompt("Назва шаблону", "Вкажіть назву шаблону", default=self.current_template_name.get().strip())
+        if not name:
+            return
+        self.templates[name] = dict(self.current_mapping)
+        self.settings.set(self.templates, "sales_import", "templates")
+        self.settings.set(name, "sales_import", "last_template")
+        self.settings.save()
+        self.current_template_name.set(name)
+        self.template_combo.configure(values=list(self.templates.keys()))
 
 
 def product_prompt(brands, categories, title: str, initial=None):

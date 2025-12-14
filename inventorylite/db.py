@@ -1184,17 +1184,17 @@ def ensure_import_defaults(brand_name: str = "Імпорт", category_name: str 
                 else:
                     conn.execute("INSERT OR IGNORE INTO Brands (name) VALUES (?)", ("Імпорт",))
                     conn.commit()
-                    brand_id = int(
-                        conn.execute("SELECT id FROM Brands WHERE lower(name)=? LIMIT 1", ("імпорт",)).fetchone()["id"]
-                    )
+                    brand_row = conn.execute("SELECT id FROM Brands WHERE lower(name)=? LIMIT 1", ("імпорт",)).fetchone()
+                    if not brand_row:
+                        raise RuntimeError("Не вдалося створити бренд за замовчуванням для імпорту")
+                    brand_id = int(brand_row["id"])
             else:
                 conn.execute("INSERT OR IGNORE INTO Brands (name) VALUES (?)", (brand_name,))
                 conn.commit()
-                brand_id = int(
-                    conn.execute("SELECT id FROM Brands WHERE lower(name)=? LIMIT 1", (brand_name.lower(),)).fetchone()[
-                        "id"
-                    ]
-                )
+                brand_row = conn.execute("SELECT id FROM Brands WHERE lower(name)=? LIMIT 1", (brand_name.lower(),)).fetchone()
+                if not brand_row:
+                    raise RuntimeError("Не вдалося визначити бренд для імпорту")
+                brand_id = int(brand_row["id"])
 
         # Category
         category_row = (
@@ -1217,22 +1217,24 @@ def ensure_import_defaults(brand_name: str = "Імпорт", category_name: str 
                         ("Імпорт",),
                     )
                     conn.commit()
-                    category_id = int(
-                        conn.execute(
-                            "SELECT id FROM Categories WHERE lower(name)=? LIMIT 1", ("імпорт",)
-                        ).fetchone()["id"]
-                    )
+                    category_row = conn.execute(
+                        "SELECT id FROM Categories WHERE lower(name)=? LIMIT 1", ("імпорт",)
+                    ).fetchone()
+                    if not category_row:
+                        raise RuntimeError("Не вдалося створити категорію за замовчуванням для імпорту")
+                    category_id = int(category_row["id"])
             else:
                 conn.execute(
                     "INSERT OR IGNORE INTO Categories (name, sort_order, is_service, is_hidden) VALUES (?, 0, 0, 0)",
                     (category_name,),
                 )
                 conn.commit()
-                category_id = int(
-                    conn.execute(
-                        "SELECT id FROM Categories WHERE lower(name)=? LIMIT 1", (category_name.lower(),)
-                    ).fetchone()["id"]
-                )
+                category_row = conn.execute(
+                    "SELECT id FROM Categories WHERE lower(name)=? LIMIT 1", (category_name.lower(),)
+                ).fetchone()
+                if not category_row:
+                    raise RuntimeError("Не вдалося визначити категорію для імпорту")
+                category_id = int(category_row["id"])
 
     return brand_id, category_id
 

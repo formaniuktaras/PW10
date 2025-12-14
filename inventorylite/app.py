@@ -860,7 +860,7 @@ class InventoryApp(tk.Tk):
     def add_product(self) -> None:
         brands = db.list_brands()
         categories = self.flatten_categories()
-        values = product_prompt(brands, categories, "Новий товар")
+        values = product_prompt(brands, categories, "Новий товар", settings=self.settings)
         if not values:
             return
         sku, name, brand_id, category_id, unit, is_active, extras = values
@@ -897,6 +897,7 @@ class InventoryApp(tk.Tk):
                 bool(product["is_active"]),
                 db.get_product_additional_categories(product_id),
             ),
+            settings=self.settings,
         )
         if not values:
             return
@@ -2995,13 +2996,20 @@ class SalesImportDialog(tk.Toplevel):
         self.template_combo.configure(values=list(self.templates.keys()))
 
 
-def product_prompt(brands, categories, title: str, initial=None):
+def _find_index_by_name(items: list[str], target: str | None) -> int | None:
+    if not target:
+        return None
+    target_lower = target.lower()
+    return next((i for i, name in enumerate(items) if str(name).lower() == target_lower), None)
+
+
+def product_prompt(brands, categories, title: str, initial=None, settings: Settings | None = None):
     base_initial = {
         "sku": "",
         "name": "",
         "brand_id": None,
         "category_id": None,
-        "unit": "pcs",
+        "unit": (settings.get("defaults", "product", "unit") if settings else None) or "pcs",
         "is_active": True,
         "extras": [],
     }
@@ -3040,7 +3048,8 @@ def product_prompt(brands, categories, title: str, initial=None):
 
     ttk.Label(dlg, text="Бренд").grid(row=2, column=0, padx=6, pady=4, sticky="w")
     brand_var = tk.StringVar()
-    brand_combo = ttk.Combobox(dlg, textvariable=brand_var, state="readonly", values=[b["name"] for b in brands])
+    brand_names = [b["name"] for b in brands]
+    brand_combo = ttk.Combobox(dlg, textvariable=brand_var, state="readonly", values=brand_names)
     brand_combo.grid(row=2, column=1, padx=6, pady=4, sticky="ew")
 
     ttk.Label(dlg, text="Головна категорія").grid(row=3, column=0, padx=6, pady=4, sticky="w")
@@ -3108,10 +3117,17 @@ def product_prompt(brands, categories, title: str, initial=None):
             if cat["id"] in extras:
                 extras_box.selection_set(idx)
     else:
-        if brands:
+        preferred_brand = _find_index_by_name(brand_names, (settings.get("defaults", "product", "brand") if settings else ""))
+        if preferred_brand is not None:
+            brand_combo.current(preferred_brand)
+        elif brands:
             brand_combo.current(0)
         if categories:
-            category_var.set(categories[0]["label"])
+            default_category = (settings.get("defaults", "product", "category") if settings else "") or ""
+            if default_category:
+                category_var.set(default_category)
+            else:
+                category_var.set(categories[0]["label"])
             refresh_category_options()
 
     result = None
@@ -3967,7 +3983,12 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
             width=28,
         )
         brand_combo.grid(row=2, column=1, padx=6, pady=4, sticky="w")
-        brand_combo.current(0)
+
+        preferred_brand = _find_index_by_name([b["name"] for b in brands], self.settings.get("defaults", "product", "brand"))
+        if preferred_brand is not None:
+            brand_combo.current(preferred_brand)
+        else:
+            brand_combo.current(0)
 
         ttk.Label(dlg_product, text="Категорія").grid(row=3, column=0, padx=6, pady=4, sticky="e")
         category_var = tk.StringVar()
@@ -3979,10 +4000,16 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
             width=28,
         )
         category_combo.grid(row=3, column=1, padx=6, pady=4, sticky="w")
-        category_combo.current(0)
+        default_category = self.settings.get("defaults", "product", "category") or ""
+        preferred_category = _find_index_by_name([c["label"] for c in categories], default_category)
+        if preferred_category is not None:
+            category_combo.current(preferred_category)
+        else:
+            category_combo.current(0)
 
+        default_unit = self.settings.get("defaults", "product", "unit") or "pcs"
         ttk.Label(dlg_product, text="Одиниця").grid(row=4, column=0, padx=6, pady=4, sticky="e")
-        unit_var = tk.StringVar(value="pcs")
+        unit_var = tk.StringVar(value=default_unit)
         ttk.Entry(dlg_product, textvariable=unit_var, width=30).grid(row=4, column=1, padx=6, pady=4, sticky="w")
 
         result_new: tuple[int, str] | None = None
@@ -4221,6 +4248,7 @@ class SettingsDialog(tk.Toplevel):
         notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
         self.general_tab = ttk.Frame(notebook)
+        self.defaults_tab = ttk.Frame(notebook)
         self.files_tab = ttk.Frame(notebook)
         self.ui_tab = ttk.Frame(notebook)
         self.editor_tab = ttk.Frame(notebook)
@@ -4228,6 +4256,7 @@ class SettingsDialog(tk.Toplevel):
         self.support_tab = ttk.Frame(notebook)
 
         notebook.add(self.general_tab, text="Загальні")
+        notebook.add(self.defaults_tab, text="Типові значення")
         notebook.add(self.files_tab, text="Файли й шляхи")
         notebook.add(self.ui_tab, text="Інтерфейс і вікна")
         notebook.add(self.editor_tab, text="Редактор")
@@ -4235,6 +4264,7 @@ class SettingsDialog(tk.Toplevel):
         notebook.add(self.support_tab, text="Допомога й підтримка")
 
         self.build_general_tab()
+        self.build_defaults_tab()
         self.build_files_tab()
         self.build_ui_tab()
         self.build_editor_tab()
@@ -4243,11 +4273,12 @@ class SettingsDialog(tk.Toplevel):
 
         tab_index = {
             "general": 0,
-            "files": 1,
-            "ui": 2,
-            "editor": 3,
-            "hotkeys": 4,
-            "support": 5,
+            "defaults": 1,
+            "files": 2,
+            "ui": 3,
+            "editor": 4,
+            "hotkeys": 5,
+            "support": 6,
         }.get(section, 0)
         notebook.select(tab_index)
 
@@ -4268,6 +4299,39 @@ class SettingsDialog(tk.Toplevel):
         ttk.Combobox(
             self.general_tab, textvariable=theme_var, values=["system", "light", "dark"], width=10
         ).grid(row=1, column=1, sticky="w", padx=6, pady=4)
+
+    def build_defaults_tab(self) -> None:
+        product_frame = ttk.LabelFrame(self.defaults_tab, text="Товари")
+        product_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+        default_unit = self.app.settings.get("defaults", "product", "unit") or "pcs"
+        unit_var = self._add_var("defaults.product.unit", tk.StringVar(value=default_unit))
+        ttk.Label(product_frame, text="Одиниця за замовчуванням:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(product_frame, textvariable=unit_var, width=14).grid(row=0, column=1, sticky="w", padx=6, pady=4)
+
+        brands = db.list_brands()
+        brand_names = [b["name"] for b in brands]
+        brand_default = self.app.settings.get("defaults", "product", "brand") or ""
+        brand_var = self._add_var("defaults.product.brand", tk.StringVar(value=brand_default))
+        ttk.Label(product_frame, text="Бренд за замовчуванням:").grid(row=1, column=0, sticky="w", padx=6, pady=4)
+        ttk.Combobox(product_frame, textvariable=brand_var, values=brand_names, width=30).grid(
+            row=1, column=1, sticky="w", padx=6, pady=4
+        )
+        ttk.Label(product_frame, text="Залиште поле порожнім, щоб вибирати бренд вручну.").grid(
+            row=2, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 8)
+        )
+
+        categories = self.app.flatten_categories()
+        category_labels = [c["label"] for c in categories]
+        category_default = self.app.settings.get("defaults", "product", "category") or ""
+        category_var = self._add_var("defaults.product.category", tk.StringVar(value=category_default))
+        ttk.Label(product_frame, text="Категорія за замовчуванням:").grid(row=3, column=0, sticky="w", padx=6, pady=4)
+        ttk.Combobox(product_frame, textvariable=category_var, values=category_labels, width=30).grid(
+            row=3, column=1, sticky="w", padx=6, pady=4
+        )
+        ttk.Label(product_frame, text="Залиште поле порожнім, щоб обирати категорію під час створення.").grid(
+            row=4, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 4)
+        )
 
     def build_files_tab(self) -> None:
         workdir_var = self._add_var("files.working_dir", tk.StringVar(value=str(self.app.default_workdir())))

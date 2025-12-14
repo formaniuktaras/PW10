@@ -69,6 +69,13 @@ DEFAULT_SETTINGS = {
         "docs_url": "https://example.com/docs",
     },
     "sales_import": {"templates": {}, "last_template": ""},
+    "defaults": {
+        "product": {
+            "unit": "pcs",
+            "brand": "",
+            "category": "",
+        }
+    },
 }
 
 

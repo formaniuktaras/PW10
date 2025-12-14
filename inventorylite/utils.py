@@ -28,8 +28,8 @@ except ImportError:  # POSIX fallback
 APP_NAME = "InventoryLite"
 # v0.3 adds cash-basis accounting, moving-average inventory costing and direct-costing reports.
 VERSION = "0.3.0"
-BASE_CURRENCY = "UAH"
-BASE_CURRENCY_NAME = "Українська гривня"
+BASE_CURRENCY = "USD"
+BASE_CURRENCY_NAME = "Долар США"
 BASE_CURRENCY_DECIMALS = 2
 
 

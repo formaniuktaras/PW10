@@ -386,6 +386,9 @@ def _ensure_currency_tables(conn: sqlite3.Connection) -> None:
         "INSERT OR IGNORE INTO Currencies (code, name, decimals, is_active) VALUES (?,?,?,1)",
         (BASE_CURRENCY, BASE_CURRENCY_NAME, BASE_CURRENCY_DECIMALS),
     )
+    conn.execute(
+        "INSERT OR IGNORE INTO Currencies (code, name, decimals, is_active) VALUES ('UAH', 'Українська гривня', 2, 1)"
+    )
     has_rate = conn.execute("SELECT 1 FROM CurrencyRates WHERE currency_code=? LIMIT 1", (BASE_CURRENCY,)).fetchone()
     if not has_rate:
         conn.execute(
@@ -992,6 +995,16 @@ def add_currency_rate(currency_code: str, rate_date: str, rate: float) -> int:
         )
         conn.commit()
         return cur.lastrowid
+
+
+def rate_on_date(currency_code: str, rate_date: str) -> Optional[float]:
+    currency_code = currency_code.strip().upper()
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT rate FROM CurrencyRates WHERE currency_code=? AND rate_date=? ORDER BY id DESC LIMIT 1",
+            (currency_code, rate_date),
+        ).fetchone()
+    return float(row[0]) if row else None
 
 
 def list_currency_rates(currency_code: Optional[str] = None) -> List[sqlite3.Row]:

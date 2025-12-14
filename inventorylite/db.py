@@ -158,6 +158,10 @@ def init_db() -> None:
                 status TEXT NOT NULL CHECK(status IN ('draft','posted')) DEFAULT 'draft',
                 comment TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                currency_code TEXT NOT NULL DEFAULT 'UAH',
+                exchange_rate REAL NOT NULL DEFAULT 1,
+                order_expense_doc REAL NOT NULL DEFAULT 0,
+                order_expense_base REAL NOT NULL DEFAULT 0,
                 FOREIGN KEY (customer_id) REFERENCES Counterparties(id),
                 FOREIGN KEY (warehouse_id) REFERENCES Warehouses(id)
             );
@@ -169,6 +173,11 @@ def init_db() -> None:
                 quantity REAL NOT NULL,
                 sale_price REAL NOT NULL,
                 amount REAL NOT NULL,
+                amount_doc REAL NOT NULL DEFAULT 0,
+                sale_price_base REAL NOT NULL DEFAULT 0,
+                unit_expense_doc REAL NOT NULL DEFAULT 0,
+                unit_expense_base REAL NOT NULL DEFAULT 0,
+                order_expense_allocated_base REAL NOT NULL DEFAULT 0,
                 FOREIGN KEY (sale_id) REFERENCES SalesDocuments(id) ON DELETE CASCADE,
                 FOREIGN KEY (product_id) REFERENCES Products(id)
             );
@@ -324,10 +333,15 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "SalesDocuments", "created_at", "TEXT DEFAULT CURRENT_TIMESTAMP")
     _ensure_column(conn, "SalesDocuments", "currency_code", "TEXT NOT NULL DEFAULT 'UAH'")
     _ensure_column(conn, "SalesDocuments", "exchange_rate", "REAL NOT NULL DEFAULT 1")
+    _ensure_column(conn, "SalesDocuments", "order_expense_doc", "REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "SalesDocuments", "order_expense_base", "REAL NOT NULL DEFAULT 0")
 
     _ensure_column(conn, "SalesLines", "amount", "REAL NOT NULL DEFAULT 0")
     _ensure_column(conn, "SalesLines", "amount_doc", "REAL NOT NULL DEFAULT 0")
     _ensure_column(conn, "SalesLines", "sale_price_base", "REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "SalesLines", "unit_expense_doc", "REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "SalesLines", "unit_expense_base", "REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "SalesLines", "order_expense_allocated_base", "REAL NOT NULL DEFAULT 0")
 
     _ensure_column(conn, "StockMoves", "channel", "TEXT")
     _ensure_column(conn, "StockMoves", "counterparty_id", "INTEGER")
@@ -1562,12 +1576,24 @@ def create_sale(
     comment: str = "",
     currency_code: str = BASE_CURRENCY,
     exchange_rate: float = 1.0,
+    order_expense_doc: float = 0.0,
 ) -> int:
     with get_connection() as conn:
+        order_expense_base = order_expense_doc * exchange_rate
         cur = conn.execute(
-            "INSERT INTO SalesDocuments (doc_date, customer_id, warehouse_id, channel, comment, status, currency_code, exchange_rate) "
-            "VALUES (?,?,?,?,?, 'draft', ?, ?)",
-            (doc_date, customer_id, warehouse_id, channel.strip(), comment.strip(), currency_code.strip().upper(), exchange_rate),
+            "INSERT INTO SalesDocuments (doc_date, customer_id, warehouse_id, channel, comment, status, currency_code, exchange_rate, order_expense_doc, order_expense_base) "
+            "VALUES (?,?,?,?,?, 'draft', ?, ?, ?, ?)",
+            (
+                doc_date,
+                customer_id,
+                warehouse_id,
+                channel.strip(),
+                comment.strip(),
+                currency_code.strip().upper(),
+                exchange_rate,
+                order_expense_doc,
+                order_expense_base,
+            ),
         )
         conn.commit()
         return cur.lastrowid
@@ -1582,6 +1608,7 @@ def update_sale(
     comment: str,
     currency_code: str,
     exchange_rate: float,
+    order_expense_doc: float = 0.0,
 ) -> None:
     with get_connection() as conn:
         status = conn.execute("SELECT status FROM SalesDocuments WHERE id=?", (sale_id,)).fetchone()
@@ -1589,8 +1616,9 @@ def update_sale(
             raise ValueError("Документ не знайдено")
         if status[0] != "draft":
             raise ValueError("Редагування можливе лише у чернетці")
+        order_expense_base = order_expense_doc * exchange_rate
         conn.execute(
-            "UPDATE SalesDocuments SET doc_date=?, customer_id=?, warehouse_id=?, channel=?, comment=?, currency_code=?, exchange_rate=? WHERE id=?",
+            "UPDATE SalesDocuments SET doc_date=?, customer_id=?, warehouse_id=?, channel=?, comment=?, currency_code=?, exchange_rate=?, order_expense_doc=?, order_expense_base=? WHERE id=?",
             (
                 doc_date,
                 customer_id,
@@ -1599,25 +1627,50 @@ def update_sale(
                 comment.strip(),
                 currency_code.strip().upper(),
                 exchange_rate,
+                order_expense_doc,
+                order_expense_base,
                 sale_id,
             ),
         )
         conn.commit()
 
 
-def replace_sale_lines(sale_id: int, lines: Iterable[Tuple[int, float, float]], exchange_rate: float) -> None:
+def replace_sale_lines(
+    sale_id: int, lines: Iterable[Tuple[int, float, float, float]], exchange_rate: float, order_expense_doc: float = 0.0
+) -> None:
     with get_connection() as conn:
         status = conn.execute("SELECT status FROM SalesDocuments WHERE id=?", (sale_id,)).fetchone()
         if not status or status[0] != "draft":
             raise ValueError("Рядки можна змінювати лише у чернетці")
         conn.execute("DELETE FROM SalesLines WHERE sale_id=?", (sale_id,))
-        for product_id, qty, price in lines:
+        order_expense_base = order_expense_doc * exchange_rate
+        amounts: List[float] = []
+        lines_cache: List[Tuple[int, float, float, float, float, float]] = []
+        for product_id, qty, price, unit_expense_doc in lines:
             amount_doc = qty * price
             price_base = price * exchange_rate
             amount = qty * price_base
+            unit_expense_base = unit_expense_doc * exchange_rate
+            lines_cache.append((product_id, qty, price, amount_doc, price_base, unit_expense_base))
+            amounts.append(amount)
+
+        total_amount = sum(amounts)
+        for idx, (product_id, qty, price, amount_doc, price_base, unit_expense_base) in enumerate(lines_cache):
+            allocated_order_expense = (order_expense_base * amounts[idx] / total_amount) if total_amount else 0.0
             conn.execute(
-                "INSERT INTO SalesLines (sale_id, product_id, quantity, sale_price, amount_doc, sale_price_base, amount) VALUES (?,?,?,?,?,?,?)",
-                (sale_id, product_id, qty, price, amount_doc, price_base, amount),
+                "INSERT INTO SalesLines (sale_id, product_id, quantity, sale_price, amount_doc, sale_price_base, amount, unit_expense_doc, unit_expense_base, order_expense_allocated_base) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    sale_id,
+                    product_id,
+                    qty,
+                    price,
+                    amount_doc,
+                    price_base,
+                    amount,
+                    unit_expense_base / exchange_rate if exchange_rate else 0,
+                    unit_expense_base,
+                    allocated_order_expense,
+                ),
             )
         conn.commit()
 
@@ -1658,7 +1711,7 @@ def list_sale_lines(sale_id: int) -> List[sqlite3.Row]:
     with get_connection() as conn:
         return list(
             conn.execute(
-                "SELECT sl.id, sl.product_id, sl.quantity, sl.sale_price, sl.amount_doc, sl.sale_price_base, sl.amount, p.name as product_name, p.sku "
+                "SELECT sl.id, sl.product_id, sl.quantity, sl.sale_price, sl.amount_doc, sl.sale_price_base, sl.amount, sl.unit_expense_doc, sl.order_expense_allocated_base, p.name as product_name, p.sku "
                 "FROM SalesLines sl JOIN Products p ON p.id = sl.product_id WHERE sl.sale_id=?",
                 (sale_id,),
             )
@@ -1955,8 +2008,28 @@ def _sale_income_by_product(date_from: Optional[str], date_to: Optional[str]) ->
     return result
 
 
+def _sale_expenses_by_product(date_from: Optional[str], date_to: Optional[str]) -> Dict[int, float]:
+    clauses = ["s.status='posted'"]
+    params: List[object] = []
+    if date_from:
+        clauses.append("s.doc_date >= ?")
+        params.append(date_from)
+    if date_to:
+        clauses.append("s.doc_date <= ?")
+        params.append(date_to)
+    where = " WHERE " + " AND ".join(clauses)
+    query = (
+        "SELECT sl.product_id, SUM(sl.quantity * sl.unit_expense_base + sl.order_expense_allocated_base) as expense "
+        "FROM SalesLines sl JOIN SalesDocuments s ON s.id = sl.sale_id" + where + " GROUP BY sl.product_id"
+    )
+    with get_connection() as conn:
+        rows = conn.execute(query, params).fetchall()
+    return {row["product_id"]: float(row["expense"] or 0.0) for row in rows}
+
+
 def profit_by_product(date_from: Optional[str] = None, date_to: Optional[str] = None) -> List[dict]:
     income_map = _sale_income_by_product(date_from, date_to)
+    expense_map = _sale_expenses_by_product(date_from, date_to)
     with get_connection() as conn:
         params: List[object] = []
         query = "SELECT product_id, SUM(amount) as cogs FROM StockMoves WHERE reference_type='sale'"
@@ -1974,11 +2047,31 @@ def profit_by_product(date_from: Optional[str] = None, date_to: Optional[str] = 
         pid = row["product_id"]
         cogs = abs(float(row["cogs"]))
         income = income_map.get(pid, 0.0)
-        results.append({"product_id": pid, "product": product_names.get(pid, ""), "income": income, "cogs": cogs, "gross_profit": income - cogs})
+        expenses = expense_map.get(pid, 0.0)
+        results.append(
+            {
+                "product_id": pid,
+                "product": product_names.get(pid, ""),
+                "income": income,
+                "cogs": cogs,
+                "expenses": expenses,
+                "gross_profit": income - cogs - expenses,
+            }
+        )
     # include products with income but no cogs (services?)
     for pid, income in income_map.items():
         if not any(r["product_id"] == pid for r in results):
-            results.append({"product_id": pid, "product": product_names.get(pid, ""), "income": income, "cogs": 0.0, "gross_profit": income})
+            expenses = expense_map.get(pid, 0.0)
+            results.append(
+                {
+                    "product_id": pid,
+                    "product": product_names.get(pid, ""),
+                    "income": income,
+                    "cogs": 0.0,
+                    "expenses": expenses,
+                    "gross_profit": income - expenses,
+                }
+            )
     return sorted(results, key=lambda r: r["product"])
 
 
@@ -2062,6 +2155,14 @@ def sales_analysis(
         ).fetchall()
         cogs_map = {row["channel"]: -float(row["cogs"]) for row in channel_cogs}
 
+        channel_expenses = conn.execute(
+            "SELECT COALESCE(s.channel,'') as channel, IFNULL(SUM(sl.quantity * sl.unit_expense_base + sl.order_expense_allocated_base),0) as expenses "
+            "FROM SalesLines sl JOIN SalesDocuments s ON s.id = sl.sale_id "
+            "WHERE s.status='posted'" + sale_clause + " GROUP BY COALESCE(s.channel,'')",
+            sale_params,
+        ).fetchall()
+        expense_map = {row["channel"]: float(row["expenses"]) for row in channel_expenses}
+
         category_rows = conn.execute(
             "SELECT COALESCE(c.name,'Без категорії') as category, IFNULL(SUM(sl.amount),0) as revenue, "
             "IFNULL(SUM(sl.quantity),0) as qty "
@@ -2080,17 +2181,29 @@ def sales_analysis(
             "WHERE sm.reference_type='sale'" + move_clause + " GROUP BY p.category_id",
             move_params,
         ).fetchall()
+        category_expenses_rows = conn.execute(
+            "SELECT p.category_id, IFNULL(SUM(sl.quantity * sl.unit_expense_base + sl.order_expense_allocated_base),0) as expenses "
+            "FROM SalesLines sl "
+            "JOIN SalesDocuments s ON s.id = sl.sale_id "
+            "JOIN Products p ON p.id = sl.product_id "
+            "WHERE s.status='posted'" + sale_clause + " GROUP BY p.category_id",
+            sale_params,
+        ).fetchall()
         category_names = {row["id"]: row["name"] for row in conn.execute("SELECT id, name FROM Categories")}
         cogs_by_category = {}
         for row in category_cogs_rows:
             name = category_names.get(row["category_id"], "Без категорії")
             cogs_by_category[name] = cogs_by_category.get(name, 0.0) - float(row["cogs"])
+        expenses_by_category: Dict[str, float] = {}
+        for row in category_expenses_rows:
+            name = category_names.get(row["category_id"], "Без категорії")
+            expenses_by_category[name] = expenses_by_category.get(name, 0.0) + float(row["expenses"])
 
     channels = [
         {
             "name": row["channel"] or "Без каналу",
             "revenue": float(row["revenue"]),
-            "gross_profit": float(row["revenue"]) - cogs_map.get(row["channel"], 0.0),
+            "gross_profit": float(row["revenue"]) - cogs_map.get(row["channel"], 0.0) - expense_map.get(row["channel"], 0.0),
             "qty": float(row["qty"]),
         }
         for row in channel_rows
@@ -2100,7 +2213,7 @@ def sales_analysis(
         {
             "name": row["category"],
             "revenue": float(row["revenue"]),
-            "gross_profit": float(row["revenue"]) - cogs_by_category.get(row["category"], 0.0),
+            "gross_profit": float(row["revenue"]) - cogs_by_category.get(row["category"], 0.0) - expenses_by_category.get(row["category"], 0.0),
             "qty": float(row["qty"]),
         }
         for row in category_rows

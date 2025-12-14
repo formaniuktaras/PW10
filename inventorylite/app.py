@@ -1690,8 +1690,9 @@ class InventoryApp(tk.Tk):
                 info["comment"],
                 info["currency"],
                 info["rate"],
+                info.get("order_expense_doc", 0.0),
             )
-            db.replace_sale_lines(doc_id, lines, info["rate"])
+            db.replace_sale_lines(doc_id, lines, info["rate"], info.get("order_expense_doc", 0.0))
             self.refresh_sales()
         except Exception:
             logging.exception("Create sale error")
@@ -1725,8 +1726,9 @@ class InventoryApp(tk.Tk):
                     info["comment"],
                     info["currency"],
                     info["rate"],
+                    info.get("order_expense_doc", 0.0),
                 )
-                db.replace_sale_lines(doc_id, new_lines, info["rate"])
+                db.replace_sale_lines(doc_id, new_lines, info["rate"], info.get("order_expense_doc", 0.0))
             else:
                 db.update_sale(
                     doc_id,
@@ -1737,6 +1739,7 @@ class InventoryApp(tk.Tk):
                     info["comment"],
                     doc["currency_code"],
                     doc["exchange_rate"],
+                    doc.get("order_expense_doc", 0.0),
                 )
             self.refresh_sales()
         except Exception:
@@ -1928,7 +1931,7 @@ class InventoryApp(tk.Tk):
                     skipped_lines += 1
                     continue
 
-                sale_lines.append((int(product_row["id"]), qty, price))
+                sale_lines.append((int(product_row["id"]), qty, price, 0.0))
 
             if not sale_lines:
                 skipped_lines += len(lines)
@@ -1937,7 +1940,7 @@ class InventoryApp(tk.Tk):
             total_docs += 1
             try:
                 sale_id = db.create_sale(doc_date, customer_id, warehouse_id, channel_value, comment, "UAH", 1.0)
-                db.replace_sale_lines(sale_id, sale_lines, 1.0)
+                db.replace_sale_lines(sale_id, sale_lines, 1.0, 0.0)
             except Exception as exc:
                 logging.warning("Не вдалося створити продаж %s: %s", order_no, exc)
                 skipped_lines += len(sale_lines)
@@ -1946,7 +1949,7 @@ class InventoryApp(tk.Tk):
             should_post = mode == "post"
             if mode == "in_stock":
                 enough = True
-                for pid, qty, _ in sale_lines:
+                for pid, qty, _, _ in sale_lines:
                     current_qty = stock_map.get(pid, db.get_stock_quantity(pid, warehouse_id))
                     if qty > current_qty:
                         enough = False
@@ -1957,7 +1960,7 @@ class InventoryApp(tk.Tk):
                 try:
                     db.post_sale(sale_id, allow_negative=allow_negative)
                     posted_docs += 1
-                    for pid, qty, _ in sale_lines:
+                    for pid, qty, _, _ in sale_lines:
                         stock_map[pid] = stock_map.get(pid, db.get_stock_quantity(pid, warehouse_id)) - qty
                 except Exception as exc:
                     logging.warning("Проведення продажу #%s завершилось помилкою: %s", sale_id, exc)
@@ -2233,7 +2236,7 @@ class InventoryApp(tk.Tk):
                     "id": 2,
                     "name": "Валовий прибуток",
                     "value": f"{metrics['gross_profit']:.2f}",
-                    "extra": "дохід мінус собівартість",
+                    "extra": "дохід мінус собівартість та витрати продажів",
                 },
                 {"id": 3, "name": "Маржа", "value": f"{metrics['margin_pct']:.2f}%", "extra": ""},
                 {"id": 4, "name": "Вартість залишків", "value": f"{metrics['stock_value']:.2f}", "extra": "на зараз"},
@@ -3629,18 +3632,25 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
     ttk.Entry(content, textvariable=comment_var, width=40).grid(row=row_idx, column=1, padx=6, pady=4, sticky="ew")
 
     row_idx += 1
+    order_expense_var = tk.StringVar(value=f"{float(doc.get('order_expense_doc', 0.0)):.2f}" if doc else "0")
+    if doc_type == "sale":
+        ttk.Label(content, text="Витрати замовлення").grid(row=row_idx, column=0, padx=6, pady=4, sticky="e")
+        ttk.Entry(content, textvariable=order_expense_var, width=20).grid(row=row_idx, column=1, padx=6, pady=4, sticky="w")
+        row_idx += 1
+
     ttk.Label(content, text="Рядки").grid(row=row_idx, column=0, padx=6, pady=4, sticky="ne")
     line_frame = ttk.Frame(content)
     line_frame.grid(row=row_idx, column=1, padx=6, pady=4, sticky="nsew")
     line_frame.grid_columnconfigure(0, weight=1)
     content.rowconfigure(row_idx, weight=1)
 
-    columns = ["product", "quantity", "price", "amount"]
+    columns = ["product", "quantity", "price", "expense", "amount"]
     tree = ttk.Treeview(line_frame, columns=columns, show="headings", height=8)
     headings = {
         "product": ("Товар", 200),
         "quantity": ("Кількість", 90),
         "price": ("Ціна", 90),
+        "expense": ("Витрата/од.", 110),
         "amount": ("Сума", 90),
     }
     for col, (title, width) in headings.items():
@@ -3655,6 +3665,8 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
     def refresh_currency_ui() -> None:
         price_label.config(text=f"Ціна ({curr_var.get()})")
         tree.heading("price", text=f"Ціна ({curr_var.get()})")
+        expense_label.config(text=f"Витрата/од. ({curr_var.get()})")
+        tree.heading("expense", text=f"Витрата/од. ({curr_var.get()})")
         tree.heading("amount", text=f"Сума ({curr_var.get()})")
 
     def on_currency_change(event=None):
@@ -3701,16 +3713,28 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
     price_var = tk.StringVar(value="0")
     ttk.Entry(entry_frame, textvariable=price_var, width=10).grid(row=0, column=5, padx=4, pady=2, sticky="w")
 
+    expense_label = ttk.Label(entry_frame, text="Витрата/од.")
+    expense_label.grid(row=0, column=6, padx=4, pady=2, sticky="e")
+    expense_var = tk.StringVar(value="0")
+    ttk.Entry(entry_frame, textvariable=expense_var, width=10).grid(row=0, column=7, padx=4, pady=2, sticky="w")
+
     line_data = []
     if lines:
         for ln in lines:
             price_field = "purchase_price" if doc_type == "purchase" else "sale_price"
+            expense_value = 0.0
+            if doc_type == "sale" and "unit_expense_doc" in ln.keys():
+                try:
+                    expense_value = float(ln["unit_expense_doc"])
+                except Exception:
+                    expense_value = 0.0
             line_data.append(
                 {
                     "product_id": ln["product_id"],
                     "product_name": ln["product_name"],
                     "quantity": float(ln["quantity"]),
                     "price": float(ln[price_field]),
+                    "expense": expense_value,
                     "amount": float(ln["quantity"]) * float(ln[price_field]),
                 }
             )
@@ -3760,7 +3784,13 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
                 "",
                 "end",
                 iid=str(idx),
-                values=(ln["product_name"], f"{ln['quantity']:.2f}", f"{ln['price']:.2f}", f"{ln['amount']:.2f}"),
+                values=(
+                    ln["product_name"],
+                    f"{ln['quantity']:.2f}",
+                    f"{ln['price']:.2f}",
+                    f"{ln.get('expense', 0.0):.2f}",
+                    f"{ln['amount']:.2f}",
+                ),
             )
 
     def on_select(event=None):
@@ -3774,6 +3804,7 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
             product_var.set(product_name)
             qty_var.set(str(ln["quantity"]))
             price_var.set(str(ln["price"]))
+            expense_var.set(str(ln.get("expense", 0.0)))
 
     tree.bind("<<TreeviewSelect>>", on_select)
 
@@ -3783,11 +3814,15 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
         try:
             qty = float(qty_var.get())
             price = float(price_var.get())
+            expense_value = float(expense_var.get() or 0)
         except ValueError:
             messagebox.showerror("Валідація", "Невірні числові значення")
             return
         if qty <= 0:
             messagebox.showerror("Валідація", "Кількість повинна бути більшою за 0")
+            return
+        if expense_value < 0:
+            messagebox.showerror("Валідація", "Витрати не можуть бути від'ємними")
             return
         product_name = product_var.get().strip()
         product_id = product_lookup.get(product_name)
@@ -3806,6 +3841,7 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
             "product_name": product_name,
             "quantity": qty,
             "price": price,
+            "expense": expense_value,
             "amount": qty * price,
         }
         if selected_idx:
@@ -3928,7 +3964,7 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
         return result_new
 
     btn_line = ttk.Frame(entry_frame)
-    btn_line.grid(row=0, column=6, padx=6)
+    btn_line.grid(row=0, column=8, padx=6)
     ttk.Button(btn_line, text="Новий товар", command=lambda: add_new_product(product_var.get()), state="normal" if editable else "disabled").pack(side=tk.LEFT, padx=4)
     ttk.Button(btn_line, text="Додати/Оновити", command=add_or_update_line, state="normal" if editable else "disabled").pack(side=tk.LEFT)
     ttk.Button(btn_line, text="Видалити", command=delete_line, state="normal" if editable else "disabled").pack(side=tk.LEFT, padx=4)
@@ -3957,6 +3993,16 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
         if rate <= 0:
             messagebox.showerror("Валідація", "Курс має бути більшим за 0")
             return
+        order_expense = 0.0
+        if doc_type == "sale":
+            try:
+                order_expense = float(order_expense_var.get() or 0)
+            except ValueError:
+                messagebox.showerror("Валідація", "Невірна сума витрат замовлення")
+                return
+            if order_expense < 0:
+                messagebox.showerror("Валідація", "Витрати замовлення не можуть бути від'ємними")
+                return
         cp_name = cp_var.get()
         cp_id = None
         if cp_name and cp_name != "-":
@@ -3978,8 +4024,14 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
             "comment": comment_var.get().strip(),
             "currency": curr_var.get(),
             "rate": rate,
+            "order_expense_doc": order_expense if doc_type == "sale" else 0.0,
         }
-        lines_to_save = [(ln["product_id"], ln["quantity"], ln["price"]) for ln in line_data]
+        if doc_type == "sale":
+            lines_to_save = [
+                (ln["product_id"], ln["quantity"], ln["price"], ln.get("expense", 0.0)) for ln in line_data
+            ]
+        else:
+            lines_to_save = [(ln["product_id"], ln["quantity"], ln["price"]) for ln in line_data]
         result = (info, lines_to_save)
         dlg.destroy()
 

@@ -1156,8 +1156,12 @@ class InventoryApp(tk.Tk):
         rate_btns = ttk.Frame(top)
         rate_btns.pack(pady=4, anchor="w")
         ttk.Button(rate_btns, text="Додати курс", command=self.add_rate).pack(side=tk.LEFT, padx=4)
+        ttk.Button(rate_btns, text="Змінити", command=self.edit_rate).pack(side=tk.LEFT, padx=4)
+        ttk.Button(rate_btns, text="Видалити", command=self.delete_rate).pack(side=tk.LEFT, padx=4)
 
         self.currency_table.on_select(self.refresh_rates)
+        self.rate_table.on_double_click(self.edit_rate)
+        self.rate_table.register_context_menu(self.edit_rate, self.delete_rate)
 
     def add_currency(self) -> None:
         values = simple_prompt("Нова валюта", ["Код", "Назва", "Знаків після коми"], ["USD", "Долар США", "2"])
@@ -1268,6 +1272,44 @@ class InventoryApp(tk.Tk):
             self.refresh_rates()
         except Exception as exc:
             logging.exception("Add rate error")
+            show_error("Курси", str(exc))
+
+    def edit_rate(self) -> None:
+        rate_id = self.rate_table.selected_id()
+        if not rate_id:
+            show_error("Курси", "Оберіть курс")
+            return
+        rates = [r for r in db.list_currency_rates(self.currency_table.selected_id()) if r["id"] == rate_id]
+        if not rates:
+            return
+        current = rates[0]
+        values = simple_prompt(
+            "Змінити курс",
+            ["Дата", "Курс до базової валюти"],
+            [current["rate_date"], f"{current['rate']:.4f}"],
+        )
+        if not values:
+            return
+        try:
+            rate = float(values[1])
+            db.update_currency_rate(rate_id, values[0], rate)
+            self.refresh_rates()
+        except Exception as exc:
+            logging.exception("Edit rate error")
+            show_error("Курси", str(exc))
+
+    def delete_rate(self) -> None:
+        rate_id = self.rate_table.selected_id()
+        if not rate_id:
+            show_error("Курси", "Оберіть курс")
+            return
+        if not messagebox.askyesno("Курси", "Видалити курс?"):
+            return
+        try:
+            db.delete_currency_rate(rate_id)
+            self.refresh_rates()
+        except Exception as exc:
+            logging.exception("Delete rate error")
             show_error("Курси", str(exc))
 
     # Purchases

@@ -996,13 +996,45 @@ def delete_currency(code: str) -> None:
 
 def add_currency_rate(currency_code: str, rate_date: str, rate: float) -> int:
     currency_code = currency_code.strip().upper()
+    if rate <= 0:
+        raise ValueError("Курс має бути більшим за 0")
     with get_connection() as conn:
+        exists = conn.execute(
+            "SELECT 1 FROM CurrencyRates WHERE currency_code=? AND rate_date=?",
+            (currency_code, rate_date),
+        ).fetchone()
+        if exists:
+            raise ValueError("Курс для цієї валюти на цю дату вже існує")
         cur = conn.execute(
             "INSERT INTO CurrencyRates (currency_code, rate_date, rate) VALUES (?,?,?)",
             (currency_code, rate_date, rate),
         )
         conn.commit()
         return cur.lastrowid
+
+
+def update_currency_rate(rate_id: int, rate_date: str, rate: float) -> None:
+    if rate <= 0:
+        raise ValueError("Курс має бути більшим за 0")
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT currency_code FROM CurrencyRates WHERE id=?",
+            (rate_id,),
+        ).fetchone()
+        if not row:
+            raise ValueError("Курс не знайдено")
+        currency_code = row[0]
+        exists = conn.execute(
+            "SELECT 1 FROM CurrencyRates WHERE currency_code=? AND rate_date=? AND id<>?",
+            (currency_code, rate_date, rate_id),
+        ).fetchone()
+        if exists:
+            raise ValueError("Курс для цієї валюти на цю дату вже існує")
+        conn.execute(
+            "UPDATE CurrencyRates SET rate_date=?, rate=? WHERE id=?",
+            (rate_date, rate, rate_id),
+        )
+        conn.commit()
 
 
 def rate_on_date(currency_code: str, rate_date: str) -> Optional[float]:
@@ -1024,6 +1056,12 @@ def list_currency_rates(currency_code: Optional[str] = None) -> List[sqlite3.Row
     query += " ORDER BY rate_date DESC, id DESC"
     with get_connection() as conn:
         return list(conn.execute(query, params))
+
+
+def delete_currency_rate(rate_id: int) -> None:
+    with get_connection() as conn:
+        conn.execute("DELETE FROM CurrencyRates WHERE id=?", (rate_id,))
+        conn.commit()
 
 
 def latest_rate(currency_code: str) -> float:

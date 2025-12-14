@@ -68,6 +68,7 @@ DEFAULT_SETTINGS = {
         "auto_error_reports": False,
         "docs_url": "https://example.com/docs",
     },
+    "sales_import": {"templates": {}, "last_template": ""},
 }
 
 

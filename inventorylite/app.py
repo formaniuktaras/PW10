@@ -1848,12 +1848,26 @@ class InventoryApp(tk.Tk):
             return
         try:
             with db.get_connection() as conn:
-                status = conn.execute("SELECT status FROM SalesDocuments WHERE id=?", (doc_id,)).fetchone()
-                if status and status[0] == "posted":
-                    raise ValueError("Видаляти можна лише чернетки")
+                status_row = conn.execute("SELECT status FROM SalesDocuments WHERE id=?", (doc_id,)).fetchone()
+            if not status_row:
+                raise ValueError("Документ не знайдено")
+
+            was_posted = status_row[0] == "posted"
+            if was_posted:
+                if not messagebox.askyesno(
+                    "Підтвердження", "Документ проведено. Скасувати проведення та видалити?"
+                ):
+                    return
+                db.unpost_sale(doc_id)
+
+            with db.get_connection() as conn:
                 conn.execute("DELETE FROM SalesDocuments WHERE id=?", (doc_id,))
                 conn.commit()
+
             self.refresh_sales()
+            if was_posted:
+                self.refresh_stock()
+                self.refresh_cash()
         except Exception as exc:
             logging.exception("Delete sale error")
             show_error("Продажі", str(exc))
@@ -1935,7 +1949,7 @@ class InventoryApp(tk.Tk):
         channel_override = options.get("channel", "")
         mode = options.get("mode", "draft")
         allow_negative = bool(options.get("allow_negative"))
-        create_products = bool(options.get("create_products"))
+        create_products = bool(options.get("create_products", True))
         create_customers = bool(options.get("create_customers"))
         use_file_channel = bool(options.get("use_file_channel"))
 

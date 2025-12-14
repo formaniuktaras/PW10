@@ -1157,24 +1157,46 @@ def delete_counterparty(counterparty_id: int) -> None:
 
 
 def ensure_import_defaults(brand_name: str = "Імпорт", category_name: str = "Імпорт") -> Tuple[int, int]:
-    """Return (brand_id, category_id), creating placeholder entries if necessary."""
+    """Return (brand_id, category_id) ensuring preferred names exist.
+
+    If the provided ``brand_name``/``category_name`` exists (case-insensitive), its id
+    is returned. Otherwise the records are created, falling back to the first existing
+    entry only when no preferred name is supplied.
+    """
+
+    brand_name = (brand_name or "").strip()
+    category_name = (category_name or "").strip()
 
     with get_connection() as conn:
-        brand_row = conn.execute("SELECT id FROM Brands ORDER BY id LIMIT 1").fetchone()
-        category_row = conn.execute("SELECT id FROM Categories ORDER BY id LIMIT 1").fetchone()
+        brand_row = conn.execute(
+            "SELECT id FROM Brands WHERE lower(name)=? LIMIT 1", (brand_name.lower(),)
+        ).fetchone() if brand_name else None
+        category_row = conn.execute(
+            "SELECT id FROM Categories WHERE lower(name)=? LIMIT 1", (category_name.lower(),)
+        ).fetchone() if category_name else None
 
         if not brand_row:
-            brand_id = conn.execute("INSERT INTO Brands (name) VALUES (?)", (brand_name,)).lastrowid
-            conn.commit()
+            if not brand_name:
+                brand_row = conn.execute("SELECT id FROM Brands ORDER BY id LIMIT 1").fetchone()
+            if brand_row:
+                brand_id = int(brand_row["id"])
+            else:
+                brand_id = conn.execute("INSERT INTO Brands (name) VALUES (?)", (brand_name or "Імпорт",)).lastrowid
+                conn.commit()
         else:
             brand_id = int(brand_row["id"])
 
         if not category_row:
-            category_id = conn.execute(
-                "INSERT INTO Categories (name, sort_order, is_service, is_hidden) VALUES (?, 0, 0, 0)",
-                (category_name,),
-            ).lastrowid
-            conn.commit()
+            if not category_name:
+                category_row = conn.execute("SELECT id FROM Categories ORDER BY id LIMIT 1").fetchone()
+            if category_row:
+                category_id = int(category_row["id"])
+            else:
+                category_id = conn.execute(
+                    "INSERT INTO Categories (name, sort_order, is_service, is_hidden) VALUES (?, 0, 0, 0)",
+                    (category_name or "Імпорт",),
+                ).lastrowid
+                conn.commit()
         else:
             category_id = int(category_row["id"])
 

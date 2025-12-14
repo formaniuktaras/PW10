@@ -1168,37 +1168,71 @@ def ensure_import_defaults(brand_name: str = "Імпорт", category_name: str 
     category_name = (category_name or "").strip()
 
     with get_connection() as conn:
-        brand_row = conn.execute(
-            "SELECT id FROM Brands WHERE lower(name)=? LIMIT 1", (brand_name.lower(),)
-        ).fetchone() if brand_name else None
-        category_row = conn.execute(
-            "SELECT id FROM Categories WHERE lower(name)=? LIMIT 1", (category_name.lower(),)
-        ).fetchone() if category_name else None
-
-        if not brand_row:
-            if not brand_name:
-                brand_row = conn.execute("SELECT id FROM Brands ORDER BY id LIMIT 1").fetchone()
-            if brand_row:
-                brand_id = int(brand_row["id"])
-            else:
-                brand_id = conn.execute("INSERT INTO Brands (name) VALUES (?)", (brand_name or "Імпорт",)).lastrowid
-                conn.commit()
-        else:
+        # Brand
+        brand_row = (
+            conn.execute("SELECT id FROM Brands WHERE lower(name)=? LIMIT 1", (brand_name.lower(),)).fetchone()
+            if brand_name
+            else None
+        )
+        if brand_row:
             brand_id = int(brand_row["id"])
-
-        if not category_row:
-            if not category_name:
-                category_row = conn.execute("SELECT id FROM Categories ORDER BY id LIMIT 1").fetchone()
-            if category_row:
-                category_id = int(category_row["id"])
-            else:
-                category_id = conn.execute(
-                    "INSERT INTO Categories (name, sort_order, is_service, is_hidden) VALUES (?, 0, 0, 0)",
-                    (category_name or "Імпорт",),
-                ).lastrowid
-                conn.commit()
         else:
+            if not brand_name:
+                fallback = conn.execute("SELECT id FROM Brands ORDER BY id LIMIT 1").fetchone()
+                if fallback:
+                    brand_id = int(fallback["id"])
+                else:
+                    conn.execute("INSERT OR IGNORE INTO Brands (name) VALUES (?)", ("Імпорт",))
+                    conn.commit()
+                    brand_id = int(
+                        conn.execute("SELECT id FROM Brands WHERE lower(name)=? LIMIT 1", ("імпорт",)).fetchone()["id"]
+                    )
+            else:
+                conn.execute("INSERT OR IGNORE INTO Brands (name) VALUES (?)", (brand_name,))
+                conn.commit()
+                brand_id = int(
+                    conn.execute("SELECT id FROM Brands WHERE lower(name)=? LIMIT 1", (brand_name.lower(),)).fetchone()[
+                        "id"
+                    ]
+                )
+
+        # Category
+        category_row = (
+            conn.execute(
+                "SELECT id FROM Categories WHERE lower(name)=? LIMIT 1", (category_name.lower(),)
+            ).fetchone()
+            if category_name
+            else None
+        )
+        if category_row:
             category_id = int(category_row["id"])
+        else:
+            if not category_name:
+                fallback = conn.execute("SELECT id FROM Categories ORDER BY id LIMIT 1").fetchone()
+                if fallback:
+                    category_id = int(fallback["id"])
+                else:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO Categories (name, sort_order, is_service, is_hidden) VALUES (?, 0, 0, 0)",
+                        ("Імпорт",),
+                    )
+                    conn.commit()
+                    category_id = int(
+                        conn.execute(
+                            "SELECT id FROM Categories WHERE lower(name)=? LIMIT 1", ("імпорт",)
+                        ).fetchone()["id"]
+                    )
+            else:
+                conn.execute(
+                    "INSERT OR IGNORE INTO Categories (name, sort_order, is_service, is_hidden) VALUES (?, 0, 0, 0)",
+                    (category_name,),
+                )
+                conn.commit()
+                category_id = int(
+                    conn.execute(
+                        "SELECT id FROM Categories WHERE lower(name)=? LIMIT 1", (category_name.lower(),)
+                    ).fetchone()["id"]
+                )
 
     return brand_id, category_id
 

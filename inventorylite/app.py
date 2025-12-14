@@ -1962,7 +1962,10 @@ class InventoryApp(tk.Tk):
             c["name"].lower(): c for c in counterparties if c["type"] in allowed_customer_types and c["name"]
         }
 
-        brand_id, category_id = db.ensure_import_defaults()
+        default_brand = self.settings.get("defaults", "product", "brand") or "Імпорт"
+        default_category = self.settings.get("defaults", "product", "category") or "Імпорт"
+        default_unit = (self.settings.get("defaults", "product", "unit") or "pcs").strip() or "pcs"
+        brand_id, category_id = db.ensure_import_defaults(default_brand, default_category)
         stock_map = db.stock_on_hand(warehouse_id)
 
         created_products = 0
@@ -2025,7 +2028,7 @@ class InventoryApp(tk.Tk):
                     product_row = products_by_name.get(name.lower())
                 if not product_row and create_products:
                     final_sku = sku or self._generate_unique_sku(name, set(products_by_sku.keys()))
-                    product_id = db.add_product(final_sku, name, brand_id, category_id)
+                    product_id = db.add_product(final_sku, name, brand_id, category_id, unit=default_unit)
                     product_row = {
                         "id": product_id,
                         "sku": final_sku,

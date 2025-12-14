@@ -29,13 +29,16 @@ from utils import (
     VERSION,
     SingleInstance,
     backup_all_data,
-    BASE_CURRENCY,
     configure_logging,
     get_data_dir,
     get_db_path,
     get_lock_path,
     get_log_path,
     Settings,
+    apply_base_currency_settings,
+    get_base_currency_code,
+    get_base_currency_name,
+    get_base_currency_decimals,
     open_data_folder,
     restore_all_data,
     show_error,
@@ -47,7 +50,8 @@ from ui_components import TableFrame, simple_prompt
 
 def ensure_rate_for_date(currency_code: str, rate_date: str) -> float:
     currency_code = currency_code.strip().upper()
-    if not currency_code or currency_code == BASE_CURRENCY:
+    base_currency = get_base_currency_code()
+    if not currency_code or currency_code == base_currency:
         return 1.0
     existing = db.rate_on_date(currency_code, rate_date)
     if existing is not None:
@@ -61,7 +65,7 @@ def ensure_rate_for_date(currency_code: str, rate_date: str) -> float:
         defaults = [f"{suggestion:.4f}" if suggestion else ""]
         values = simple_prompt(
             "Курс валюти",
-            [f"Курс {currency_code} -> {BASE_CURRENCY} на {rate_date}"],
+            [f"Курс {currency_code} -> {base_currency} на {rate_date}"],
             defaults,
         )
         if not values:
@@ -79,12 +83,13 @@ def ensure_rate_for_date(currency_code: str, rate_date: str) -> float:
 
 
 class InventoryApp(tk.Tk):
-    def __init__(self) -> None:
+    def __init__(self, settings: Settings | None = None) -> None:
         super().__init__()
         self.title(APP_NAME)
         self.geometry("1180x720")
         self.iconbitmap(default="icons/app.ico") if Path("icons/app.ico").exists() else None
-        self.settings = Settings()
+        self.settings = settings or Settings()
+        apply_base_currency_settings(self.settings)
         self.status_var = tk.StringVar(value="Готово")
         self.status_bar: ttk.Label | None = None
         bind_common_shortcuts(self)
@@ -1129,6 +1134,8 @@ class InventoryApp(tk.Tk):
         top.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
         ttk.Label(top, text="Довідник валют").pack(anchor="w")
+        self.base_currency_label = ttk.Label(top, text=self._format_base_currency_label())
+        self.base_currency_label.pack(anchor="w", pady=(0, 4))
         curr_columns = [("code", "Код", 80), ("name", "Назва", 200), ("decimals", "Знаків", 60), ("is_active", "Активна", 80)]
         self.currency_table = TableFrame(top, curr_columns, height=6)
         self.currency_table.pack(fill=tk.X, pady=4)
@@ -1215,7 +1222,18 @@ class InventoryApp(tk.Tk):
                 for row in rows
             ]
         )
+        self.update_base_currency_label()
         self.refresh_rates()
+
+    def _format_base_currency_label(self) -> str:
+        return (
+            f"Базова валюта: {get_base_currency_code()} — "
+            f"{get_base_currency_name()} ({get_base_currency_decimals()} знаків)"
+        )
+
+    def update_base_currency_label(self) -> None:
+        if hasattr(self, "base_currency_label"):
+            self.base_currency_label.configure(text=self._format_base_currency_label())
 
     def refresh_rates(self) -> None:
         code = self.currency_table.selected_id()
@@ -3403,7 +3421,7 @@ def extra_cost_prompt(counterparties, currencies, purchases, doc=None, lines=Non
     row_idx += 1
     ttk.Label(frame, text="Валюта").grid(row=row_idx, column=0, sticky="e", padx=4, pady=2)
     curr_codes = [c["code"] for c in currencies]
-    curr_var = tk.StringVar(value=doc["currency_code"] if doc else (curr_codes[0] if curr_codes else BASE_CURRENCY))
+    curr_var = tk.StringVar(value=doc["currency_code"] if doc else (curr_codes[0] if curr_codes else get_base_currency_code()))
     curr_combo = ttk.Combobox(frame, textvariable=curr_var, values=curr_codes, state="readonly")
     if not allow_edit:
         curr_combo.state(["disabled"])
@@ -3605,7 +3623,7 @@ def extra_cost_prompt(counterparties, currencies, purchases, doc=None, lines=Non
         if partner_name and partner_name != "-":
             found = next((c for c in filtered_counterparties if c["name"] == partner_name), None)
             partner_id = found["id"] if found else None
-        if curr_var.get().strip().upper() != BASE_CURRENCY and not db.rate_on_date(curr_var.get(), date_var.get()):
+        if curr_var.get().strip().upper() != get_base_currency_code() and not db.rate_on_date(curr_var.get(), date_var.get()):
             db.add_currency_rate(curr_var.get(), date_var.get(), rate_val)
         result.append(
             (
@@ -3661,8 +3679,12 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
 
     row_idx += 1
     ttk.Label(content, text="Валюта").grid(row=row_idx, column=0, padx=6, pady=4, sticky="e")
-    curr_var = tk.StringVar(value=doc["currency_code"] if doc else (currencies[0]["code"] if currencies else BASE_CURRENCY))
-    curr_codes = [c["code"] for c in currencies] if currencies else [BASE_CURRENCY]
+    curr_var = tk.StringVar(
+        value=doc["currency_code"]
+        if doc
+        else (currencies[0]["code"] if currencies else get_base_currency_code())
+    )
+    curr_codes = [c["code"] for c in currencies] if currencies else [get_base_currency_code()]
     curr_combo = ttk.Combobox(content, textvariable=curr_var, values=curr_codes, state="readonly")
     if not editable:
         curr_combo.state(["disabled"])
@@ -4102,7 +4124,7 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
         cp_id = None
         if cp_name and cp_name != "-":
             cp_id = next((c["id"] for c in filtered_counterparties if c["name"] == cp_name), None)
-        if currency_code != BASE_CURRENCY and not db.rate_on_date(currency_code, date_var.get()):
+        if currency_code != get_base_currency_code() and not db.rate_on_date(currency_code, date_var.get()):
             db.add_currency_rate(currency_code, date_var.get(), rate)
         try:
             warehouse_id = warehouses[wh_combo.current()]["id"]
@@ -4333,6 +4355,18 @@ class SettingsDialog(tk.Toplevel):
             row=4, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 4)
         )
 
+        currency_frame = ttk.LabelFrame(self.defaults_tab, text="Валюти")
+        currency_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
+
+        currencies = db.list_currencies(active_only=False)
+        currency_codes = [c["code"] for c in currencies]
+        currency_default = self.app.settings.get("defaults", "currency", "base_code") or get_base_currency_code()
+        currency_var = self._add_var("defaults.currency.base_code", tk.StringVar(value=currency_default))
+        ttk.Label(currency_frame, text="Базова валюта:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
+        ttk.Combobox(currency_frame, textvariable=currency_var, values=currency_codes, width=12, state="readonly").grid(
+            row=0, column=1, sticky="w", padx=6, pady=4
+        )
+
     def build_files_tab(self) -> None:
         workdir_var = self._add_var("files.working_dir", tk.StringVar(value=str(self.app.default_workdir())))
         ttk.Label(self.files_tab, text="Робоча директорія:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
@@ -4531,9 +4565,21 @@ class SettingsDialog(tk.Toplevel):
             value = var.get()
             keys = path.split(".")
             self.app.settings.set(value, *keys)
+        base_code = str(self.vars.get("defaults.currency.base_code", tk.StringVar()).get()).strip().upper()
+        if base_code:
+            currencies = {c["code"]: c for c in db.list_currencies(active_only=False)}
+            selected = currencies.get(base_code)
+            if selected:
+                self.app.settings.set(selected["name"], "defaults", "currency", "base_name")
+                self.app.settings.set(int(selected["decimals"]), "defaults", "currency", "base_decimals")
+            else:
+                self.app.settings.set(base_code, "defaults", "currency", "base_name")
+                self.app.settings.set(get_base_currency_decimals(), "defaults", "currency", "base_decimals")
         if self.recent_cleared:
             self.app.settings.set([], "files", "recent_items")
         self.app.settings.save()
+        apply_base_currency_settings(self.app.settings)
+        self.app.refresh_currencies()
         self.app.apply_settings()
         self.destroy()
 
@@ -4543,8 +4589,10 @@ def main() -> None:
     logging.info("Starting %s", APP_NAME)
     try:
         with SingleInstance(get_lock_path()):
+            settings = Settings()
+            apply_base_currency_settings(settings)
             db.init_db()
-            app = InventoryApp()
+            app = InventoryApp(settings)
             app.mainloop()
     except RuntimeError:
         messagebox.showwarning(APP_NAME, "Програма вже запущена.")

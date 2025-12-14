@@ -74,7 +74,12 @@ DEFAULT_SETTINGS = {
             "unit": "pcs",
             "brand": "",
             "category": "",
-        }
+        },
+        "currency": {
+            "base_code": BASE_CURRENCY,
+            "base_name": BASE_CURRENCY_NAME,
+            "base_decimals": BASE_CURRENCY_DECIMALS,
+        },
     },
 }
 
@@ -149,6 +154,37 @@ class Settings:
         for key in keys[:-1]:
             cursor = cursor.setdefault(key, {})
         cursor[keys[-1]] = value
+
+
+def apply_base_currency_settings(settings: Settings) -> None:
+    """Update global base currency values using the given settings."""
+
+    code = (settings.get("defaults", "currency", "base_code") or BASE_CURRENCY).strip().upper()
+    name = settings.get("defaults", "currency", "base_name") or BASE_CURRENCY_NAME
+    try:
+        decimals = int(settings.get("defaults", "currency", "base_decimals") or BASE_CURRENCY_DECIMALS)
+    except (TypeError, ValueError):
+        decimals = BASE_CURRENCY_DECIMALS
+    set_base_currency(code, name, decimals)
+
+
+def get_base_currency_code() -> str:
+    return BASE_CURRENCY
+
+
+def get_base_currency_name() -> str:
+    return BASE_CURRENCY_NAME
+
+
+def get_base_currency_decimals() -> int:
+    return BASE_CURRENCY_DECIMALS
+
+
+def set_base_currency(code: str, name: str, decimals: int) -> None:
+    global BASE_CURRENCY, BASE_CURRENCY_NAME, BASE_CURRENCY_DECIMALS
+    BASE_CURRENCY = code.strip().upper()
+    BASE_CURRENCY_NAME = name.strip() or BASE_CURRENCY
+    BASE_CURRENCY_DECIMALS = max(int(decimals), 0)
 
 def configure_logging() -> None:
     log_path = get_log_path()

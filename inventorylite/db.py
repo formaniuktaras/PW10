@@ -17,7 +17,8 @@ from pathlib import Path
 from statistics import mean, pstdev
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-from utils import BASE_CURRENCY, BASE_CURRENCY_DECIMALS, BASE_CURRENCY_NAME, get_db_path
+import utils
+from utils import get_db_path
 
 
 def get_connection() -> sqlite3.Connection:
@@ -384,16 +385,23 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
 def _ensure_currency_tables(conn: sqlite3.Connection) -> None:
     conn.execute(
         "INSERT OR IGNORE INTO Currencies (code, name, decimals, is_active) VALUES (?,?,?,1)",
-        (BASE_CURRENCY, BASE_CURRENCY_NAME, BASE_CURRENCY_DECIMALS),
+        (
+            utils.get_base_currency_code(),
+            utils.get_base_currency_name(),
+            utils.get_base_currency_decimals(),
+        ),
     )
     conn.execute(
         "INSERT OR IGNORE INTO Currencies (code, name, decimals, is_active) VALUES ('UAH', 'Українська гривня', 2, 1)"
     )
-    has_rate = conn.execute("SELECT 1 FROM CurrencyRates WHERE currency_code=? LIMIT 1", (BASE_CURRENCY,)).fetchone()
+    has_rate = conn.execute(
+        "SELECT 1 FROM CurrencyRates WHERE currency_code=? LIMIT 1",
+        (utils.get_base_currency_code(),),
+    ).fetchone()
     if not has_rate:
         conn.execute(
             "INSERT INTO CurrencyRates (currency_code, rate_date, rate) VALUES (?, date('now'), 1)",
-            (BASE_CURRENCY,),
+            (utils.get_base_currency_code(),),
         )
 
 
@@ -979,7 +987,7 @@ def update_currency(code: str, name: str, decimals: int = 2, is_active: bool = T
 
 def delete_currency(code: str) -> None:
     code = code.strip().upper()
-    if code == BASE_CURRENCY:
+    if code == utils.get_base_currency_code():
         raise ValueError("Базову валюту не можна видалити")
     with get_connection() as conn:
         conn.execute("DELETE FROM Currencies WHERE code=?", (code,))
@@ -1020,7 +1028,7 @@ def list_currency_rates(currency_code: Optional[str] = None) -> List[sqlite3.Row
 
 def latest_rate(currency_code: str) -> float:
     currency_code = currency_code.strip().upper()
-    if currency_code == BASE_CURRENCY:
+    if currency_code == utils.get_base_currency_code():
         return 1.0
     with get_connection() as conn:
         row = conn.execute(
@@ -1034,7 +1042,7 @@ def latest_rate(currency_code: str) -> float:
 
 def rate_on_or_before(currency_code: str, rate_date: str) -> float:
     currency_code = currency_code.strip().upper()
-    if currency_code == BASE_CURRENCY:
+    if currency_code == utils.get_base_currency_code():
         return 1.0
     with get_connection() as conn:
         row = conn.execute(
@@ -1209,14 +1217,15 @@ def create_purchase(
     warehouse_id: int,
     channel: str,
     comment: str = "",
-    currency_code: str = BASE_CURRENCY,
+    currency_code: Optional[str] = None,
     exchange_rate: float = 1.0,
 ) -> int:
+    currency_value = (currency_code or utils.get_base_currency_code()).strip().upper()
     with get_connection() as conn:
         cur = conn.execute(
             "INSERT INTO PurchaseDocuments (doc_date, supplier_id, warehouse_id, channel, comment, status, currency_code, exchange_rate) "
             "VALUES (?,?,?,?,?, 'draft', ?, ?)",
-            (doc_date, supplier_id, warehouse_id, channel.strip(), comment.strip(), currency_code.strip().upper(), exchange_rate),
+            (doc_date, supplier_id, warehouse_id, channel.strip(), comment.strip(), currency_value, exchange_rate),
         )
         conn.commit()
         return cur.lastrowid
@@ -1326,15 +1335,16 @@ def list_purchase_lines(purchase_id: int) -> List[sqlite3.Row]:
 
 def create_extra_cost_document(
     doc_date: str,
-    currency_code: str = BASE_CURRENCY,
+    currency_code: Optional[str] = None,
     exchange_rate: float = 1.0,
     partner_id: Optional[int] = None,
     comment: str = "",
 ) -> int:
+    currency_value = (currency_code or utils.get_base_currency_code()).strip().upper()
     with get_connection() as conn:
         cur = conn.execute(
             "INSERT INTO ExtraCostDocuments (doc_date, currency_code, exchange_rate, partner_id, status, comment) VALUES (?, ?, ?, ?, 'draft', ?)",
-            (doc_date, currency_code.strip().upper(), exchange_rate, partner_id, comment.strip()),
+            (doc_date, currency_value, exchange_rate, partner_id, comment.strip()),
         )
         conn.commit()
         return cur.lastrowid
@@ -1587,10 +1597,11 @@ def create_sale(
     warehouse_id: int,
     channel: str,
     comment: str = "",
-    currency_code: str = BASE_CURRENCY,
+    currency_code: Optional[str] = None,
     exchange_rate: float = 1.0,
     order_expense_doc: float = 0.0,
 ) -> int:
+    currency_value = (currency_code or utils.get_base_currency_code()).strip().upper()
     with get_connection() as conn:
         order_expense_base = order_expense_doc * exchange_rate
         cur = conn.execute(
@@ -1602,7 +1613,7 @@ def create_sale(
                 warehouse_id,
                 channel.strip(),
                 comment.strip(),
-                currency_code.strip().upper(),
+                currency_value,
                 exchange_rate,
                 order_expense_doc,
                 order_expense_base,

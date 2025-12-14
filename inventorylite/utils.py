@@ -455,7 +455,8 @@ def restore_all_data(archive_path: Path) -> None:
         # Remove existing data files except for the archive itself if it is stored under data_dir.
         skip_path = archive_path if _is_relative_to(archive_path, data_dir) else None
         for item in list(data_dir.iterdir()):
-            if skip_path and item.resolve() == skip_path:
+            # Skip the archive file and its parent directories to avoid deleting the source during restore.
+            if skip_path and (item.resolve() == skip_path or _is_relative_to(skip_path, item)):
                 continue
             if item.is_dir():
                 shutil.rmtree(item)

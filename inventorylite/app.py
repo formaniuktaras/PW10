@@ -45,6 +45,39 @@ from utils import (
 from ui_components import TableFrame, simple_prompt
 
 
+def ensure_rate_for_date(currency_code: str, rate_date: str) -> float:
+    currency_code = currency_code.strip().upper()
+    if not currency_code or currency_code == BASE_CURRENCY:
+        return 1.0
+    existing = db.rate_on_date(currency_code, rate_date)
+    if existing is not None:
+        return existing
+    suggestion: float | None = None
+    try:
+        suggestion = db.rate_on_or_before(currency_code, rate_date)
+    except Exception:
+        suggestion = None
+    while True:
+        defaults = [f"{suggestion:.4f}" if suggestion else ""]
+        values = simple_prompt(
+            "Курс валюти",
+            [f"Курс {currency_code} -> {BASE_CURRENCY} на {rate_date}"],
+            defaults,
+        )
+        if not values:
+            raise ValueError("Курс не вказано")
+        try:
+            rate = float(values[0])
+        except ValueError:
+            messagebox.showerror("Курс", "Введіть числовий курс")
+            continue
+        if rate <= 0:
+            messagebox.showerror("Курс", "Курс має бути більшим за 0")
+            continue
+        db.add_currency_rate(currency_code, rate_date, rate)
+        return rate
+
+
 class InventoryApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -3360,11 +3393,31 @@ def extra_cost_prompt(counterparties, currencies, purchases, doc=None, lines=Non
         curr_combo.state(["disabled"])
     curr_combo.grid(row=row_idx, column=1, sticky="w")
 
+    last_currency = curr_var.get()
+
     row_idx += 1
     ttk.Label(frame, text="Курс").grid(row=row_idx, column=0, sticky="e", padx=4, pady=2)
-    default_rate = doc["exchange_rate"] if doc else db.latest_rate(curr_var.get())
+    try:
+        default_rate = doc["exchange_rate"] if doc else ensure_rate_for_date(curr_var.get(), date_var.get())
+    except Exception:
+        default_rate = doc["exchange_rate"] if doc else 1.0
     rate_var = tk.StringVar(value=f"{default_rate:.4f}")
     ttk.Entry(frame, textvariable=rate_var, width=12, state="normal" if allow_edit else "disabled").grid(row=row_idx, column=1, sticky="w")
+
+    def on_currency_change(event=None):
+        nonlocal last_currency
+        if not allow_edit:
+            return
+        try:
+            rate_val = ensure_rate_for_date(curr_var.get(), date_var.get())
+        except ValueError as exc:
+            messagebox.showerror("Курс", str(exc))
+            curr_var.set(last_currency)
+            return
+        rate_var.set(f"{rate_val:.4f}")
+        last_currency = curr_var.get()
+
+    curr_combo.bind("<<ComboboxSelected>>", on_currency_change)
 
     row_idx += 1
     ttk.Label(frame, text="Контрагент").grid(row=row_idx, column=0, sticky="e", padx=4, pady=2)
@@ -3528,11 +3581,16 @@ def extra_cost_prompt(counterparties, currencies, purchases, doc=None, lines=Non
         except ValueError:
             show_error("Валідація", "Невірний курс")
             return
+        if rate_val <= 0:
+            show_error("Валідація", "Курс має бути більшим за 0")
+            return
         partner_name = cp_var.get()
         partner_id = None
         if partner_name and partner_name != "-":
             found = next((c for c in filtered_counterparties if c["name"] == partner_name), None)
             partner_id = found["id"] if found else None
+        if curr_var.get().strip().upper() != BASE_CURRENCY and not db.rate_on_date(curr_var.get(), date_var.get()):
+            db.add_currency_rate(curr_var.get(), date_var.get(), rate_val)
         result.append(
             (
                 {
@@ -3587,16 +3645,20 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
 
     row_idx += 1
     ttk.Label(content, text="Валюта").grid(row=row_idx, column=0, padx=6, pady=4, sticky="e")
-    curr_var = tk.StringVar(value=doc["currency_code"] if doc else (currencies[0]["code"] if currencies else "UAH"))
-    curr_codes = [c["code"] for c in currencies] if currencies else ["UAH"]
+    curr_var = tk.StringVar(value=doc["currency_code"] if doc else (currencies[0]["code"] if currencies else BASE_CURRENCY))
+    curr_codes = [c["code"] for c in currencies] if currencies else [BASE_CURRENCY]
     curr_combo = ttk.Combobox(content, textvariable=curr_var, values=curr_codes, state="readonly")
     if not editable:
         curr_combo.state(["disabled"])
     curr_combo.grid(row=row_idx, column=1, padx=6, pady=4, sticky="w")
+    last_currency = curr_var.get()
 
     row_idx += 1
     ttk.Label(content, text="Курс до базової").grid(row=row_idx, column=0, padx=6, pady=4, sticky="e")
-    default_rate = doc["exchange_rate"] if doc else (db.latest_rate(curr_var.get()) if currencies else 1.0)
+    try:
+        default_rate = doc["exchange_rate"] if doc else ensure_rate_for_date(curr_var.get(), date_var.get())
+    except Exception:
+        default_rate = doc["exchange_rate"] if doc else 1.0
     rate_var = tk.StringVar(value=f"{default_rate:.4f}")
     rate_entry = ttk.Entry(content, textvariable=rate_var, width=12, state="normal" if editable else "disabled")
     rate_entry.grid(row=row_idx, column=1, padx=6, pady=4, sticky="w")
@@ -3670,11 +3732,16 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
         tree.heading("amount", text=f"Сума ({curr_var.get()})")
 
     def on_currency_change(event=None):
+        nonlocal last_currency
         if editable:
             try:
-                rate_var.set(f"{db.latest_rate(curr_var.get()):.4f}")
-            except Exception:
-                pass
+                rate_val = ensure_rate_for_date(curr_var.get(), date_var.get())
+            except ValueError as exc:
+                messagebox.showerror("Курс", str(exc))
+                curr_var.set(last_currency)
+                return
+            rate_var.set(f"{rate_val:.4f}")
+            last_currency = curr_var.get()
         refresh_currency_ui()
 
     curr_combo.bind("<<ComboboxSelected>>", on_currency_change)
@@ -3993,6 +4060,7 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
         if rate <= 0:
             messagebox.showerror("Валідація", "Курс має бути більшим за 0")
             return
+        currency_code = curr_var.get().strip().upper()
         order_expense = 0.0
         if doc_type == "sale":
             try:
@@ -4007,6 +4075,8 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
         cp_id = None
         if cp_name and cp_name != "-":
             cp_id = next((c["id"] for c in filtered_counterparties if c["name"] == cp_name), None)
+        if currency_code != BASE_CURRENCY and not db.rate_on_date(currency_code, date_var.get()):
+            db.add_currency_rate(currency_code, date_var.get(), rate)
         try:
             warehouse_id = warehouses[wh_combo.current()]["id"]
         except Exception:

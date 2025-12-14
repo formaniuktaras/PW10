@@ -2939,9 +2939,18 @@ class SalesImportDialog(tk.Toplevel):
         self._refresh_preview()
 
     def _save_template(self) -> None:
-        name = simple_prompt("Назва шаблону", "Вкажіть назву шаблону", default=self.current_template_name.get().strip())
+        values = simple_prompt(
+            "Назва шаблону",
+            ["Вкажіть назву шаблону"],
+            [self.current_template_name.get().strip()],
+        )
+        if not values:
+            return
+
+        name = values[0].strip()
         if not name:
             return
+
         self.templates[name] = dict(self.current_mapping)
         self.settings.set(self.templates, "sales_import", "templates")
         self.settings.set(name, "sales_import", "last_template")

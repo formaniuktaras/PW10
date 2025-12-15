@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import tkinter as tk
 from tkinter import messagebox, ttk
+import calendar
+from datetime import date, datetime
 from typing import Callable, List, Optional
 
 
@@ -68,6 +70,106 @@ class TableFrame(ttk.Frame):
 
         self.tree.bind("<Button-3>", show_menu)
         self.context_menu = menu
+
+
+class DatePicker(ttk.Frame):
+    """Date picker with a popup calendar."""
+
+    def __init__(self, master: tk.Widget, initial: date | None = None, **kwargs):
+        super().__init__(master, **kwargs)
+        initial_date = initial or date.today()
+        self.selected_date = initial_date
+        self.var = tk.StringVar(value=self._format_date(initial_date))
+
+        entry = ttk.Entry(self, textvariable=self.var, width=12)
+        entry.grid(row=0, column=0, sticky="w")
+        entry.bind("<FocusOut>", self._on_entry_change)
+
+        ttk.Button(self, text="…", width=3, command=self._open_calendar).grid(row=0, column=1, padx=(4, 0))
+
+    def get(self) -> str:
+        return self.var.get().strip()
+
+    def set(self, value: date | str) -> None:
+        if isinstance(value, str):
+            try:
+                parsed = datetime.strptime(value, "%Y-%m-%d").date()
+            except ValueError:
+                return
+        else:
+            parsed = value
+        self.selected_date = parsed
+        self.var.set(self._format_date(parsed))
+
+    def _format_date(self, value: date) -> str:
+        return value.strftime("%Y-%m-%d")
+
+    def _on_entry_change(self, _event: tk.Event) -> None:
+        try:
+            parsed = datetime.strptime(self.var.get().strip(), "%Y-%m-%d").date()
+        except ValueError:
+            return
+        self.selected_date = parsed
+        self.var.set(self._format_date(parsed))
+
+    def _open_calendar(self) -> None:
+        top = tk.Toplevel(self)
+        top.title("Оберіть дату")
+        top.grab_set()
+        top.resizable(False, False)
+
+        header = ttk.Frame(top)
+        header.pack(fill=tk.X, padx=8, pady=6)
+
+        current = [self.selected_date.year, self.selected_date.month]
+
+        month_label = ttk.Label(header, text="")
+        month_label.pack(side=tk.LEFT, expand=True)
+
+        def refresh_calendar() -> None:
+            year, month = current
+            month_label.configure(text=f"{year}-{month:02d}")
+            for widget in body.winfo_children():
+                widget.destroy()
+            cal = calendar.Calendar().monthdayscalendar(year, month)
+            days_header = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Нд"]
+            for idx, name in enumerate(days_header):
+                ttk.Label(body, text=name, width=4).grid(row=0, column=idx)
+            for row_idx, week in enumerate(cal, start=1):
+                for col_idx, day in enumerate(week):
+                    if day == 0:
+                        ttk.Label(body, text="", width=4).grid(row=row_idx, column=col_idx)
+                        continue
+                    btn = ttk.Button(body, text=f"{day:02d}", width=4)
+                    btn.grid(row=row_idx, column=col_idx, padx=1, pady=1)
+                    btn.configure(command=lambda d=day: on_pick(d))
+
+        def shift_month(delta: int) -> None:
+            year, month = current
+            month += delta
+            if month < 1:
+                month = 12
+                year -= 1
+            elif month > 12:
+                month = 1
+                year += 1
+            current[0], current[1] = year, month
+            refresh_calendar()
+
+        ttk.Button(header, text="<", width=3, command=lambda: shift_month(-1)).pack(side=tk.LEFT)
+        ttk.Button(header, text=">", width=3, command=lambda: shift_month(1)).pack(side=tk.RIGHT)
+
+        body = ttk.Frame(top)
+        body.pack(padx=8, pady=(0, 8))
+
+        def on_pick(day: int) -> None:
+            year, month = current
+            self.selected_date = date(year, month, day)
+            self.var.set(self._format_date(self.selected_date))
+            top.destroy()
+
+        refresh_calendar()
+        top.wait_window(top)
 
 
 def simple_prompt(title: str, fields: List[str], initial: Optional[List[str]] = None) -> Optional[List[str]]:

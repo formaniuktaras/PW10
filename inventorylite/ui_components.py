@@ -24,7 +24,11 @@ class TableFrame(ttk.Frame):
         self.tree.delete(*self.tree.get_children())
         for row in rows:
             values = [row[col] for col in self.tree.cget("columns")]
-            self.tree.insert("", "end", iid=row["id"], values=values)
+            tags = row.get("tags", ())
+            self.tree.insert("", "end", iid=row["id"], values=values, tags=tags)
+
+    def tag_configure(self, tag: str, **kwargs) -> None:
+        self.tree.tag_configure(tag, **kwargs)
 
     def selected_id(self) -> Optional[str | int]:
         item = self.tree.selection()

@@ -2196,6 +2196,57 @@ def cash_flow_summary(date_from: Optional[str] = None, date_to: Optional[str] = 
     return [{"type": row["type"], "total": float(row["total"])} for row in rows]
 
 
+def dashboard_trends(date_from: Optional[str] = None, date_to: Optional[str] = None) -> List[dict]:
+    """Monthly turnover and gross profit for trend charts."""
+
+    def _date_clause(field: str) -> tuple[str, List[object]]:
+        clauses: List[str] = []
+        params: List[object] = []
+        if date_from:
+            clauses.append(f"{field} >= ?")
+            params.append(date_from)
+        if date_to:
+            clauses.append(f"{field} <= ?")
+            params.append(date_to)
+        return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
+
+    sale_clause, sale_params = _date_clause("s.doc_date")
+    cash_clause, cash_params = _date_clause("date")
+    move_clause, move_params = _date_clause("s.doc_date")
+
+    with get_connection() as conn:
+        turnover_rows = conn.execute(
+            "SELECT strftime('%Y-%m', date) as period, IFNULL(SUM(amount),0) as total "
+            "FROM CashTransactions "
+            "WHERE type='sale_payment'" + cash_clause + " GROUP BY strftime('%Y-%m', date) ORDER BY period",
+            cash_params,
+        ).fetchall()
+        revenue_rows = conn.execute(
+            "SELECT strftime('%Y-%m', s.doc_date) as period, IFNULL(SUM(sl.amount),0) as revenue, "
+            "IFNULL(SUM(sl.quantity * (sl.unit_expense_base + sl.order_expense_allocated_base)),0) as expenses "
+            "FROM SalesLines sl JOIN SalesDocuments s ON s.id = sl.sale_id "
+            "WHERE s.status='posted'" + sale_clause + " GROUP BY strftime('%Y-%m', s.doc_date) ORDER BY period",
+            sale_params,
+        ).fetchall()
+        cogs_rows = conn.execute(
+            "SELECT strftime('%Y-%m', s.doc_date) as period, IFNULL(SUM(sm.amount),0) as cogs "
+            "FROM StockMoves sm JOIN SalesDocuments s ON s.id = sm.reference_id "
+            "WHERE sm.reference_type='sale'" + move_clause + " GROUP BY strftime('%Y-%m', s.doc_date) ORDER BY period",
+            move_params,
+        ).fetchall()
+
+    revenue_map = {row["period"]: float(row["revenue"]) for row in revenue_rows}
+    expense_map = {row["period"]: float(row["expenses"]) for row in revenue_rows}
+    cogs_map = {row["period"]: -float(row["cogs"]) for row in cogs_rows}
+    periods = sorted({row["period"] for row in turnover_rows} | set(revenue_map.keys()) | set(cogs_map.keys()))
+    results: List[dict] = []
+    for period in periods:
+        turnover_val = next((float(r["total"]) for r in turnover_rows if r["period"] == period), 0.0)
+        gross_profit_val = revenue_map.get(period, 0.0) - cogs_map.get(period, 0.0) - expense_map.get(period, 0.0)
+        results.append({"period": period, "turnover": turnover_val, "gross_profit": gross_profit_val})
+    return results
+
+
 def dashboard_metrics(date_from: Optional[str] = None, date_to: Optional[str] = None) -> dict:
     """Key metrics: turnover, gross profit, margin, stock value."""
     clauses: List[str] = []

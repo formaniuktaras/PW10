@@ -1527,11 +1527,8 @@ class InventoryApp(tk.Tk):
             show_error("Імпорт закупівель", "Спочатку створіть хоча б один склад.")
             return
 
-        allowed_supplier_types = {"supplier", "both", "other"}
-        suppliers = [c for c in db.list_counterparties() if c.get("type") in allowed_supplier_types]
-        if not suppliers:
-            show_error("Імпорт закупівель", "Спочатку додайте хоча б одного постачальника.")
-            return
+        counterparties = db.list_counterparties()
+        suppliers = [c for c in counterparties if c["type"] in {"supplier", "both", "other"}]
 
         dialog = PurchasesImportDialog(self, raw_rows, headers, warehouses, suppliers, self.settings)
         result = dialog.result
@@ -1556,7 +1553,6 @@ class InventoryApp(tk.Tk):
         create_products = bool(options.get("create_products", True))
         create_suppliers = bool(options.get("create_suppliers", True))
         selected_supplier_id = options.get("supplier_id")
-        selected_supplier_name = (options.get("supplier_name") or "").strip()
 
         product_rows = db.list_products()
         products_by_id = {int(p["id"]): dict(p) for p in product_rows if p["id"] is not None}
@@ -1568,6 +1564,16 @@ class InventoryApp(tk.Tk):
         suppliers_by_name = {
             c["name"].lower(): c for c in counterparties if c["type"] in allowed_supplier_types and c["name"]
         }
+        selected_supplier = None
+        if selected_supplier_id:
+            selected_supplier = next((c for c in counterparties if c["id"] == selected_supplier_id), None)
+            if not selected_supplier:
+                try:
+                    selected_supplier = db.get_counterparty(selected_supplier_id)
+                except Exception:
+                    selected_supplier = None
+            if selected_supplier and selected_supplier.get("name"):
+                suppliers_by_name[selected_supplier["name"].lower()] = dict(selected_supplier)
 
         default_brand = self.settings.get("defaults", "product", "brand") or "Імпорт"
         default_category = self.settings.get("defaults", "product", "category") or "Імпорт"
@@ -1588,7 +1594,7 @@ class InventoryApp(tk.Tk):
 
         for order_no, lines in grouped.items():
             doc_date = lines[0].get("doc_date") or datetime.now().strftime("%Y-%m-%d")
-            supplier_name = selected_supplier_name or lines[0].get("supplier", "").strip()
+            supplier_name = lines[0].get("supplier", "").strip()
             supplier_id = selected_supplier_id
 
             if not supplier_id and supplier_name:
@@ -3428,14 +3434,16 @@ class PurchasesImportDialog(tk.Toplevel):
             show_error("Імпорт", "Оберіть постачальника")
             return
 
-        normalized_orders = _normalize_purchase_records(
-            self.raw_rows, self.current_mapping, default_supplier=self.supplier_var.get().strip()
-        )
+        supplier = next((s for s in self.suppliers if s["name"] == self.supplier_var.get()), None)
+        if not supplier:
+            show_error("Імпорт", "Оберіть постачальника")
+            return
+
+        normalized_orders = _normalize_purchase_records(self.raw_rows, self.current_mapping)
         self.result = {
             "options": {
                 "warehouse_id": warehouse["id"],
                 "supplier_id": supplier["id"],
-                "supplier_name": supplier["name"],
                 "mode": self.mode_var.get(),
                 "create_products": bool(self.create_products_var.get()),
                 "create_suppliers": bool(self.create_suppliers_var.get()),
@@ -3484,7 +3492,6 @@ class PurchasesImportDialog(tk.Toplevel):
             parent, textvariable=self.supplier_var, values=[s["name"] for s in self.suppliers], state="readonly"
         )
         supplier_combo.grid(row=4, column=1, sticky="ew", pady=4)
-        supplier_combo.bind("<<ComboboxSelected>>", lambda _e: self._refresh_preview())
 
         ttk.Label(parent, text="Режим проведення:").grid(row=5, column=0, sticky="nw", pady=4)
         mode_frame = ttk.Frame(parent)

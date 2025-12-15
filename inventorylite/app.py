@@ -501,7 +501,7 @@ class InventoryApp(tk.Tk):
     def on_backup_all(self) -> None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         default_name = f"{APP_NAME}_backup_{timestamp}.zip"
-        initialdir = self.default_workdir()
+        initialdir = str(self.default_workdir())
         target_path = filedialog.asksaveasfilename(
             title="Зберегти резервну копію",
             defaultextension=".zip",
@@ -521,7 +521,7 @@ class InventoryApp(tk.Tk):
     def on_restore_all(self) -> None:
         archive_path = filedialog.askopenfilename(
             title="Відновити з резервної копії",
-            initialdir=self.default_workdir(),
+            initialdir=str(self.default_workdir()),
             filetypes=(("ZIP", "*.zip"), ("Усі файли", "*.*")),
         )
         if not archive_path:
@@ -1503,7 +1503,7 @@ class InventoryApp(tk.Tk):
         file_path = filedialog.askopenfilename(
             title="Файл закупівель",
             filetypes=[("CSV", "*.csv"), ("Excel", "*.xlsx *.xls"), ("Усі файли", "*.*")],
-            initialdir=self.default_workdir(),
+            initialdir=str(self.default_workdir()),
         )
         if not file_path:
             return
@@ -2136,7 +2136,7 @@ class InventoryApp(tk.Tk):
         file_path = filedialog.askopenfilename(
             title="Файл замовлень",
             filetypes=[("CSV", "*.csv"), ("Excel", "*.xlsx *.xls"), ("Усі файли", "*.*")],
-            initialdir=self.default_workdir(),
+            initialdir=str(self.default_workdir()),
         )
         if not file_path:
             return

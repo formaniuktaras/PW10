@@ -45,7 +45,7 @@ from utils import (
     backup_database,
     bind_common_shortcuts,
 )
-from ui_components import TableFrame, simple_prompt
+from ui_components import DatePicker, TableFrame, simple_prompt
 
 
 def ensure_rate_for_date(currency_code: str, rate_date: str) -> float:
@@ -3136,14 +3136,10 @@ SALES_FIELDS: list[SalesField] = [
 
 
 PURCHASE_FIELDS: list[SalesField] = [
-    ("order_no", "Замовлення/рахунок", ("номер", "рахунок", "invoice", "order", "id")),
-    ("doc_date", "Дата", ("дата", "date", "order_date", "дата оформлення")),
     ("sku", "SKU", ("sku", "артикул", "код")),
     ("product_name", "Товар", ("товар", "product", "назва", "item")),
     ("quantity", "Кількість", ("кількість", "к-сть", "qty", "quantity", "шт")),
     ("price", "Ціна", ("ціна", "price", "amount")),
-    ("amount", "Сума", ("сума", "amount", "total")),
-    ("comment", "Коментар", ("коментар", "примітка", "comment", "note")),
 ]
 
 
@@ -3204,7 +3200,12 @@ def _normalize_sales_records(rows: list[dict[str, object]], mapping: dict[str, s
 
 
 def _normalize_purchase_records(
-    rows: list[dict[str, object]], mapping: dict[str, str], default_supplier: str | None = None
+    rows: list[dict[str, object]],
+    mapping: dict[str, str],
+    default_supplier: str | None = None,
+    default_doc_date: str | None = None,
+    default_order_no: str | None = None,
+    default_comment: str | None = None,
 ) -> list[dict]:
     records: list[dict] = []
     for row in rows:
@@ -3217,15 +3218,15 @@ def _normalize_purchase_records(
 
         records.append(
             {
-                "order_no": pick("order_no"),
-                "doc_date": pick("doc_date", _parse_date_value),
+                "order_no": (default_order_no or "").strip(),
+                "doc_date": default_doc_date or pick("doc_date", _parse_date_value),
                 "supplier": default_supplier if default_supplier else pick("supplier"),
                 "sku": pick("sku"),
                 "product_name": pick("product_name"),
                 "quantity": pick("quantity", _parse_float_value),
                 "price": pick("price", _parse_float_value),
                 "amount": pick("amount", _parse_float_value),
-                "comment": pick("comment"),
+                "comment": (default_comment or "").strip(),
             }
         )
     return records
@@ -3382,7 +3383,12 @@ class PurchasesImportDialog(tk.Toplevel):
             return
 
         normalized_orders = _normalize_purchase_records(
-            self.raw_rows, self.current_mapping, default_supplier=self.supplier_var.get().strip()
+            self.raw_rows,
+            self.current_mapping,
+            default_supplier=self.supplier_var.get().strip(),
+            default_doc_date=self.date_picker.get(),
+            default_order_no=self.order_no_var.get(),
+            default_comment=self.comment_var.get(),
         )
         self.result = {
             "options": {
@@ -3434,16 +3440,28 @@ class PurchasesImportDialog(tk.Toplevel):
         supplier_combo = ttk.Combobox(parent, textvariable=self.supplier_var, values=self.supplier_names, state="readonly")
         supplier_combo.grid(row=4, column=1, sticky="ew", pady=4)
 
-        ttk.Label(parent, text="Режим проведення:").grid(row=5, column=0, sticky="nw", pady=4)
+        ttk.Label(parent, text="Дата документа:").grid(row=5, column=0, sticky="w", pady=4)
+        self.date_picker = DatePicker(parent)
+        self.date_picker.grid(row=5, column=1, sticky="w", pady=4)
+
+        ttk.Label(parent, text="Замовлення/рахунок:").grid(row=6, column=0, sticky="w", pady=4)
+        self.order_no_var = tk.StringVar()
+        ttk.Entry(parent, textvariable=self.order_no_var).grid(row=6, column=1, sticky="ew", pady=4)
+
+        ttk.Label(parent, text="Коментар:").grid(row=7, column=0, sticky="w", pady=4)
+        self.comment_var = tk.StringVar()
+        ttk.Entry(parent, textvariable=self.comment_var).grid(row=7, column=1, sticky="ew", pady=4)
+
+        ttk.Label(parent, text="Режим проведення:").grid(row=8, column=0, sticky="nw", pady=4)
         mode_frame = ttk.Frame(parent)
-        mode_frame.grid(row=5, column=1, sticky="w", pady=4)
+        mode_frame.grid(row=8, column=1, sticky="w", pady=4)
         self.mode_var = tk.StringVar(value="post")
         ttk.Radiobutton(mode_frame, text="Провести всі", variable=self.mode_var, value="post").pack(anchor="w")
         ttk.Radiobutton(mode_frame, text="Тільки чернетки", variable=self.mode_var, value="draft").pack(anchor="w")
 
         self.create_products_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(parent, text="Створювати відсутні товари", variable=self.create_products_var).grid(
-            row=6, column=1, sticky="w", pady=(4, 0)
+            row=9, column=1, sticky="w", pady=(4, 0)
         )
 
     def _build_preview(self, parent: ttk.Frame) -> ttk.Treeview:
@@ -3477,7 +3495,12 @@ class PurchasesImportDialog(tk.Toplevel):
     def _refresh_preview(self) -> None:
         self.preview.delete(*self.preview.get_children())
         normalized = _normalize_purchase_records(
-            self.raw_rows, self.current_mapping, default_supplier=self.supplier_var.get().strip()
+            self.raw_rows,
+            self.current_mapping,
+            default_supplier=self.supplier_var.get().strip(),
+            default_doc_date=self.date_picker.get(),
+            default_order_no=self.order_no_var.get(),
+            default_comment=self.comment_var.get(),
         )
         for row in normalized[:30]:
             self.preview.insert(

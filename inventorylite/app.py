@@ -1527,7 +1527,7 @@ class InventoryApp(tk.Tk):
             show_error("Імпорт закупівель", "Спочатку створіть хоча б один склад.")
             return
 
-        counterparties = db.list_counterparties()
+        counterparties = [dict(c) for c in db.list_counterparties()]
         suppliers = sorted(
             (c for c in counterparties if c["type"] in {"supplier", "both", "other"}),
             key=lambda c: c.get("name", ""),
@@ -1564,7 +1564,7 @@ class InventoryApp(tk.Tk):
         products_by_sku = {p["sku"].lower(): dict(p) for p in product_rows if p["sku"]}
         products_by_name = {p["name"].lower(): dict(p) for p in product_rows if p["name"]}
 
-        counterparties = db.list_counterparties()
+        counterparties = [dict(c) for c in db.list_counterparties()]
         allowed_supplier_types = {"supplier", "both", "other"}
         suppliers_by_name = {
             c["name"].lower(): c for c in counterparties if c["type"] in allowed_supplier_types and c["name"]
@@ -1575,6 +1575,8 @@ class InventoryApp(tk.Tk):
             if not selected_supplier:
                 try:
                     selected_supplier = db.get_counterparty(selected_supplier_id)
+                    if selected_supplier:
+                        selected_supplier = dict(selected_supplier)
                 except Exception:
                     selected_supplier = None
             if selected_supplier and selected_supplier.get("name"):

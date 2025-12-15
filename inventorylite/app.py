@@ -1594,95 +1594,101 @@ class InventoryApp(tk.Tk):
         draft_docs = 0
         total_docs = 0
 
-        grouped: dict[str, list[dict]] = defaultdict(list)
-        for idx, row in enumerate(orders):
-            key = row.get("order_no") or f"#{idx+1}"
-            grouped[key].append(row)
+        doc_date = next((r.get("doc_date") for r in orders if r.get("doc_date")), None) or datetime.now().strftime(
+            "%Y-%m-%d"
+        )
+        supplier_name = next(
+            ((r.get("supplier") or "").strip() for r in orders if (r.get("supplier") or "").strip()), ""
+        )
+        supplier_id = selected_supplier_id
 
-        for order_no, lines in grouped.items():
-            doc_date = lines[0].get("doc_date") or datetime.now().strftime("%Y-%m-%d")
-            supplier_name = lines[0].get("supplier", "").strip()
-            supplier_id = selected_supplier_id
+        if not supplier_id and supplier_name:
+            existing = suppliers_by_name.get(supplier_name.lower()) or db.find_counterparty_by_name(
+                supplier_name, allowed_supplier_types
+            )
+            if existing:
+                supplier_id = existing["id"]
+                suppliers_by_name[supplier_name.lower()] = dict(existing)
+            elif create_suppliers:
+                supplier_id = db.add_counterparty(supplier_name, "supplier", note="Імпортований постачальник")
+                new_cp = {
+                    "id": supplier_id,
+                    "name": supplier_name,
+                    "type": "supplier",
+                    "phone": "",
+                    "email": "",
+                    "address": "",
+                    "note": "Імпортований постачальник",
+                }
+                counterparties.append(new_cp)
+                suppliers_by_name[supplier_name.lower()] = new_cp
+                created_suppliers += 1
 
-            if not supplier_id and supplier_name:
-                existing = suppliers_by_name.get(supplier_name.lower()) or db.find_counterparty_by_name(
-                    supplier_name, allowed_supplier_types
-                )
-                if existing:
-                    supplier_id = existing["id"]
-                    suppliers_by_name[supplier_name.lower()] = dict(existing)
-                elif create_suppliers:
-                    supplier_id = db.add_counterparty(supplier_name, "supplier", note="Імпортований постачальник")
-                    new_cp = {
-                        "id": supplier_id,
-                        "name": supplier_name,
-                        "type": "supplier",
-                        "phone": "",
-                        "email": "",
-                        "address": "",
-                        "note": "Імпортований постачальник",
-                    }
-                    counterparties.append(new_cp)
-                    suppliers_by_name[supplier_name.lower()] = new_cp
-                    created_suppliers += 1
+        purchase_lines: list[tuple[int, float, float]] = []
+        comments: list[str] = []
 
-            purchase_lines: list[tuple[int, float, float]] = []
-            comment = lines[0].get("comment", "").strip()
+        for row in orders:
+            comment_val = (row.get("comment") or "").strip()
+            if comment_val:
+                comments.append(comment_val)
 
-            for row in lines:
-                sku = (row.get("sku") or "").strip()
-                name = (row.get("product_name") or sku or "Без назви").strip()
-                qty = float(row.get("quantity") or 0)
-                price = float(row.get("price") or 0)
-                amount = float(row.get("amount") or 0)
-                if not price and qty and amount:
-                    price = amount / qty
+            sku = (row.get("sku") or "").strip()
+            name = (row.get("product_name") or sku or "Без назви").strip()
+            qty = float(row.get("quantity") or 0)
+            price = float(row.get("price") or 0)
+            amount = float(row.get("amount") or 0)
+            if not price and qty and amount:
+                price = amount / qty
 
-                product_row = products_by_sku.get(sku.lower()) if sku else None
-                if not product_row and name:
-                    product_row = products_by_name.get(name.lower())
-                if not product_row and create_products:
-                    final_sku = sku or self._generate_unique_sku(name, set(products_by_sku.keys()))
-                    product_id = db.add_product(final_sku, name, brand_id, category_id, unit=default_unit)
-                    product_row = {
-                        "id": product_id,
-                        "sku": final_sku,
-                        "name": name,
-                    }
-                    products_by_sku[final_sku.lower()] = product_row
-                    products_by_name[name.lower()] = product_row
-                    created_products += 1
+            product_row = products_by_sku.get(sku.lower()) if sku else None
+            if not product_row and name:
+                product_row = products_by_name.get(name.lower())
+            if not product_row and create_products:
+                final_sku = sku or self._generate_unique_sku(name, set(products_by_sku.keys()))
+                product_id = db.add_product(final_sku, name, brand_id, category_id, unit=default_unit)
+                product_row = {
+                    "id": product_id,
+                    "sku": final_sku,
+                    "name": name,
+                }
+                products_by_sku[final_sku.lower()] = product_row
+                products_by_name[name.lower()] = product_row
+                created_products += 1
 
-                if not product_row or qty <= 0:
-                    skipped_lines += 1
-                    continue
-
-                purchase_lines.append((int(product_row["id"]), qty, price))
-
-            if not purchase_lines:
-                skipped_lines += len(lines)
+            if not product_row or qty <= 0:
+                skipped_lines += 1
                 continue
 
-            total_docs += 1
-            try:
-                purchase_id = db.create_purchase(
-                    doc_date, supplier_id, warehouse_id, "", comment, get_base_currency_code(), 1.0
-                )
-                db.replace_purchase_lines(purchase_id, purchase_lines, 1.0)
-            except Exception as exc:
-                logging.warning("Не вдалося створити закупівлю %s: %s", order_no, exc)
-                skipped_lines += len(purchase_lines)
-                continue
+            purchase_lines.append((int(product_row["id"]), qty, price))
 
+        if not purchase_lines:
+            return "Не знайдено жодного рядка з товарами для створення закупівлі."
+
+        total_docs = 1
+        try:
+            purchase_id = db.create_purchase(
+                doc_date, supplier_id, warehouse_id, "", "; ".join(dict.fromkeys(comments)), get_base_currency_code(), 1.0
+            )
+            db.replace_purchase_lines(purchase_id, purchase_lines, 1.0)
+        except Exception as exc:
+            logging.warning("Не вдалося створити закупівлю: %s", exc)
+            skipped_lines += len(purchase_lines)
+            total_docs = 0
+            posted_docs = 0
+            draft_docs = 0
+        else:
             if mode == "post":
                 try:
                     db.post_purchase(purchase_id)
-                    posted_docs += 1
+                    posted_docs = 1
+                    draft_docs = 0
                 except Exception as exc:
                     logging.warning("Проведення закупівлі #%s завершилось помилкою: %s", purchase_id, exc)
-                    draft_docs += 1
+                    posted_docs = 0
+                    draft_docs = 1
             else:
-                draft_docs += 1
+                posted_docs = 0
+                draft_docs = 1
 
         lines_msg = f"Пропущено рядків: {skipped_lines}" if skipped_lines else "Без пропусків"
         created_parts = []

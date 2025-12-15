@@ -3267,7 +3267,9 @@ def _normalize_sales_records(rows: list[dict[str, object]], mapping: dict[str, s
     return records
 
 
-def _normalize_purchase_records(rows: list[dict[str, object]], mapping: dict[str, str]) -> list[dict]:
+def _normalize_purchase_records(
+    rows: list[dict[str, object]], mapping: dict[str, str], default_supplier: str | None = None
+) -> list[dict]:
     records: list[dict] = []
     for row in rows:
         normalized = {(k or "").strip(): _format_cell_value(v).strip() for k, v in row.items()}
@@ -3281,7 +3283,7 @@ def _normalize_purchase_records(rows: list[dict[str, object]], mapping: dict[str
             {
                 "order_no": pick("order_no"),
                 "doc_date": pick("doc_date", _parse_date_value),
-                "supplier": pick("supplier"),
+                "supplier": default_supplier if default_supplier else pick("supplier"),
                 "sku": pick("sku"),
                 "product_name": pick("product_name"),
                 "quantity": pick("quantity", _parse_float_value),
@@ -3424,8 +3426,12 @@ class PurchasesImportDialog(tk.Toplevel):
 
     def _on_ok(self) -> None:
         warehouse = next((w for w in self.warehouses if w["name"] == self.wh_var.get()), None)
+        supplier = next((s for s in self.suppliers if s["name"] == self.supplier_var.get()), None)
         if not warehouse:
             show_error("Імпорт", "Оберіть склад")
+            return
+        if not supplier:
+            show_error("Імпорт", "Оберіть постачальника")
             return
 
         supplier = next((s for s in self.suppliers if s["name"] == self.supplier_var.get()), None)
@@ -3533,7 +3539,9 @@ class PurchasesImportDialog(tk.Toplevel):
 
     def _refresh_preview(self) -> None:
         self.preview.delete(*self.preview.get_children())
-        normalized = _normalize_purchase_records(self.raw_rows, self.current_mapping)
+        normalized = _normalize_purchase_records(
+            self.raw_rows, self.current_mapping, default_supplier=self.supplier_var.get().strip()
+        )
         for row in normalized[:30]:
             self.preview.insert(
                 "",

@@ -114,18 +114,6 @@ def init_db() -> None:
                 FOREIGN KEY (category_id) REFERENCES Categories(id) ON DELETE CASCADE
             );
 
-            CREATE TABLE IF NOT EXISTS SupplierSkuMap (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                supplier_id INTEGER NOT NULL,
-                supplier_sku TEXT NOT NULL,
-                product_id INTEGER NOT NULL,
-                note TEXT,
-                UNIQUE(supplier_id, supplier_sku),
-                FOREIGN KEY (supplier_id) REFERENCES Counterparties(id) ON DELETE CASCADE,
-                FOREIGN KEY (product_id) REFERENCES Products(id) ON DELETE CASCADE
-            );
-            CREATE INDEX IF NOT EXISTS idx_supplier_sku_map_lookup ON SupplierSkuMap(supplier_id, lower(supplier_sku));
-
             CREATE TABLE IF NOT EXISTS Counterparties (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
@@ -375,27 +363,6 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             FOREIGN KEY (product_id) REFERENCES Products(id) ON DELETE CASCADE,
             FOREIGN KEY (category_id) REFERENCES Categories(id) ON DELETE CASCADE
         )
-        """
-    )
-
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS SupplierSkuMap (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            supplier_id INTEGER NOT NULL,
-            supplier_sku TEXT NOT NULL,
-            product_id INTEGER NOT NULL,
-            note TEXT,
-            UNIQUE(supplier_id, supplier_sku),
-            FOREIGN KEY (supplier_id) REFERENCES Counterparties(id) ON DELETE CASCADE,
-            FOREIGN KEY (product_id) REFERENCES Products(id) ON DELETE CASCADE
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_supplier_sku_map_lookup
-        ON SupplierSkuMap(supplier_id, lower(supplier_sku))
         """
     )
 
@@ -851,58 +818,6 @@ def find_product_by_sku_or_name(sku: Optional[str], name: Optional[str]) -> Opti
             f"SELECT id, sku, name, brand_id, category_id, unit, is_active FROM Products WHERE {where} LIMIT 1",
             tuple(params),
         ).fetchone()
-
-
-def get_mapped_product_id(supplier_id: int, supplier_sku: str) -> Optional[int]:
-    """Return product_id mapped to a supplier SKU for a specific supplier."""
-
-    supplier_sku = supplier_sku.strip()
-    if not supplier_sku:
-        return None
-
-    with get_connection() as conn:
-        row = conn.execute(
-            "SELECT product_id FROM SupplierSkuMap WHERE supplier_id=? AND lower(supplier_sku)=lower(?) LIMIT 1",
-            (supplier_id, supplier_sku),
-        ).fetchone()
-        return int(row["product_id"]) if row else None
-
-
-def upsert_supplier_sku_mapping(
-    supplier_id: int, supplier_sku: str, product_id: int, note: str = ""
-) -> None:
-    """Insert or update supplier SKU mapping, raising on conflicting product mapping."""
-
-    supplier_sku = supplier_sku.strip()
-    if not supplier_sku:
-        return
-
-    with get_connection() as conn:
-        existing = conn.execute(
-            "SELECT id, product_id, note FROM SupplierSkuMap WHERE supplier_id=? AND lower(supplier_sku)=lower(?)",
-            (supplier_id, supplier_sku),
-        ).fetchone()
-        if not existing:
-            conn.execute(
-                "INSERT INTO SupplierSkuMap (supplier_id, supplier_sku, product_id, note) VALUES (?,?,?,?)",
-                (supplier_id, supplier_sku, product_id, note),
-            )
-        elif int(existing["product_id"]) != product_id:
-            raise ValueError("Supplier SKU already mapped to another product")
-        elif note and note != (existing["note"] or ""):
-            conn.execute("UPDATE SupplierSkuMap SET note=? WHERE id=?", (note, existing["id"]))
-        conn.commit()
-
-
-def list_supplier_sku_mappings(supplier_id: int) -> List[sqlite3.Row]:
-    with get_connection() as conn:
-        return list(
-            conn.execute(
-                "SELECT id, supplier_id, supplier_sku, product_id, note FROM SupplierSkuMap WHERE supplier_id=?"
-                " ORDER BY lower(supplier_sku)",
-                (supplier_id,),
-            )
-        )
 
 
 def update_product(

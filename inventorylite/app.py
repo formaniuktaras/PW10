@@ -1561,7 +1561,6 @@ class InventoryApp(tk.Tk):
         selected_supplier_id = options.get("supplier_id")
 
         product_rows = db.list_products()
-        products_by_id = {int(p["id"]): dict(p) for p in product_rows if p["id"] is not None}
         products_by_sku = {p["sku"].lower(): dict(p) for p in product_rows if p["sku"]}
         products_by_name = {p["name"].lower(): dict(p) for p in product_rows if p["name"]}
 
@@ -1629,64 +1628,28 @@ class InventoryApp(tk.Tk):
             comment = lines[0].get("comment", "").strip()
 
             for row in lines:
-                supplier_sku = (row.get("sku") or "").strip()
-                name = (row.get("product_name") or supplier_sku or "Без назви").strip()
+                sku = (row.get("sku") or "").strip()
+                name = (row.get("product_name") or sku or "Без назви").strip()
                 qty = float(row.get("quantity") or 0)
                 price = float(row.get("price") or 0)
                 amount = float(row.get("amount") or 0)
                 if not price and qty and amount:
                     price = amount / qty
 
-                mapped_id = None
-                product_row = None
-                if supplier_id and supplier_sku:
-                    mapped_id = db.get_mapped_product_id(supplier_id, supplier_sku)
-                    if mapped_id:
-                        product_row = products_by_id.get(mapped_id)
-                        if not product_row:
-                            fetched = db.get_product(mapped_id)
-                            if fetched:
-                                product_row = fetched
-                                products_by_id[mapped_id] = product_row
-                                if fetched.get("sku"):
-                                    products_by_sku[fetched["sku"].lower()] = product_row
-                                if fetched.get("name"):
-                                    products_by_name[fetched["name"].lower()] = product_row
-
-                if not product_row and supplier_sku:
-                    product_row = products_by_sku.get(supplier_sku.lower())
+                product_row = products_by_sku.get(sku.lower()) if sku else None
                 if not product_row and name:
                     product_row = products_by_name.get(name.lower())
-                if product_row and supplier_id and supplier_sku and not mapped_id:
-                    try:
-                        db.upsert_supplier_sku_mapping(
-                            supplier_id, supplier_sku, int(product_row["id"]), note="auto from import"
-                        )
-                    except ValueError:
-                        logging.warning(
-                            "Конфлікт мапінгу supplier SKU %s для постачальника %s", supplier_sku, supplier_id
-                        )
-
                 if not product_row and create_products:
-                    final_sku = supplier_sku or self._generate_unique_sku(name, set(products_by_sku.keys()))
+                    final_sku = sku or self._generate_unique_sku(name, set(products_by_sku.keys()))
                     product_id = db.add_product(final_sku, name, brand_id, category_id, unit=default_unit)
                     product_row = {
                         "id": product_id,
                         "sku": final_sku,
                         "name": name,
                     }
-                    products_by_id[product_id] = product_row
                     products_by_sku[final_sku.lower()] = product_row
                     products_by_name[name.lower()] = product_row
                     created_products += 1
-
-                    if supplier_id and supplier_sku:
-                        try:
-                            db.upsert_supplier_sku_mapping(supplier_id, supplier_sku, product_id, note="auto from import")
-                        except ValueError:
-                            logging.warning(
-                                "Конфлікт мапінгу supplier SKU %s для постачальника %s", supplier_sku, supplier_id
-                            )
 
                 if not product_row or qty <= 0:
                     skipped_lines += 1
@@ -3507,7 +3470,7 @@ class PurchasesImportDialog(tk.Toplevel):
         ttk.Radiobutton(mode_frame, text="Провести всі", variable=self.mode_var, value="post").pack(anchor="w")
         ttk.Radiobutton(mode_frame, text="Тільки чернетки", variable=self.mode_var, value="draft").pack(anchor="w")
 
-        self.create_products_var = tk.BooleanVar(value=False)
+        self.create_products_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(parent, text="Створювати відсутні товари", variable=self.create_products_var).grid(
             row=6, column=1, sticky="w", pady=(4, 0)
         )

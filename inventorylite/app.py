@@ -1352,6 +1352,7 @@ class InventoryApp(tk.Tk):
         ttk.Button(btns, text="Видалити", command=self.delete_purchase).pack(side=tk.LEFT, padx=4)
         ttk.Button(btns, text="Провести", command=self.post_purchase_action).pack(side=tk.LEFT, padx=4)
         ttk.Button(btns, text="Відмінити проведення", command=self.unpost_purchase_action).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Імпорт із файлу", command=self.import_purchases_from_file).pack(side=tk.LEFT, padx=4)
 
     def _selected_purchase(self):
         doc_id = self.purchase_table.selected_id()
@@ -1496,6 +1497,181 @@ class InventoryApp(tk.Tk):
         except Exception as exc:
             logging.exception("Unpost purchase error")
             show_error("Закупівлі", str(exc))
+
+    def import_purchases_from_file(self) -> None:
+        file_path = filedialog.askopenfilename(
+            title="Файл закупівель",
+            filetypes=[("CSV", "*.csv"), ("Excel", "*.xlsx *.xls"), ("Усі файли", "*.*")],
+            initialdir=self.default_workdir(),
+        )
+        if not file_path:
+            return
+
+        try:
+            raw_rows, headers = parse_import_file(Path(file_path), encoding=self.settings.get("files", "encoding") or "utf-8")
+        except Exception as exc:
+            logging.exception("Не вдалося прочитати файл імпорту закупівель")
+            show_error(
+                "Імпорт закупівель",
+                "Не вдалося прочитати файл. Перевірте формат, кодування та структуру даних.\n" + str(exc),
+            )
+            return
+
+        if not raw_rows:
+            messagebox.showinfo("Імпорт закупівель", "У файлі не знайдено рядків із товарами.")
+            return
+
+        warehouses = db.list_warehouses(active_only=True)
+        if not warehouses:
+            show_error("Імпорт закупівель", "Спочатку створіть хоча б один склад.")
+            return
+
+        dialog = PurchasesImportDialog(self, raw_rows, headers, warehouses, self.settings)
+        result = dialog.result
+        if not result:
+            return
+
+        try:
+            summary = self._process_purchase_import(result["orders"], result["options"])
+        except Exception:
+            logging.exception("Помилка під час імпорту закупівель")
+            show_error("Імпорт закупівель", "Імпорт перервано помилкою. Деталі у логах.")
+            return
+
+        messagebox.showinfo("Імпорт закупівель", summary)
+        self.refresh_purchases()
+        self.refresh_cash()
+        self.refresh_stock()
+
+    def _process_purchase_import(self, orders: list[dict], options: dict) -> str:
+        warehouse_id = options["warehouse_id"]
+        mode = options.get("mode", "draft")
+        create_products = bool(options.get("create_products", True))
+        create_suppliers = bool(options.get("create_suppliers", True))
+
+        product_rows = db.list_products()
+        products_by_sku = {p["sku"].lower(): dict(p) for p in product_rows if p["sku"]}
+        products_by_name = {p["name"].lower(): dict(p) for p in product_rows if p["name"]}
+
+        counterparties = db.list_counterparties()
+        allowed_supplier_types = {"supplier", "both", "other"}
+        suppliers_by_name = {
+            c["name"].lower(): c for c in counterparties if c["type"] in allowed_supplier_types and c["name"]
+        }
+
+        default_brand = self.settings.get("defaults", "product", "brand") or "Імпорт"
+        default_category = self.settings.get("defaults", "product", "category") or "Імпорт"
+        default_unit = (self.settings.get("defaults", "product", "unit") or "pcs").strip() or "pcs"
+        brand_id, category_id = db.ensure_import_defaults(default_brand, default_category)
+
+        created_products = 0
+        created_suppliers = 0
+        skipped_lines = 0
+        posted_docs = 0
+        draft_docs = 0
+        total_docs = 0
+
+        grouped: dict[str, list[dict]] = defaultdict(list)
+        for idx, row in enumerate(orders):
+            key = row.get("order_no") or f"#{idx+1}"
+            grouped[key].append(row)
+
+        for order_no, lines in grouped.items():
+            doc_date = lines[0].get("doc_date") or datetime.now().strftime("%Y-%m-%d")
+            supplier_name = lines[0].get("supplier", "").strip()
+            supplier_id = None
+
+            if supplier_name:
+                existing = suppliers_by_name.get(supplier_name.lower()) or db.find_counterparty_by_name(
+                    supplier_name, allowed_supplier_types
+                )
+                if existing:
+                    supplier_id = existing["id"]
+                    suppliers_by_name[supplier_name.lower()] = dict(existing)
+                elif create_suppliers:
+                    supplier_id = db.add_counterparty(supplier_name, "supplier", note="Імпортований постачальник")
+                    new_cp = {
+                        "id": supplier_id,
+                        "name": supplier_name,
+                        "type": "supplier",
+                        "phone": "",
+                        "email": "",
+                        "address": "",
+                        "note": "Імпортований постачальник",
+                    }
+                    counterparties.append(new_cp)
+                    suppliers_by_name[supplier_name.lower()] = new_cp
+                    created_suppliers += 1
+
+            purchase_lines: list[tuple[int, float, float]] = []
+            comment = lines[0].get("comment", "").strip()
+
+            for row in lines:
+                sku = (row.get("sku") or "").strip()
+                name = (row.get("product_name") or sku or "Без назви").strip()
+                qty = float(row.get("quantity") or 0)
+                price = float(row.get("price") or 0)
+                amount = float(row.get("amount") or 0)
+                if not price and qty and amount:
+                    price = amount / qty
+
+                product_row = products_by_sku.get(sku.lower()) if sku else None
+                if not product_row and name:
+                    product_row = products_by_name.get(name.lower())
+                if not product_row and create_products:
+                    final_sku = sku or self._generate_unique_sku(name, set(products_by_sku.keys()))
+                    product_id = db.add_product(final_sku, name, brand_id, category_id, unit=default_unit)
+                    product_row = {
+                        "id": product_id,
+                        "sku": final_sku,
+                        "name": name,
+                    }
+                    products_by_sku[final_sku.lower()] = product_row
+                    products_by_name[name.lower()] = product_row
+                    created_products += 1
+
+                if not product_row or qty <= 0:
+                    skipped_lines += 1
+                    continue
+
+                purchase_lines.append((int(product_row["id"]), qty, price))
+
+            if not purchase_lines:
+                skipped_lines += len(lines)
+                continue
+
+            total_docs += 1
+            try:
+                purchase_id = db.create_purchase(
+                    doc_date, supplier_id, warehouse_id, "", comment, get_base_currency_code(), 1.0
+                )
+                db.replace_purchase_lines(purchase_id, purchase_lines, 1.0)
+            except Exception as exc:
+                logging.warning("Не вдалося створити закупівлю %s: %s", order_no, exc)
+                skipped_lines += len(purchase_lines)
+                continue
+
+            if mode == "post":
+                try:
+                    db.post_purchase(purchase_id)
+                    posted_docs += 1
+                except Exception as exc:
+                    logging.warning("Проведення закупівлі #%s завершилось помилкою: %s", purchase_id, exc)
+                    draft_docs += 1
+            else:
+                draft_docs += 1
+
+        lines_msg = f"Пропущено рядків: {skipped_lines}" if skipped_lines else "Без пропусків"
+        created_parts = []
+        if created_products:
+            created_parts.append(f"створено товарів: {created_products}")
+        if created_suppliers:
+            created_parts.append(f"створено постачальників: {created_suppliers}")
+        created_msg = ", ".join(created_parts) if created_parts else "без нових довідників"
+        return (
+            f"Опрацьовано документів: {total_docs}. Проведено: {posted_docs}, чернеток: {draft_docs}. "
+            f"{lines_msg}; {created_msg}."
+        )
 
     # Extra costs
     def create_extra_costs_tab(self) -> None:
@@ -2740,10 +2916,36 @@ SALES_FIELDS: list[SalesField] = [
 ]
 
 
+PURCHASE_FIELDS: list[SalesField] = [
+    ("order_no", "Замовлення/рахунок", ("номер", "рахунок", "invoice", "order", "id")),
+    ("doc_date", "Дата", ("дата", "date", "order_date", "дата оформлення")),
+    ("supplier", "Постачальник", ("постачальник", "поставщик", "supplier", "vendor", "контрагент")),
+    ("sku", "SKU", ("sku", "артикул", "код")),
+    ("product_name", "Товар", ("товар", "product", "назва", "item")),
+    ("quantity", "Кількість", ("кількість", "к-сть", "qty", "quantity", "шт")),
+    ("price", "Ціна", ("ціна", "price", "amount")),
+    ("amount", "Сума", ("сума", "amount", "total")),
+    ("comment", "Коментар", ("коментар", "примітка", "comment", "note")),
+]
+
+
 def _suggest_sales_mapping(headers: list[str]) -> dict[str, str]:
     normalized_headers = {h.lower(): h for h in headers}
     mapping: dict[str, str] = {}
     for key, _label, aliases in SALES_FIELDS:
+        for alias in aliases:
+            if alias.lower() in normalized_headers:
+                mapping[key] = normalized_headers[alias.lower()]
+                break
+        else:
+            mapping[key] = ""
+    return mapping
+
+
+def _suggest_purchase_mapping(headers: list[str]) -> dict[str, str]:
+    normalized_headers = {h.lower(): h for h in headers}
+    mapping: dict[str, str] = {}
+    for key, _label, aliases in PURCHASE_FIELDS:
         for alias in aliases:
             if alias.lower() in normalized_headers:
                 mapping[key] = normalized_headers[alias.lower()]
@@ -2783,7 +2985,33 @@ def _normalize_sales_records(rows: list[dict[str, object]], mapping: dict[str, s
     return records
 
 
-def _read_sales_csv(path: Path, encoding: str) -> tuple[list[dict[str, object]], list[str]]:
+def _normalize_purchase_records(rows: list[dict[str, object]], mapping: dict[str, str]) -> list[dict]:
+    records: list[dict] = []
+    for row in rows:
+        normalized = {(k or "").strip(): _format_cell_value(v).strip() for k, v in row.items()}
+
+        def pick(field: str, parser=None):
+            header = mapping.get(field, "")
+            value = normalized.get(header, "") if header else ""
+            return parser(value) if parser else value
+
+        records.append(
+            {
+                "order_no": pick("order_no"),
+                "doc_date": pick("doc_date", _parse_date_value),
+                "supplier": pick("supplier"),
+                "sku": pick("sku"),
+                "product_name": pick("product_name"),
+                "quantity": pick("quantity", _parse_float_value),
+                "price": pick("price", _parse_float_value),
+                "amount": pick("amount", _parse_float_value),
+                "comment": pick("comment"),
+            }
+        )
+    return records
+
+
+def _read_import_csv(path: Path, encoding: str) -> tuple[list[dict[str, object]], list[str]]:
     with path.open("r", encoding=encoding, newline="") as f:
         sample = f.read(2048)
         f.seek(0)
@@ -2797,7 +3025,7 @@ def _read_sales_csv(path: Path, encoding: str) -> tuple[list[dict[str, object]],
         return rows, [h or "" for h in headers]
 
 
-def _read_sales_xlsx(path: Path) -> tuple[list[dict[str, object]], list[str]]:
+def _read_import_xlsx(path: Path) -> tuple[list[dict[str, object]], list[str]]:
     workbook = load_workbook(path, data_only=True, read_only=True)
     sheet = workbook.active
     rows = list(sheet.iter_rows(values_only=True))
@@ -2815,11 +3043,11 @@ def _read_sales_xlsx(path: Path) -> tuple[list[dict[str, object]], list[str]]:
     return records, headers
 
 
-def _read_sales_xls(path: Path) -> tuple[list[dict[str, object]], list[str]]:
+def _read_import_xls(path: Path) -> tuple[list[dict[str, object]], list[str]]:
     try:
         # Деякі сервіси експортують XLSX-файли з розширенням .xls, тому
         # спершу пробуємо прочитати їх через openpyxl.
-        return _read_sales_xlsx(path)
+        return _read_import_xlsx(path)
     except Exception:
         # Якщо це справді старий XLS, повертаємося до xlrd.
         try:
@@ -2852,16 +3080,205 @@ def _read_sales_xls(path: Path) -> tuple[list[dict[str, object]], list[str]]:
     return records, headers
 
 
-def parse_sales_file(path: Path, encoding: str = "utf-8") -> tuple[list[dict[str, object]], list[str]]:
+def parse_import_file(path: Path, encoding: str = "utf-8") -> tuple[list[dict[str, object]], list[str]]:
     suffix = path.suffix.lower()
     if suffix == ".xlsx":
-        raw_rows, headers = _read_sales_xlsx(path)
+        raw_rows, headers = _read_import_xlsx(path)
     elif suffix == ".xls":
-        raw_rows, headers = _read_sales_xls(path)
+        raw_rows, headers = _read_import_xls(path)
     else:
-        raw_rows, headers = _read_sales_csv(path, encoding)
+        raw_rows, headers = _read_import_csv(path, encoding)
 
     return raw_rows, headers
+
+
+def parse_sales_file(path: Path, encoding: str = "utf-8") -> tuple[list[dict[str, object]], list[str]]:
+    return parse_import_file(path, encoding)
+
+
+class PurchasesImportDialog(tk.Toplevel):
+    def __init__(self, app: tk.Tk, raw_rows: list[dict[str, object]], headers: list[str], warehouses, settings) -> None:
+        super().__init__(app)
+        self.title("Імпорт закупівель")
+        self.resizable(True, True)
+        self.grab_set()
+        self.result: Optional[dict] = None
+        self.raw_rows = raw_rows
+        self.headers = headers
+        self.warehouses = warehouses
+        self.settings = settings
+        self.templates: dict[str, dict[str, str]] = settings.get("purchase_import", "templates") or {}
+        self.current_mapping = _suggest_purchase_mapping(headers)
+
+        main = ttk.Frame(self, padding=10)
+        main.pack(fill=tk.BOTH, expand=True)
+
+        info = ttk.Label(main, text=f"Рядків у файлі: {len(raw_rows)}")
+        info.grid(row=0, column=0, columnspan=3, sticky="w")
+
+        self._build_template_controls(main)
+        self._build_mapping_controls(main)
+        self._build_options(main)
+        self.preview = self._build_preview(main)
+        self._refresh_preview()
+
+        btns = ttk.Frame(main)
+        btns.grid(row=11, column=0, columnspan=3, pady=8, sticky="e")
+        ttk.Button(btns, text="Скасувати", command=self.destroy).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btns, text="Імпортувати", command=self._on_ok).pack(side=tk.RIGHT, padx=4)
+
+        self.bind("<Return>", lambda _e: self._on_ok())
+        self.bind("<Escape>", lambda _e: self.destroy())
+        self.wait_window(self)
+
+    def _on_ok(self) -> None:
+        warehouse = next((w for w in self.warehouses if w["name"] == self.wh_var.get()), None)
+        if not warehouse:
+            show_error("Імпорт", "Оберіть склад")
+            return
+
+        normalized_orders = _normalize_purchase_records(self.raw_rows, self.current_mapping)
+        self.result = {
+            "options": {
+                "warehouse_id": warehouse["id"],
+                "mode": self.mode_var.get(),
+                "create_products": bool(self.create_products_var.get()),
+                "create_suppliers": bool(self.create_suppliers_var.get()),
+            },
+            "orders": normalized_orders,
+        }
+        self.settings.set(self.current_template_name.get(), "purchase_import", "last_template")
+        self.settings.save()
+        self.destroy()
+
+    def _build_template_controls(self, parent: ttk.Frame) -> None:
+        ttk.Label(parent, text="Шаблон співставлення:").grid(row=1, column=0, sticky="w", pady=4)
+        self.current_template_name = tk.StringVar(value=self.settings.get("purchase_import", "last_template") or "")
+        self.template_combo = ttk.Combobox(
+            parent, textvariable=self.current_template_name, values=list(self.templates.keys()), state="readonly"
+        )
+        self.template_combo.grid(row=1, column=1, sticky="ew", pady=4)
+        ttk.Button(parent, text="Застосувати", command=self._apply_template).grid(row=1, column=2, padx=4, sticky="w")
+        ttk.Button(parent, text="Зберегти як…", command=self._save_template).grid(row=1, column=3, padx=4, sticky="w")
+
+    def _build_mapping_controls(self, parent: ttk.Frame) -> None:
+        ttk.Label(parent, text="Співставлення колонок:").grid(row=2, column=0, sticky="nw", pady=4)
+        mapping_frame = ttk.Frame(parent)
+        mapping_frame.grid(row=2, column=1, columnspan=3, sticky="ew", pady=4)
+        mapping_frame.columnconfigure(1, weight=1)
+
+        options = ["(не використовувати)"] + self.headers
+        self.mapping_vars: dict[str, tk.StringVar] = {}
+        for idx, (field_key, field_label, _aliases) in enumerate(PURCHASE_FIELDS):
+            ttk.Label(mapping_frame, text=field_label).grid(row=idx, column=0, sticky="w", pady=2)
+            var = tk.StringVar(value=self.current_mapping.get(field_key, ""))
+            combo = ttk.Combobox(mapping_frame, textvariable=var, values=options, state="readonly")
+            combo.grid(row=idx, column=1, sticky="ew", pady=2)
+            combo.bind("<<ComboboxSelected>>", lambda _e, key=field_key, v=var: self._update_mapping(key, v.get()))
+            self.mapping_vars[field_key] = var
+
+    def _build_options(self, parent: ttk.Frame) -> None:
+        ttk.Label(parent, text="Склад для імпорту:").grid(row=3, column=0, sticky="w", pady=4)
+        self.wh_var = tk.StringVar(value=self.warehouses[0]["name"] if self.warehouses else "")
+        wh_combo = ttk.Combobox(parent, textvariable=self.wh_var, values=[w["name"] for w in self.warehouses], state="readonly")
+        wh_combo.grid(row=3, column=1, sticky="ew", pady=4)
+
+        ttk.Label(parent, text="Режим проведення:").grid(row=4, column=0, sticky="nw", pady=4)
+        mode_frame = ttk.Frame(parent)
+        mode_frame.grid(row=4, column=1, sticky="w", pady=4)
+        self.mode_var = tk.StringVar(value="post")
+        ttk.Radiobutton(mode_frame, text="Провести всі", variable=self.mode_var, value="post").pack(anchor="w")
+        ttk.Radiobutton(mode_frame, text="Тільки чернетки", variable=self.mode_var, value="draft").pack(anchor="w")
+
+        self.create_products_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(parent, text="Створювати відсутні товари", variable=self.create_products_var).grid(
+            row=5, column=1, sticky="w", pady=(4, 0)
+        )
+        self.create_suppliers_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(parent, text="Створювати відсутніх постачальників", variable=self.create_suppliers_var).grid(
+            row=6, column=1, sticky="w"
+        )
+
+    def _build_preview(self, parent: ttk.Frame) -> ttk.Treeview:
+        ttk.Label(parent, text="Попередній перегляд (перші 30 рядків):").grid(row=9, column=0, columnspan=3, sticky="w", pady=6)
+        preview = ttk.Treeview(
+            parent,
+            columns=("order", "date", "supplier", "sku", "name", "qty", "price"),
+            show="headings",
+            height=10,
+        )
+        headings = {
+            "order": ("Замовлення", 120),
+            "date": ("Дата", 90),
+            "supplier": ("Постачальник", 180),
+            "sku": ("SKU", 90),
+            "name": ("Товар", 200),
+            "qty": ("К-сть", 70),
+            "price": ("Ціна", 90),
+        }
+        for col, (title, width) in headings.items():
+            preview.heading(col, text=title)
+            preview.column(col, width=width, anchor="w")
+        preview.grid(row=10, column=0, columnspan=3, sticky="nsew")
+        parent.grid_rowconfigure(10, weight=1)
+        parent.grid_columnconfigure(1, weight=1)
+        scroll = ttk.Scrollbar(parent, orient="vertical", command=preview.yview)
+        preview.configure(yscrollcommand=scroll.set)
+        scroll.grid(row=10, column=3, sticky="ns")
+        return preview
+
+    def _refresh_preview(self) -> None:
+        self.preview.delete(*self.preview.get_children())
+        normalized = _normalize_purchase_records(self.raw_rows, self.current_mapping)
+        for row in normalized[:30]:
+            self.preview.insert(
+                "",
+                "end",
+                values=(
+                    row.get("order_no") or "-",
+                    row.get("doc_date"),
+                    row.get("supplier"),
+                    row.get("sku"),
+                    row.get("product_name"),
+                    f"{float(row.get('quantity') or 0):.2f}",
+                    f"{float(row.get('price') or 0):.2f}",
+                ),
+            )
+
+    def _update_mapping(self, key: str, value: str) -> None:
+        clean_value = "" if value == "(не використовувати)" else value
+        self.current_mapping[key] = clean_value
+        self._refresh_preview()
+
+    def _apply_template(self) -> None:
+        name = self.current_template_name.get().strip()
+        if not name or name not in self.templates:
+            return
+        template = self.templates[name]
+        for key, var in self.mapping_vars.items():
+            var.set(template.get(key, ""))
+            self.current_mapping[key] = template.get(key, "")
+        self._refresh_preview()
+
+    def _save_template(self) -> None:
+        values = simple_prompt(
+            "Назва шаблону",
+            ["Вкажіть назву шаблону"],
+            [self.current_template_name.get().strip()],
+        )
+        if not values:
+            return
+
+        name = values[0].strip()
+        if not name:
+            return
+
+        self.templates[name] = dict(self.current_mapping)
+        self.settings.set(self.templates, "purchase_import", "templates")
+        self.settings.set(name, "purchase_import", "last_template")
+        self.settings.save()
+        self.current_template_name.set(name)
+        self.template_combo.configure(values=list(self.templates.keys()))
 
 
 class SalesImportDialog(tk.Toplevel):

@@ -1535,8 +1535,9 @@ class InventoryApp(tk.Tk):
         if not suppliers:
             show_error("Імпорт закупівель", "Спочатку додайте постачальника у контрагенти.")
             return
+        currencies = db.list_currencies()
 
-        dialog = PurchasesImportDialog(self, raw_rows, headers, warehouses, suppliers, self.settings)
+        dialog = PurchasesImportDialog(self, raw_rows, headers, warehouses, suppliers, currencies, self.settings)
         result = dialog.result
         if not result:
             return
@@ -1558,6 +1559,8 @@ class InventoryApp(tk.Tk):
         mode = options.get("mode", "draft")
         create_products = bool(options.get("create_products", True))
         selected_supplier_id = options.get("supplier_id")
+        currency_code = (options.get("currency_code") or get_base_currency_code()).strip().upper()
+        exchange_rate = float(options.get("exchange_rate") or 1.0)
 
         product_rows = db.list_products()
         products_by_sku = {p["sku"].lower(): dict(p) for p in product_rows if p["sku"]}
@@ -1622,10 +1625,16 @@ class InventoryApp(tk.Tk):
 
         total_docs = 1
         try:
+            if currency_code != get_base_currency_code():
+                try:
+                    db.add_currency_rate(currency_code, doc_date, exchange_rate)
+                except Exception as exc:
+                    logging.warning("Не вдалося зберегти курс %s на %s: %s", currency_code, doc_date, exc)
+
             purchase_id = db.create_purchase(
-                doc_date, supplier_id, warehouse_id, "", "; ".join(dict.fromkeys(comments)), get_base_currency_code(), 1.0
+                doc_date, supplier_id, warehouse_id, "", "; ".join(dict.fromkeys(comments)), currency_code, exchange_rate
             )
-            db.replace_purchase_lines(purchase_id, purchase_lines, 1.0)
+            db.replace_purchase_lines(purchase_id, purchase_lines, exchange_rate)
         except Exception as exc:
             logging.warning("Не вдалося створити закупівлю: %s", exc)
             skipped_lines += len(purchase_lines)
@@ -3335,6 +3344,7 @@ class PurchasesImportDialog(tk.Toplevel):
         headers: list[str],
         warehouses,
         suppliers,
+        currencies,
         settings,
     ) -> None:
         super().__init__(app)
@@ -3347,6 +3357,8 @@ class PurchasesImportDialog(tk.Toplevel):
         self.warehouses = warehouses
         self.suppliers = suppliers
         self.supplier_names = list(dict.fromkeys([s["name"] for s in suppliers if s.get("name")]))
+        self.currencies = currencies
+        self.currency_codes = [c["code"] for c in currencies] if currencies else [get_base_currency_code()]
         self.settings = settings
         self.templates: dict[str, dict[str, str]] = settings.get("purchase_import", "templates") or {}
         self.current_mapping = _suggest_purchase_mapping(headers)
@@ -3364,7 +3376,7 @@ class PurchasesImportDialog(tk.Toplevel):
         self._refresh_preview()
 
         btns = ttk.Frame(main)
-        btns.grid(row=11, column=0, columnspan=3, pady=8, sticky="e")
+        btns.grid(row=14, column=0, columnspan=3, pady=8, sticky="e")
         ttk.Button(btns, text="Скасувати", command=self.destroy).pack(side=tk.RIGHT, padx=4)
         ttk.Button(btns, text="Імпортувати", command=self._on_ok).pack(side=tk.RIGHT, padx=4)
 
@@ -3382,6 +3394,15 @@ class PurchasesImportDialog(tk.Toplevel):
             show_error("Імпорт", "Оберіть постачальника")
             return
 
+        try:
+            exchange_rate = float(self.rate_var.get())
+        except ValueError:
+            show_error("Імпорт", "Курс має бути числом")
+            return
+        if exchange_rate <= 0:
+            show_error("Імпорт", "Курс має бути більшим за 0")
+            return
+
         normalized_orders = _normalize_purchase_records(
             self.raw_rows,
             self.current_mapping,
@@ -3396,6 +3417,8 @@ class PurchasesImportDialog(tk.Toplevel):
                 "supplier_id": supplier["id"],
                 "mode": self.mode_var.get(),
                 "create_products": bool(self.create_products_var.get()),
+                "currency_code": self.currency_var.get(),
+                "exchange_rate": exchange_rate,
             },
             "orders": normalized_orders,
         }
@@ -3444,28 +3467,53 @@ class PurchasesImportDialog(tk.Toplevel):
         self.date_picker = DatePicker(parent)
         self.date_picker.grid(row=5, column=1, sticky="w", pady=4)
 
-        ttk.Label(parent, text="Замовлення/рахунок:").grid(row=6, column=0, sticky="w", pady=4)
+        ttk.Label(parent, text="Валюта:").grid(row=6, column=0, sticky="w", pady=4)
+        default_currency = self.currency_codes[0] if self.currency_codes else get_base_currency_code()
+        self.currency_var = tk.StringVar(value=default_currency)
+        currency_combo = ttk.Combobox(parent, textvariable=self.currency_var, values=self.currency_codes, state="readonly")
+        currency_combo.grid(row=6, column=1, sticky="ew", pady=4)
+
+        ttk.Label(parent, text="Курс:").grid(row=7, column=0, sticky="w", pady=4)
+        try:
+            default_rate = ensure_rate_for_date(self.currency_var.get(), self.date_picker.get())
+        except Exception:
+            default_rate = 1.0
+        self.rate_var = tk.StringVar(value=f"{default_rate:.4f}")
+        ttk.Entry(parent, textvariable=self.rate_var, width=14).grid(row=7, column=1, sticky="w", pady=4)
+
+        def on_currency_change(_event=None):
+            try:
+                rate_val = ensure_rate_for_date(self.currency_var.get(), self.date_picker.get())
+            except ValueError as exc:
+                messagebox.showerror("Курс", str(exc))
+                self.currency_var.set(default_currency)
+                return
+            self.rate_var.set(f"{rate_val:.4f}")
+
+        currency_combo.bind("<<ComboboxSelected>>", on_currency_change)
+
+        ttk.Label(parent, text="Замовлення/рахунок:").grid(row=8, column=0, sticky="w", pady=4)
         self.order_no_var = tk.StringVar()
-        ttk.Entry(parent, textvariable=self.order_no_var).grid(row=6, column=1, sticky="ew", pady=4)
+        ttk.Entry(parent, textvariable=self.order_no_var).grid(row=8, column=1, sticky="ew", pady=4)
 
-        ttk.Label(parent, text="Коментар:").grid(row=7, column=0, sticky="w", pady=4)
+        ttk.Label(parent, text="Коментар:").grid(row=9, column=0, sticky="w", pady=4)
         self.comment_var = tk.StringVar()
-        ttk.Entry(parent, textvariable=self.comment_var).grid(row=7, column=1, sticky="ew", pady=4)
+        ttk.Entry(parent, textvariable=self.comment_var).grid(row=9, column=1, sticky="ew", pady=4)
 
-        ttk.Label(parent, text="Режим проведення:").grid(row=8, column=0, sticky="nw", pady=4)
+        ttk.Label(parent, text="Режим проведення:").grid(row=10, column=0, sticky="nw", pady=4)
         mode_frame = ttk.Frame(parent)
-        mode_frame.grid(row=8, column=1, sticky="w", pady=4)
+        mode_frame.grid(row=10, column=1, sticky="w", pady=4)
         self.mode_var = tk.StringVar(value="post")
         ttk.Radiobutton(mode_frame, text="Провести всі", variable=self.mode_var, value="post").pack(anchor="w")
         ttk.Radiobutton(mode_frame, text="Тільки чернетки", variable=self.mode_var, value="draft").pack(anchor="w")
 
         self.create_products_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(parent, text="Створювати відсутні товари", variable=self.create_products_var).grid(
-            row=9, column=1, sticky="w", pady=(4, 0)
+            row=11, column=1, sticky="w", pady=(4, 0)
         )
 
     def _build_preview(self, parent: ttk.Frame) -> ttk.Treeview:
-        ttk.Label(parent, text="Попередній перегляд (перші 30 рядків):").grid(row=9, column=0, columnspan=3, sticky="w", pady=6)
+        ttk.Label(parent, text="Попередній перегляд (перші 30 рядків):").grid(row=12, column=0, columnspan=3, sticky="w", pady=6)
         preview = ttk.Treeview(
             parent,
             columns=("order", "date", "supplier", "sku", "name", "qty", "price"),
@@ -3484,12 +3532,12 @@ class PurchasesImportDialog(tk.Toplevel):
         for col, (title, width) in headings.items():
             preview.heading(col, text=title)
             preview.column(col, width=width, anchor="w")
-        preview.grid(row=10, column=0, columnspan=3, sticky="nsew")
-        parent.grid_rowconfigure(10, weight=1)
+        preview.grid(row=13, column=0, columnspan=3, sticky="nsew")
+        parent.grid_rowconfigure(13, weight=1)
         parent.grid_columnconfigure(1, weight=1)
         scroll = ttk.Scrollbar(parent, orient="vertical", command=preview.yview)
         preview.configure(yscrollcommand=scroll.set)
-        scroll.grid(row=10, column=3, sticky="ns")
+        scroll.grid(row=13, column=3, sticky="ns")
         return preview
 
     def _refresh_preview(self) -> None:

@@ -1527,7 +1527,13 @@ class InventoryApp(tk.Tk):
             show_error("Імпорт закупівель", "Спочатку створіть хоча б один склад.")
             return
 
-        dialog = PurchasesImportDialog(self, raw_rows, headers, warehouses, self.settings)
+        allowed_supplier_types = {"supplier", "both", "other"}
+        suppliers = [c for c in db.list_counterparties() if c.get("type") in allowed_supplier_types]
+        if not suppliers:
+            show_error("Імпорт закупівель", "Спочатку додайте хоча б одного постачальника.")
+            return
+
+        dialog = PurchasesImportDialog(self, raw_rows, headers, warehouses, suppliers, self.settings)
         result = dialog.result
         if not result:
             return
@@ -1549,6 +1555,8 @@ class InventoryApp(tk.Tk):
         mode = options.get("mode", "draft")
         create_products = bool(options.get("create_products", True))
         create_suppliers = bool(options.get("create_suppliers", True))
+        selected_supplier_id = options.get("supplier_id")
+        selected_supplier_name = (options.get("supplier_name") or "").strip()
 
         product_rows = db.list_products()
         products_by_id = {int(p["id"]): dict(p) for p in product_rows if p["id"] is not None}
@@ -1580,10 +1588,10 @@ class InventoryApp(tk.Tk):
 
         for order_no, lines in grouped.items():
             doc_date = lines[0].get("doc_date") or datetime.now().strftime("%Y-%m-%d")
-            supplier_name = lines[0].get("supplier", "").strip()
-            supplier_id = None
+            supplier_name = selected_supplier_name or lines[0].get("supplier", "").strip()
+            supplier_id = selected_supplier_id
 
-            if supplier_name:
+            if not supplier_id and supplier_name:
                 existing = suppliers_by_name.get(supplier_name.lower()) or db.find_counterparty_by_name(
                     supplier_name, allowed_supplier_types
                 )
@@ -3253,7 +3261,9 @@ def _normalize_sales_records(rows: list[dict[str, object]], mapping: dict[str, s
     return records
 
 
-def _normalize_purchase_records(rows: list[dict[str, object]], mapping: dict[str, str]) -> list[dict]:
+def _normalize_purchase_records(
+    rows: list[dict[str, object]], mapping: dict[str, str], default_supplier: str | None = None
+) -> list[dict]:
     records: list[dict] = []
     for row in rows:
         normalized = {(k or "").strip(): _format_cell_value(v).strip() for k, v in row.items()}
@@ -3267,7 +3277,7 @@ def _normalize_purchase_records(rows: list[dict[str, object]], mapping: dict[str
             {
                 "order_no": pick("order_no"),
                 "doc_date": pick("doc_date", _parse_date_value),
-                "supplier": pick("supplier"),
+                "supplier": default_supplier if default_supplier else pick("supplier"),
                 "sku": pick("sku"),
                 "product_name": pick("product_name"),
                 "quantity": pick("quantity", _parse_float_value),
@@ -3365,7 +3375,15 @@ def parse_sales_file(path: Path, encoding: str = "utf-8") -> tuple[list[dict[str
 
 
 class PurchasesImportDialog(tk.Toplevel):
-    def __init__(self, app: tk.Tk, raw_rows: list[dict[str, object]], headers: list[str], warehouses, settings) -> None:
+    def __init__(
+        self,
+        app: tk.Tk,
+        raw_rows: list[dict[str, object]],
+        headers: list[str],
+        warehouses,
+        suppliers,
+        settings,
+    ) -> None:
         super().__init__(app)
         self.title("Імпорт закупівель")
         self.resizable(True, True)
@@ -3374,6 +3392,7 @@ class PurchasesImportDialog(tk.Toplevel):
         self.raw_rows = raw_rows
         self.headers = headers
         self.warehouses = warehouses
+        self.suppliers = suppliers
         self.settings = settings
         self.templates: dict[str, dict[str, str]] = settings.get("purchase_import", "templates") or {}
         self.current_mapping = _suggest_purchase_mapping(headers)
@@ -3401,14 +3420,22 @@ class PurchasesImportDialog(tk.Toplevel):
 
     def _on_ok(self) -> None:
         warehouse = next((w for w in self.warehouses if w["name"] == self.wh_var.get()), None)
+        supplier = next((s for s in self.suppliers if s["name"] == self.supplier_var.get()), None)
         if not warehouse:
             show_error("Імпорт", "Оберіть склад")
             return
+        if not supplier:
+            show_error("Імпорт", "Оберіть постачальника")
+            return
 
-        normalized_orders = _normalize_purchase_records(self.raw_rows, self.current_mapping)
+        normalized_orders = _normalize_purchase_records(
+            self.raw_rows, self.current_mapping, default_supplier=self.supplier_var.get().strip()
+        )
         self.result = {
             "options": {
                 "warehouse_id": warehouse["id"],
+                "supplier_id": supplier["id"],
+                "supplier_name": supplier["name"],
                 "mode": self.mode_var.get(),
                 "create_products": bool(self.create_products_var.get()),
                 "create_suppliers": bool(self.create_suppliers_var.get()),
@@ -3451,20 +3478,28 @@ class PurchasesImportDialog(tk.Toplevel):
         wh_combo = ttk.Combobox(parent, textvariable=self.wh_var, values=[w["name"] for w in self.warehouses], state="readonly")
         wh_combo.grid(row=3, column=1, sticky="ew", pady=4)
 
-        ttk.Label(parent, text="Режим проведення:").grid(row=4, column=0, sticky="nw", pady=4)
+        ttk.Label(parent, text="Постачальник:").grid(row=4, column=0, sticky="w", pady=4)
+        self.supplier_var = tk.StringVar(value=self.suppliers[0]["name"] if self.suppliers else "")
+        supplier_combo = ttk.Combobox(
+            parent, textvariable=self.supplier_var, values=[s["name"] for s in self.suppliers], state="readonly"
+        )
+        supplier_combo.grid(row=4, column=1, sticky="ew", pady=4)
+        supplier_combo.bind("<<ComboboxSelected>>", lambda _e: self._refresh_preview())
+
+        ttk.Label(parent, text="Режим проведення:").grid(row=5, column=0, sticky="nw", pady=4)
         mode_frame = ttk.Frame(parent)
-        mode_frame.grid(row=4, column=1, sticky="w", pady=4)
+        mode_frame.grid(row=5, column=1, sticky="w", pady=4)
         self.mode_var = tk.StringVar(value="post")
         ttk.Radiobutton(mode_frame, text="Провести всі", variable=self.mode_var, value="post").pack(anchor="w")
         ttk.Radiobutton(mode_frame, text="Тільки чернетки", variable=self.mode_var, value="draft").pack(anchor="w")
 
         self.create_products_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(parent, text="Створювати відсутні товари", variable=self.create_products_var).grid(
-            row=5, column=1, sticky="w", pady=(4, 0)
+            row=6, column=1, sticky="w", pady=(4, 0)
         )
         self.create_suppliers_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(parent, text="Створювати відсутніх постачальників", variable=self.create_suppliers_var).grid(
-            row=6, column=1, sticky="w"
+            row=7, column=1, sticky="w"
         )
 
     def _build_preview(self, parent: ttk.Frame) -> ttk.Treeview:
@@ -3497,7 +3532,9 @@ class PurchasesImportDialog(tk.Toplevel):
 
     def _refresh_preview(self) -> None:
         self.preview.delete(*self.preview.get_children())
-        normalized = _normalize_purchase_records(self.raw_rows, self.current_mapping)
+        normalized = _normalize_purchase_records(
+            self.raw_rows, self.current_mapping, default_supplier=self.supplier_var.get().strip()
+        )
         for row in normalized[:30]:
             self.preview.insert(
                 "",

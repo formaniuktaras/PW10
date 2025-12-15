@@ -1528,7 +1528,13 @@ class InventoryApp(tk.Tk):
             return
 
         counterparties = db.list_counterparties()
-        suppliers = [c for c in counterparties if c["type"] in {"supplier", "both", "other"}]
+        suppliers = sorted(
+            (c for c in counterparties if c["type"] in {"supplier", "both", "other"}),
+            key=lambda c: c.get("name", ""),
+        )
+        if not suppliers:
+            show_error("Імпорт закупівель", "Спочатку додайте постачальника у контрагенти.")
+            return
 
         dialog = PurchasesImportDialog(self, raw_rows, headers, warehouses, suppliers, self.settings)
         result = dialog.result
@@ -3399,6 +3405,7 @@ class PurchasesImportDialog(tk.Toplevel):
         self.headers = headers
         self.warehouses = warehouses
         self.suppliers = suppliers
+        self.supplier_names = list(dict.fromkeys([s["name"] for s in suppliers if s.get("name")]))
         self.settings = settings
         self.templates: dict[str, dict[str, str]] = settings.get("purchase_import", "templates") or {}
         self.current_mapping = _suggest_purchase_mapping(headers)
@@ -3439,7 +3446,9 @@ class PurchasesImportDialog(tk.Toplevel):
             show_error("Імпорт", "Оберіть постачальника")
             return
 
-        normalized_orders = _normalize_purchase_records(self.raw_rows, self.current_mapping)
+        normalized_orders = _normalize_purchase_records(
+            self.raw_rows, self.current_mapping, default_supplier=self.supplier_var.get().strip()
+        )
         self.result = {
             "options": {
                 "warehouse_id": warehouse["id"],
@@ -3487,10 +3496,8 @@ class PurchasesImportDialog(tk.Toplevel):
         wh_combo.grid(row=3, column=1, sticky="ew", pady=4)
 
         ttk.Label(parent, text="Постачальник:").grid(row=4, column=0, sticky="w", pady=4)
-        self.supplier_var = tk.StringVar(value=self.suppliers[0]["name"] if self.suppliers else "")
-        supplier_combo = ttk.Combobox(
-            parent, textvariable=self.supplier_var, values=[s["name"] for s in self.suppliers], state="readonly"
-        )
+        self.supplier_var = tk.StringVar(value=self.supplier_names[0] if self.supplier_names else "")
+        supplier_combo = ttk.Combobox(parent, textvariable=self.supplier_var, values=self.supplier_names, state="readonly")
         supplier_combo.grid(row=4, column=1, sticky="ew", pady=4)
 
         ttk.Label(parent, text="Режим проведення:").grid(row=5, column=0, sticky="nw", pady=4)

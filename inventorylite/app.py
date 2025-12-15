@@ -1557,30 +1557,11 @@ class InventoryApp(tk.Tk):
         warehouse_id = options["warehouse_id"]
         mode = options.get("mode", "draft")
         create_products = bool(options.get("create_products", True))
-        create_suppliers = bool(options.get("create_suppliers", True))
         selected_supplier_id = options.get("supplier_id")
 
         product_rows = db.list_products()
         products_by_sku = {p["sku"].lower(): dict(p) for p in product_rows if p["sku"]}
         products_by_name = {p["name"].lower(): dict(p) for p in product_rows if p["name"]}
-
-        counterparties = [dict(c) for c in db.list_counterparties()]
-        allowed_supplier_types = {"supplier", "both", "other"}
-        suppliers_by_name = {
-            c["name"].lower(): c for c in counterparties if c["type"] in allowed_supplier_types and c["name"]
-        }
-        selected_supplier = None
-        if selected_supplier_id:
-            selected_supplier = next((c for c in counterparties if c["id"] == selected_supplier_id), None)
-            if not selected_supplier:
-                try:
-                    selected_supplier = db.get_counterparty(selected_supplier_id)
-                    if selected_supplier:
-                        selected_supplier = dict(selected_supplier)
-                except Exception:
-                    selected_supplier = None
-            if selected_supplier and selected_supplier.get("name"):
-                suppliers_by_name[selected_supplier["name"].lower()] = dict(selected_supplier)
 
         default_brand = self.settings.get("defaults", "product", "brand") or "Імпорт"
         default_category = self.settings.get("defaults", "product", "category") or "Імпорт"
@@ -1588,7 +1569,6 @@ class InventoryApp(tk.Tk):
         brand_id, category_id = db.ensure_import_defaults(default_brand, default_category)
 
         created_products = 0
-        created_suppliers = 0
         skipped_lines = 0
         posted_docs = 0
         draft_docs = 0
@@ -1597,33 +1577,9 @@ class InventoryApp(tk.Tk):
         doc_date = next((r.get("doc_date") for r in orders if r.get("doc_date")), None) or datetime.now().strftime(
             "%Y-%m-%d"
         )
-        supplier_name = next(
-            ((r.get("supplier") or "").strip() for r in orders if (r.get("supplier") or "").strip()), ""
-        )
         supplier_id = selected_supplier_id
-
-        if not supplier_id and supplier_name:
-            existing = suppliers_by_name.get(supplier_name.lower()) or db.find_counterparty_by_name(
-                supplier_name, allowed_supplier_types
-            )
-            if existing:
-                supplier_id = existing["id"]
-                suppliers_by_name[supplier_name.lower()] = dict(existing)
-            elif create_suppliers:
-                supplier_id = db.add_counterparty(supplier_name, "supplier", note="Імпортований постачальник")
-                new_cp = {
-                    "id": supplier_id,
-                    "name": supplier_name,
-                    "type": "supplier",
-                    "phone": "",
-                    "email": "",
-                    "address": "",
-                    "note": "Імпортований постачальник",
-                }
-                counterparties.append(new_cp)
-                suppliers_by_name[supplier_name.lower()] = new_cp
-                created_suppliers += 1
-
+        if not supplier_id:
+            raise ValueError("Не вказано постачальника для імпорту закупівель")
         purchase_lines: list[tuple[int, float, float]] = []
         comments: list[str] = []
 
@@ -1694,8 +1650,6 @@ class InventoryApp(tk.Tk):
         created_parts = []
         if created_products:
             created_parts.append(f"створено товарів: {created_products}")
-        if created_suppliers:
-            created_parts.append(f"створено постачальників: {created_suppliers}")
         created_msg = ", ".join(created_parts) if created_parts else "без нових довідників"
         return (
             f"Опрацьовано документів: {total_docs}. Проведено: {posted_docs}, чернеток: {draft_docs}. "
@@ -3184,7 +3138,6 @@ SALES_FIELDS: list[SalesField] = [
 PURCHASE_FIELDS: list[SalesField] = [
     ("order_no", "Замовлення/рахунок", ("номер", "рахунок", "invoice", "order", "id")),
     ("doc_date", "Дата", ("дата", "date", "order_date", "дата оформлення")),
-    ("supplier", "Постачальник", ("постачальник", "поставщик", "supplier", "vendor", "контрагент")),
     ("sku", "SKU", ("sku", "артикул", "код")),
     ("product_name", "Товар", ("товар", "product", "назва", "item")),
     ("quantity", "Кількість", ("кількість", "к-сть", "qty", "quantity", "шт")),
@@ -3428,11 +3381,6 @@ class PurchasesImportDialog(tk.Toplevel):
             show_error("Імпорт", "Оберіть постачальника")
             return
 
-        supplier = next((s for s in self.suppliers if s["name"] == self.supplier_var.get()), None)
-        if not supplier:
-            show_error("Імпорт", "Оберіть постачальника")
-            return
-
         normalized_orders = _normalize_purchase_records(
             self.raw_rows, self.current_mapping, default_supplier=self.supplier_var.get().strip()
         )
@@ -3442,7 +3390,6 @@ class PurchasesImportDialog(tk.Toplevel):
                 "supplier_id": supplier["id"],
                 "mode": self.mode_var.get(),
                 "create_products": bool(self.create_products_var.get()),
-                "create_suppliers": bool(self.create_suppliers_var.get()),
             },
             "orders": normalized_orders,
         }
@@ -3497,10 +3444,6 @@ class PurchasesImportDialog(tk.Toplevel):
         self.create_products_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(parent, text="Створювати відсутні товари", variable=self.create_products_var).grid(
             row=6, column=1, sticky="w", pady=(4, 0)
-        )
-        self.create_suppliers_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(parent, text="Створювати відсутніх постачальників", variable=self.create_suppliers_var).grid(
-            row=7, column=1, sticky="w"
         )
 
     def _build_preview(self, parent: ttk.Frame) -> ttk.Treeview:

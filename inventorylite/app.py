@@ -3147,6 +3147,12 @@ def _format_cell_value(value: object) -> str:
     return str(value)
 
 
+def _normalize_header(value: str) -> str:
+    """Strip whitespace/BOM from column headers to avoid mapping typos."""
+
+    return (value or "").strip().lstrip("\ufeff")
+
+
 SalesField = tuple[str, str, tuple[str, ...]]
 
 
@@ -3209,7 +3215,7 @@ def _suggest_purchase_mapping(headers: list[str]) -> dict[str, str]:
 def _normalize_sales_records(rows: list[dict[str, object]], mapping: dict[str, str]) -> list[dict]:
     records: list[dict] = []
     for row in rows:
-        normalized = {(k or "").strip(): _format_cell_value(v).strip() for k, v in row.items()}
+        normalized = {_normalize_header(k): _format_cell_value(v).strip() for k, v in row.items()}
 
         def pick(field: str, parser=None):
             header = mapping.get(field, "")
@@ -3241,7 +3247,7 @@ def _normalize_purchase_records(
 ) -> list[dict]:
     records: list[dict] = []
     for row in rows:
-        normalized = {(k or "").strip(): _format_cell_value(v).strip() for k, v in row.items()}
+        normalized = {_normalize_header(k): _format_cell_value(v).strip() for k, v in row.items()}
 
         def pick(field: str, parser=None):
             header = mapping.get(field, "")
@@ -3273,9 +3279,19 @@ def _read_import_csv(path: Path, encoding: str) -> tuple[list[dict[str, object]]
         except Exception:
             dialect = csv.excel
         reader = csv.DictReader(f, dialect=dialect)
-        rows = [{k or "": v for k, v in row.items()} for row in reader]
-        headers = list(reader.fieldnames or [])
-        return rows, [h or "" for h in headers]
+        raw_headers = list(reader.fieldnames or [])
+        normalized_headers = [_normalize_header(h or "") for h in raw_headers]
+        header_map = {raw or "": normalized for raw, normalized in zip(raw_headers, normalized_headers)}
+
+        rows = []
+        for row in reader:
+            cleaned_row: dict[str, object] = {}
+            for raw_key, value in row.items():
+                normalized_key = header_map.get(raw_key or "", _normalize_header(raw_key or ""))
+                cleaned_row[normalized_key] = value
+            rows.append(cleaned_row)
+
+        return rows, normalized_headers
 
 
 def _read_import_xlsx(path: Path) -> tuple[list[dict[str, object]], list[str]]:
@@ -3285,7 +3301,7 @@ def _read_import_xlsx(path: Path) -> tuple[list[dict[str, object]], list[str]]:
     if not rows:
         return [], []
 
-    headers = [_format_cell_value(cell).strip() for cell in rows[0]]
+    headers = [_normalize_header(_format_cell_value(cell)) for cell in rows[0]]
     records: list[dict[str, object]] = []
     for row in rows[1:]:
         record: dict[str, object] = {}
@@ -3315,7 +3331,7 @@ def _read_import_xls(path: Path) -> tuple[list[dict[str, object]], list[str]]:
     if sheet.nrows == 0:
         return [], []
 
-    headers = [_format_cell_value(sheet.cell_value(0, col)).strip() for col in range(sheet.ncols)]
+    headers = [_normalize_header(_format_cell_value(sheet.cell_value(0, col))) for col in range(sheet.ncols)]
     records: list[dict[str, object]] = []
     for row_idx in range(1, sheet.nrows):
         record: dict[str, object] = {}

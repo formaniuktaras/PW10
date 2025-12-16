@@ -877,13 +877,24 @@ class InventoryApp(tk.Tk):
         values = product_prompt(brands, categories, "Новий товар", settings=self.settings)
         if not values:
             return
-        sku, supplier_sku, name, brand_id, category_id, unit, is_active, extras = values
+        sku, supplier_sku_legacy, name, brand_id, category_id, unit, is_active, extras, supplier_codes = values
         try:
-            product_id = db.add_product(sku, name, brand_id, category_id, unit, is_active, supplier_sku)
+            effective_supplier_sku = supplier_sku_legacy or (
+                supplier_codes[0]["supplier_sku"] if len(supplier_codes) == 1 else None
+            )
+            product_id = db.add_product(sku, name, brand_id, category_id, unit, is_active, effective_supplier_sku)
             db.set_product_categories(product_id, category_id, extras)
+            if supplier_codes:
+                db.replace_product_supplier_codes(product_id, supplier_codes)
             self.refresh_products()
-        except sqlite3.IntegrityError:
-            show_error("Товари", "SKU або назва вже існує.")
+        except sqlite3.IntegrityError as exc:
+            if "ProductSupplierCodes" in str(exc):
+                show_error(
+                    "Товари",
+                    "Артикул постачальника вже прив’язаний до іншого товару для цього постачальника.",
+                )
+            else:
+                show_error("Товари", "SKU або назва вже існує.")
         except Exception:
             logging.exception("Add product error")
             show_error("Товари", "Не вдалося додати товар.")
@@ -898,6 +909,14 @@ class InventoryApp(tk.Tk):
             return
         brands = db.list_brands()
         categories = self.flatten_categories()
+        supplier_codes = [
+            {
+                "supplier_id": row["supplier_id"],
+                "supplier_sku": row["supplier_sku"],
+                "is_primary": bool(row["is_primary"]),
+            }
+            for row in db.list_product_supplier_codes(product_id)
+        ]
         values = product_prompt(
             brands,
             categories,
@@ -911,18 +930,26 @@ class InventoryApp(tk.Tk):
                 product["unit"],
                 bool(product["is_active"]),
                 db.get_product_additional_categories(product_id),
+                supplier_codes,
             ),
             settings=self.settings,
         )
         if not values:
             return
-        sku, supplier_sku, name, brand_id, category_id, unit, is_active, extras = values
+        sku, supplier_sku_legacy, name, brand_id, category_id, unit, is_active, extras, supplier_codes = values
         try:
-            db.update_product(product_id, sku, name, brand_id, category_id, unit, is_active, supplier_sku)
+            db.update_product(product_id, sku, name, brand_id, category_id, unit, is_active, supplier_sku_legacy)
             db.set_product_categories(product_id, category_id, extras)
+            db.replace_product_supplier_codes(product_id, supplier_codes)
             self.refresh_products()
-        except sqlite3.IntegrityError:
-            show_error("Товари", "SKU або назва вже існує.")
+        except sqlite3.IntegrityError as exc:
+            if "ProductSupplierCodes" in str(exc):
+                show_error(
+                    "Товари",
+                    "Артикул постачальника вже прив’язаний до іншого товару для цього постачальника.",
+                )
+            else:
+                show_error("Товари", "SKU або назва вже існує.")
         except Exception:
             logging.exception("Edit product error")
             show_error("Товари", "Не вдалося змінити товар.")
@@ -1887,6 +1914,19 @@ class InventoryApp(tk.Tk):
         supplier_id = selected_supplier_id
         if not supplier_id:
             raise ValueError("Не вказано постачальника для імпорту закупівель")
+        with db.get_connection() as conn:
+            supplier_code_rows = conn.execute(
+                """
+                SELECT lower(psc.supplier_sku) AS k, p.id, p.sku, p.supplier_sku, p.name, p.brand_id, p.category_id, p.unit, p.is_active
+                FROM ProductSupplierCodes psc
+                JOIN Products p ON p.id = psc.product_id
+                WHERE psc.supplier_id = ?
+                """,
+                (supplier_id,),
+            ).fetchall()
+        products_by_supplier_code = {
+            row["k"]: {key: row[key] for key in row.keys() if key != "k"} for row in supplier_code_rows
+        }
         purchase_lines: list[tuple[int, float, float]] = []
         comments: list[str] = []
 
@@ -1904,7 +1944,9 @@ class InventoryApp(tk.Tk):
             if not price and qty and amount:
                 price = amount / qty
 
-            product_row = products_by_supplier_sku.get(supplier_sku.lower()) if supplier_sku else None
+            product_row = products_by_supplier_code.get(supplier_sku.lower()) if supplier_sku else None
+            if not product_row:
+                product_row = products_by_supplier_sku.get(supplier_sku.lower()) if supplier_sku else None
             if not product_row:
                 product_row = products_by_sku.get(sku.lower()) if sku else None
             if not product_row and name:
@@ -1924,7 +1966,26 @@ class InventoryApp(tk.Tk):
                     "sku": final_sku,
                     "name": name,
                     "supplier_sku": supplier_sku,
+                    "brand_id": brand_id,
+                    "category_id": category_id,
+                    "unit": default_unit,
+                    "is_active": True,
                 }
+                if supplier_sku:
+                    try:
+                        db.replace_product_supplier_codes(
+                            product_id,
+                            [
+                                {
+                                    "supplier_id": supplier_id,
+                                    "supplier_sku": supplier_sku,
+                                    "is_primary": True,
+                                }
+                            ],
+                        )
+                        products_by_supplier_code[supplier_sku.lower()] = product_row
+                    except sqlite3.IntegrityError as exc:
+                        logging.warning("Не вдалося зберегти артикул постачальника для імпорту: %s", exc)
                 products_by_sku[final_sku.lower()] = product_row
                 if supplier_sku:
                     products_by_supplier_sku[supplier_sku.lower()] = product_row
@@ -4468,6 +4529,7 @@ def product_prompt(brands, categories, title: str, initial=None, settings: Setti
         "unit": (settings.get("defaults", "product", "unit") if settings else None) or "pcs",
         "is_active": True,
         "extras": [],
+        "supplier_codes": [],
     }
 
     if isinstance(initial, dict):
@@ -4485,6 +4547,7 @@ def product_prompt(brands, categories, title: str, initial=None, settings: Setti
                 "unit": initial[5] if len(initial) > 5 else "pcs",
                 "is_active": bool(initial[6]) if len(initial) > 6 else True,
                 "extras": initial[7] if len(initial) > 7 else [],
+                "supplier_codes": initial[8] if len(initial) > 8 else [],
             }
         )
     else:
@@ -4499,7 +4562,7 @@ def product_prompt(brands, categories, title: str, initial=None, settings: Setti
     sku_var = tk.StringVar(value=normalized_initial.get("sku", ""))
     ttk.Entry(dlg, textvariable=sku_var, width=30).grid(row=0, column=1, padx=6, pady=4, sticky="ew")
 
-    ttk.Label(dlg, text="Артикул постачальника").grid(row=1, column=0, padx=6, pady=4, sticky="w")
+    ttk.Label(dlg, text="Артикул постачальника (legacy)").grid(row=1, column=0, padx=6, pady=4, sticky="w")
     supplier_sku_var = tk.StringVar(value=normalized_initial.get("supplier_sku", ""))
     ttk.Entry(dlg, textvariable=supplier_sku_var, width=30).grid(row=1, column=1, padx=6, pady=4, sticky="ew")
 
@@ -4569,6 +4632,138 @@ def product_prompt(brands, categories, title: str, initial=None, settings: Setti
     is_active_var = tk.BooleanVar(value=normalized_initial.get("is_active", True))
     ttk.Checkbutton(dlg, text="Активний", variable=is_active_var).grid(row=7, column=1, padx=6, pady=4, sticky="w")
 
+    suppliers = db.list_suppliers()
+    supplier_names = [s["name"] for s in suppliers]
+    supplier_name_by_id = {s["id"]: s["name"] for s in suppliers}
+    supplier_codes_state: list[dict] = []
+    for code in normalized_initial.get("supplier_codes") or []:
+        try:
+            supplier_codes_state.append(
+                {
+                    "supplier_id": int(code.get("supplier_id")),  # type: ignore[arg-type]
+                    "supplier_sku": (code.get("supplier_sku") or "").strip(),
+                    "is_primary": bool(code.get("is_primary")),
+                }
+            )
+        except (TypeError, ValueError):
+            continue
+
+    supplier_codes_frame = ttk.LabelFrame(dlg, text="Артикули постачальників")
+    supplier_codes_frame.grid(row=8, column=0, columnspan=2, padx=6, pady=4, sticky="nsew")
+    supplier_codes_frame.columnconfigure(1, weight=1)
+    dlg.rowconfigure(8, weight=1)
+
+    ttk.Label(supplier_codes_frame, text="Постачальник:").grid(row=0, column=0, padx=4, pady=2, sticky="w")
+    supplier_var = tk.StringVar()
+    supplier_combo = ttk.Combobox(
+        supplier_codes_frame, textvariable=supplier_var, state="readonly", values=supplier_names, width=30
+    )
+    supplier_combo.grid(row=0, column=1, padx=4, pady=2, sticky="ew")
+
+    ttk.Label(supplier_codes_frame, text="Артикул:").grid(row=1, column=0, padx=4, pady=2, sticky="w")
+    supplier_code_var = tk.StringVar()
+    ttk.Entry(supplier_codes_frame, textvariable=supplier_code_var, width=30).grid(
+        row=1, column=1, padx=4, pady=2, sticky="ew"
+    )
+
+    supplier_primary_var = tk.BooleanVar(value=False)
+    ttk.Checkbutton(supplier_codes_frame, text="Основний", variable=supplier_primary_var).grid(
+        row=1, column=2, padx=4, pady=2, sticky="w"
+    )
+
+    def refresh_supplier_codes_tree() -> None:
+        supplier_codes_tree.delete(*supplier_codes_tree.get_children())
+        for idx, code in enumerate(supplier_codes_state):
+            supplier_name = supplier_name_by_id.get(code.get("supplier_id"), str(code.get("supplier_id")))
+            supplier_codes_tree.insert(
+                "",
+                "end",
+                iid=str(idx),
+                values=(supplier_name, code.get("supplier_sku", ""), "Так" if code.get("is_primary") else ""),
+            )
+
+    def add_supplier_code() -> None:
+        if not supplier_names:
+            messagebox.showerror("Артикули постачальників", "Створіть постачальника зі статусом постачальника.")
+            return
+        try:
+            supplier_idx = supplier_names.index(supplier_var.get())
+        except ValueError:
+            messagebox.showerror("Артикули постачальників", "Оберіть постачальника")
+            return
+        supplier_id = suppliers[supplier_idx]["id"]
+        supplier_sku = supplier_code_var.get().strip()
+        if not supplier_sku:
+            messagebox.showerror("Артикули постачальників", "Введіть артикул постачальника")
+            return
+        key = (supplier_id, supplier_sku.lower())
+        if any((c.get("supplier_id"), (c.get("supplier_sku") or "").lower()) == key for c in supplier_codes_state):
+            messagebox.showerror("Артикули постачальників", "Такий артикул вже додано для цього постачальника")
+            return
+        is_primary = bool(supplier_primary_var.get())
+        if is_primary:
+            for c in supplier_codes_state:
+                if c.get("supplier_id") == supplier_id:
+                    c["is_primary"] = False
+        supplier_codes_state.append(
+            {"supplier_id": supplier_id, "supplier_sku": supplier_sku, "is_primary": is_primary}
+        )
+        refresh_supplier_codes_tree()
+        supplier_code_var.set("")
+        supplier_primary_var.set(False)
+
+    def delete_supplier_code() -> None:
+        selection = supplier_codes_tree.selection()
+        if not selection:
+            return
+        idx = int(selection[0])
+        if 0 <= idx < len(supplier_codes_state):
+            supplier_codes_state.pop(idx)
+        refresh_supplier_codes_tree()
+
+    def mark_primary() -> None:
+        selection = supplier_codes_tree.selection()
+        if not selection:
+            return
+        idx = int(selection[0])
+        if 0 <= idx < len(supplier_codes_state):
+            supplier_id = supplier_codes_state[idx].get("supplier_id")
+            for i, code in enumerate(supplier_codes_state):
+                if code.get("supplier_id") == supplier_id:
+                    code["is_primary"] = i == idx
+        refresh_supplier_codes_tree()
+
+    ttk.Button(supplier_codes_frame, text="Додати", command=add_supplier_code).grid(
+        row=0, column=2, padx=4, pady=2, sticky="w"
+    )
+
+    columns = ("supplier", "sku", "primary")
+    supplier_codes_tree = ttk.Treeview(
+        supplier_codes_frame, columns=columns, show="headings", selectmode="browse", height=6
+    )
+    supplier_codes_tree.heading("supplier", text="Постачальник")
+    supplier_codes_tree.heading("sku", text="Артикул")
+    supplier_codes_tree.heading("primary", text="Основний")
+    supplier_codes_tree.column("supplier", width=180, anchor="w")
+    supplier_codes_tree.column("sku", width=120, anchor="w")
+    supplier_codes_tree.column("primary", width=90, anchor="center")
+    supplier_codes_tree.grid(row=2, column=0, columnspan=3, padx=4, pady=4, sticky="nsew")
+    supplier_codes_frame.rowconfigure(2, weight=1)
+    supplier_codes_frame.columnconfigure(0, weight=1)
+    supplier_codes_frame.columnconfigure(1, weight=1)
+    scroll = ttk.Scrollbar(supplier_codes_frame, orient="vertical", command=supplier_codes_tree.yview)
+    supplier_codes_tree.configure(yscrollcommand=scroll.set)
+    scroll.grid(row=2, column=3, sticky="ns")
+
+    actions_frame = ttk.Frame(supplier_codes_frame)
+    actions_frame.grid(row=3, column=0, columnspan=3, padx=4, pady=(0, 4), sticky="w")
+    ttk.Button(actions_frame, text="Видалити вибраний", command=delete_supplier_code).pack(side=tk.LEFT, padx=4)
+    ttk.Button(actions_frame, text="Зробити основним", command=mark_primary).pack(side=tk.LEFT, padx=4)
+
+    if supplier_names:
+        supplier_combo.current(0)
+    refresh_supplier_codes_tree()
+
     if initial:
         brand_combo.current(next((i for i, b in enumerate(brands) if b["id"] == normalized_initial["brand_id"]), 0))
         category_var.set(next((c["label"] for c in categories if c["id"] == normalized_initial["category_id"]), ""))
@@ -4625,6 +4820,7 @@ def product_prompt(brands, categories, title: str, initial=None, settings: Setti
             unit_var.get().strip() or "pcs",
             bool(is_active_var.get()),
             selected,
+            list(supplier_codes_state),
         )
         dlg.destroy()
 
@@ -4632,7 +4828,7 @@ def product_prompt(brands, categories, title: str, initial=None, settings: Setti
         dlg.destroy()
 
     btns = ttk.Frame(dlg)
-    btns.grid(row=8, column=0, columnspan=2, pady=8, sticky="e")
+    btns.grid(row=9, column=0, columnspan=2, pady=8, sticky="e")
     ttk.Button(btns, text="OK", command=on_ok).pack(side=tk.LEFT, padx=4)
     ttk.Button(btns, text="Скасувати", command=on_cancel).pack(side=tk.LEFT, padx=4)
     dlg.bind("<Return>", lambda e: on_ok())

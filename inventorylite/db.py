@@ -96,6 +96,21 @@ def init_db() -> None:
                 FOREIGN KEY (category_id) REFERENCES Categories(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS ProductSupplierCodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                product_id INTEGER NOT NULL,
+                supplier_id INTEGER NOT NULL,
+                supplier_sku TEXT NOT NULL,
+                is_primary INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY (product_id) REFERENCES Products(id) ON DELETE CASCADE,
+                FOREIGN KEY (supplier_id) REFERENCES Counterparties(id) ON DELETE CASCADE,
+                UNIQUE (supplier_id, supplier_sku)
+            );
+            CREATE INDEX IF NOT EXISTS idx_psc_supplier_sku_lower
+                ON ProductSupplierCodes(supplier_id, lower(supplier_sku));
+            CREATE INDEX IF NOT EXISTS idx_psc_product
+                ON ProductSupplierCodes(product_id);
+
             CREATE TABLE IF NOT EXISTS AdditionalProductCategories (
                 product_id INTEGER NOT NULL,
                 category_id INTEGER NOT NULL,
@@ -289,6 +304,25 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "Products", "supplier_sku", "TEXT")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_products_supplier_sku_lower ON Products(lower(supplier_sku))"
+    )
+
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS ProductSupplierCodes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id INTEGER NOT NULL,
+            supplier_id INTEGER NOT NULL,
+            supplier_sku TEXT NOT NULL,
+            is_primary INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (product_id) REFERENCES Products(id) ON DELETE CASCADE,
+            FOREIGN KEY (supplier_id) REFERENCES Counterparties(id) ON DELETE CASCADE,
+            UNIQUE (supplier_id, supplier_sku)
+        );
+        CREATE INDEX IF NOT EXISTS idx_psc_supplier_sku_lower
+            ON ProductSupplierCodes(supplier_id, lower(supplier_sku));
+        CREATE INDEX IF NOT EXISTS idx_psc_product
+            ON ProductSupplierCodes(product_id);
+        """
     )
 
     _ensure_column(conn, "Categories", "parent_id", "INTEGER REFERENCES Categories(id) ON DELETE SET NULL")
@@ -846,6 +880,89 @@ def find_product_by_sku_or_name(
         ).fetchone()
 
 
+def list_product_supplier_codes(product_id: int) -> list[sqlite3.Row]:
+    """
+    Returns rows with: id, supplier_id, supplier_name, supplier_sku, is_primary
+    """
+
+    query = (
+        """
+        SELECT psc.id, psc.supplier_id, c.name AS supplier_name, psc.supplier_sku, psc.is_primary
+        FROM ProductSupplierCodes psc
+        JOIN Counterparties c ON psc.supplier_id = c.id
+        WHERE psc.product_id = ?
+        ORDER BY c.name, psc.supplier_sku
+        """
+    )
+    with get_connection() as conn:
+        return list(conn.execute(query, (product_id,)))
+
+
+def replace_product_supplier_codes(product_id: int, codes: list[dict]) -> None:
+    """
+    Replace all supplier codes for a product in one transaction:
+    - delete existing for product_id
+    - insert all provided codes
+    - ensure at most one primary per supplier_id (and optionally at most one global primary)
+    Raises sqlite3.IntegrityError on UNIQUE conflicts (supplier_id, supplier_sku).
+    """
+
+    unique_keys = set()
+    primary_seen = set()
+    sanitized: list[tuple[int, int, str, int]] = []
+    for code in codes or []:
+        try:
+            supplier_id = int(code.get("supplier_id"))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            continue
+        supplier_sku = (code.get("supplier_sku") or "").strip()
+        if not supplier_id or not supplier_sku:
+            continue
+        key = (supplier_id, supplier_sku.lower())
+        if key in unique_keys:
+            continue
+        unique_keys.add(key)
+        is_primary = 1 if code.get("is_primary") else 0
+        if is_primary:
+            if supplier_id in primary_seen:
+                is_primary = 0
+            else:
+                primary_seen.add(supplier_id)
+        sanitized.append((product_id, supplier_id, supplier_sku, is_primary))
+
+    with get_connection() as conn:
+        conn.execute("BEGIN")
+        conn.execute("DELETE FROM ProductSupplierCodes WHERE product_id=?", (product_id,))
+        if sanitized:
+            conn.executemany(
+                "INSERT INTO ProductSupplierCodes (product_id, supplier_id, supplier_sku, is_primary) VALUES (?,?,?,?)",
+                sanitized,
+            )
+        conn.commit()
+
+
+def get_product_by_supplier_code(supplier_id: int, supplier_sku: str) -> sqlite3.Row | None:
+    """
+    Finds product by (supplier_id, supplier_sku) case-insensitive.
+    Returns product row (at least id, sku, name, brand_id, category_id, unit, is_active).
+    """
+
+    supplier_sku = (supplier_sku or "").strip()
+    if not supplier_sku:
+        return None
+    with get_connection() as conn:
+        return conn.execute(
+            """
+            SELECT p.id, p.sku, p.supplier_sku, p.name, p.brand_id, p.category_id, p.unit, p.is_active
+            FROM ProductSupplierCodes psc
+            JOIN Products p ON p.id = psc.product_id
+            WHERE psc.supplier_id = ? AND lower(psc.supplier_sku) = lower(?)
+            LIMIT 1
+            """,
+            (supplier_id, supplier_sku),
+        ).fetchone()
+
+
 def update_product(
     product_id: int,
     sku: str,
@@ -1229,6 +1346,12 @@ def list_counterparties(counterparty_type: Optional[str] = None) -> List[sqlite3
     query += " ORDER BY name"
     with get_connection() as conn:
         return list(conn.execute(query, params))
+
+
+def list_suppliers() -> list[sqlite3.Row]:
+    query = "SELECT id, name FROM Counterparties WHERE type IN ('supplier','both') ORDER BY name"
+    with get_connection() as conn:
+        return list(conn.execute(query))
 
 
 def add_counterparty(

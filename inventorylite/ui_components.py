@@ -9,9 +9,11 @@ from typing import Callable, List, Optional
 
 
 class TableFrame(ttk.Frame):
-    def __init__(self, master: tk.Widget, columns: List[tuple], **kwargs):
+    def __init__(self, master: tk.Widget, columns: List[tuple], selectmode: str = "browse", **kwargs):
         super().__init__(master, **kwargs)
-        self.tree = ttk.Treeview(self, columns=[c[0] for c in columns], show="headings", selectmode="browse")
+        self.tree = ttk.Treeview(
+            self, columns=[c[0] for c in columns], show="headings", selectmode=selectmode
+        )
         for col_id, col_title, width in columns:
             self.tree.heading(col_id, text=col_title)
             self.tree.column(col_id, width=width, anchor="w")
@@ -40,6 +42,28 @@ class TableFrame(ttk.Frame):
             return int(item[0])
         except ValueError:
             return item[0]
+
+    def get_selected_row_ids(self) -> list[int]:
+        """
+        Return selected row ids as ints.
+        Assumes first column in Treeview values contains database id, or that iid is id.
+        Prefer iid if it is numeric; otherwise read from values[0].
+        """
+
+        result: list[int] = []
+        for item in self.tree.selection():
+            try:
+                result.append(int(item))
+                continue
+            except (TypeError, ValueError):
+                pass
+            values = self.tree.item(item, "values")
+            if values:
+                try:
+                    result.append(int(values[0]))
+                except (TypeError, ValueError):
+                    continue
+        return result
 
     def on_select(self, callback: Callable[[], None]) -> None:
         self.tree.bind("<<TreeviewSelect>>", lambda e: callback())

@@ -839,7 +839,7 @@ class InventoryApp(tk.Tk):
             ("unit", "Одиниця", 90),
             ("is_active", "Активний", 90),
         ]
-        self.product_table = TableFrame(self.products_frame, columns)
+        self.product_table = TableFrame(self.products_frame, columns, selectmode="extended")
         self.product_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
         self.product_table.on_double_click(self.edit_product)
         self.product_table.register_context_menu(self.edit_product, self.delete_product)
@@ -849,6 +849,11 @@ class InventoryApp(tk.Tk):
         ttk.Button(btns, text="Додати", command=self.add_product).pack(side=tk.LEFT, padx=4)
         ttk.Button(btns, text="Змінити", command=self.edit_product).pack(side=tk.LEFT, padx=4)
         ttk.Button(btns, text="Видалити", command=self.delete_product).pack(side=tk.LEFT, padx=4)
+        ttk.Button(
+            btns,
+            text="Масові дії...",
+            command=lambda: open_products_bulk_actions_dialog(self, db.get_connection(), self.product_table),
+        ).pack(side=tk.LEFT, padx=4)
 
     def on_search_products(self) -> None:
         category_id = None
@@ -4034,6 +4039,176 @@ def product_prompt(brands, categories, title: str, initial=None, settings: Setti
     dlg.wait_window()
     return result
 
+
+def open_products_bulk_actions_dialog(parent, db_conn, table_frame) -> None:
+    product_ids = table_frame.get_selected_row_ids()
+    if not product_ids:
+        messagebox.showwarning("Масові дії", "Оберіть хоча б один товар.")
+        try:
+            db_conn.close()
+        except Exception:
+            pass
+        return
+
+    dlg = tk.Toplevel(parent)
+    dlg.title("Масові дії з товарами")
+    dlg.grab_set()
+    dlg.resizable(False, False)
+
+    ttk.Label(dlg, text=f"Обрано товарів: {len(product_ids)}").grid(
+        row=0, column=0, columnspan=3, padx=8, pady=(8, 4), sticky="w"
+    )
+
+    brands = db.list_brands()
+    brand_names = [b["name"] for b in brands]
+    categories = parent.flatten_categories()
+    category_names = [c["label"] for c in categories]
+
+    default_unit = "pcs"
+    try:
+        default_unit = (parent.settings.get("defaults", "product", "unit") or default_unit).strip() or "pcs"
+    except Exception:
+        default_unit = "pcs"
+
+    def close_dialog() -> None:
+        try:
+            db_conn.close()
+        except Exception:
+            pass
+        dlg.destroy()
+
+    def confirm_and_apply(action_label: str, func) -> None:
+        if not messagebox.askyesno("Підтвердження", f"Застосувати до {len(product_ids)} товарів?"):
+            return
+        try:
+            affected = func()
+        except Exception:
+            logging.exception("Bulk products action error")
+            show_error("Масові дії", "Не вдалося виконати дію.")
+            return
+        messagebox.showinfo("Масові дії", f"{action_label}: {affected}")
+        parent.refresh_products()
+
+    # Activation
+    act_frame = ttk.LabelFrame(dlg, text="Активація")
+    act_frame.grid(row=1, column=0, columnspan=3, padx=8, pady=4, sticky="ew")
+    ttk.Button(act_frame, text="Активувати", command=lambda: confirm_and_apply(
+        "Оновлено товарів",
+        lambda: db.bulk_update_products_is_active(db_conn, product_ids, 1),
+    )).pack(side=tk.LEFT, padx=4, pady=4)
+    ttk.Button(act_frame, text="Деактивувати", command=lambda: confirm_and_apply(
+        "Оновлено товарів",
+        lambda: db.bulk_update_products_is_active(db_conn, product_ids, 0),
+    )).pack(side=tk.LEFT, padx=4, pady=4)
+
+    # Brand
+    brand_frame = ttk.LabelFrame(dlg, text="Встановити бренд")
+    brand_frame.grid(row=2, column=0, columnspan=3, padx=8, pady=4, sticky="ew")
+    ttk.Label(brand_frame, text="Бренд:").pack(side=tk.LEFT, padx=4, pady=4)
+    brand_var = tk.StringVar()
+    brand_combo = ttk.Combobox(brand_frame, textvariable=brand_var, state="readonly", values=brand_names, width=30)
+    brand_combo.pack(side=tk.LEFT, padx=4, pady=4)
+    if brand_names:
+        brand_combo.current(0)
+
+    def apply_brand() -> None:
+        if not brands:
+            messagebox.showwarning("Бренди", "Створіть принаймні один бренд.")
+            return
+        confirm_and_apply(
+            "Оновлено товарів",
+            lambda: db.bulk_update_products_brand(db_conn, product_ids, brands[brand_combo.current()]["id"]),
+        )
+
+    ttk.Button(brand_frame, text="Застосувати бренд", command=apply_brand).pack(side=tk.LEFT, padx=4, pady=4)
+
+    # Category
+    category_frame = ttk.LabelFrame(dlg, text="Встановити категорію")
+    category_frame.grid(row=3, column=0, columnspan=3, padx=8, pady=4, sticky="ew")
+    ttk.Label(category_frame, text="Категорія:").pack(side=tk.LEFT, padx=4, pady=4)
+    category_var = tk.StringVar()
+    category_combo = ttk.Combobox(category_frame, textvariable=category_var, values=category_names, width=40)
+    category_combo.pack(side=tk.LEFT, padx=4, pady=4)
+    if category_names:
+        category_combo.current(0)
+
+    def apply_category() -> None:
+        selected_label = category_var.get().strip()
+        matched = next((c for c in categories if c["label"] == selected_label), None)
+        if not matched:
+            matched = next((c for c in categories if selected_label.lower() in c["label"].lower()), None)
+        if not matched:
+            messagebox.showwarning("Категорії", "Оберіть категорію.")
+            return
+        confirm_and_apply(
+            "Оновлено товарів",
+            lambda: db.bulk_update_products_category(db_conn, product_ids, matched["id"]),
+        )
+
+    ttk.Button(category_frame, text="Застосувати категорію", command=apply_category).pack(
+        side=tk.LEFT, padx=4, pady=4
+    )
+
+    # Unit
+    unit_frame = ttk.LabelFrame(dlg, text="Одиниця")
+    unit_frame.grid(row=4, column=0, columnspan=3, padx=8, pady=4, sticky="ew")
+    ttk.Label(unit_frame, text="Одиниця:").pack(side=tk.LEFT, padx=4, pady=4)
+    unit_var = tk.StringVar(value=default_unit)
+    ttk.Entry(unit_frame, textvariable=unit_var, width=10).pack(side=tk.LEFT, padx=4, pady=4)
+    ttk.Button(
+        unit_frame,
+        text="Застосувати одиницю",
+        command=lambda: confirm_and_apply(
+            "Оновлено товарів",
+            lambda: db.bulk_update_products_unit(db_conn, product_ids, unit_var.get()),
+        ),
+    ).pack(side=tk.LEFT, padx=4, pady=4)
+
+    # Extra categories
+    extras_frame = ttk.LabelFrame(dlg, text="Додаткові категорії")
+    extras_frame.grid(row=5, column=0, columnspan=3, padx=8, pady=4, sticky="ew")
+    extras_frame.columnconfigure(0, weight=1)
+    extras_box = tk.Listbox(extras_frame, selectmode=tk.MULTIPLE, height=min(10, max(6, len(categories))), exportselection=False)
+    for cat in categories:
+        extras_box.insert(tk.END, cat["label"])
+    extras_box.grid(row=0, column=0, rowspan=2, padx=4, pady=4, sticky="nsew")
+    scroll = ttk.Scrollbar(extras_frame, orient="vertical", command=extras_box.yview)
+    extras_box.configure(yscrollcommand=scroll.set)
+    scroll.grid(row=0, column=1, rowspan=2, sticky="ns", pady=4)
+
+    def selected_extra_ids() -> list[int]:
+        return [categories[i]["id"] for i in extras_box.curselection() if i < len(categories)]
+
+    def apply_extra_add() -> None:
+        ids = selected_extra_ids()
+        if not ids:
+            messagebox.showwarning("Категорії", "Оберіть додаткові категорії.")
+            return
+        confirm_and_apply(
+            "Додано зв'язків",
+            lambda: db.bulk_add_product_category_links(db_conn, product_ids, ids),
+        )
+
+    def apply_extra_remove() -> None:
+        ids = selected_extra_ids()
+        if not ids:
+            messagebox.showwarning("Категорії", "Оберіть додаткові категорії.")
+            return
+        confirm_and_apply(
+            "Видалено зв'язків",
+            lambda: db.bulk_remove_product_category_links(db_conn, product_ids, ids),
+        )
+
+    ttk.Button(extras_frame, text="Додати категорії", command=apply_extra_add).grid(
+        row=0, column=2, padx=6, pady=4, sticky="n"
+    )
+
+    ttk.Button(extras_frame, text="Прибрати категорії", command=apply_extra_remove).grid(
+        row=1, column=2, padx=6, pady=4, sticky="n"
+    )
+
+    ttk.Button(dlg, text="Закрити", command=close_dialog).grid(row=6, column=0, columnspan=3, pady=8)
+    dlg.protocol("WM_DELETE_WINDOW", close_dialog)
 
 def category_prompt(title: str, initial=None):
     dlg = tk.Toplevel()

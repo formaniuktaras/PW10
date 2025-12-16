@@ -2913,14 +2913,28 @@ class InventoryApp(tk.Tk):
         ttk.Label(frame, text=f"{APP_NAME} v{VERSION}", font=("Segoe UI", 12, "bold")).pack(pady=(0, 8))
         ttk.Label(
             frame,
-            text="Облік лише за касовим методом. Собівартість за середньозваженим методом.",
-            wraplength=360,
+            text=(
+                "Мінімалістичний офлайн-облік товарів і каси. "
+                "Касовий метод, середньозважена собівартість, мультивалюта."
+            ),
+            wraplength=420,
             justify=tk.CENTER,
         ).pack(pady=4)
-        ttk.Label(frame, text=f"База даних: {get_db_path()}").pack(pady=4)
+
+        info_frame = ttk.Frame(frame)
+        info_frame.pack(pady=6, fill=tk.X)
+        ttk.Label(info_frame, text="Шлях до БД:").grid(row=0, column=0, sticky=tk.W, padx=(0, 6))
+        ttk.Label(info_frame, text=str(get_db_path()), wraplength=340, justify=tk.LEFT).grid(
+            row=0, column=1, sticky=tk.W
+        )
+        ttk.Label(info_frame, text="Тека даних:").grid(row=1, column=0, sticky=tk.W, padx=(0, 6), pady=(4, 0))
+        ttk.Label(info_frame, text=str(get_data_dir()), wraplength=340, justify=tk.LEFT).grid(
+            row=1, column=1, sticky=tk.W, pady=(4, 0)
+        )
 
         actions = ttk.Frame(frame)
-        actions.pack(pady=(8, 0))
+        actions.pack(pady=(10, 0))
+        ttk.Button(actions, text="Документація/FAQ", command=self.open_docs).pack(side=tk.LEFT, padx=4)
         ttk.Button(actions, text="Відкрити папку даних", command=lambda: open_data_folder(get_data_dir())).pack(
             side=tk.LEFT, padx=4
         )

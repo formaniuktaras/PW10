@@ -86,6 +86,7 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS Products (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 sku TEXT UNIQUE NOT NULL,
+                supplier_sku TEXT,
                 name TEXT UNIQUE NOT NULL,
                 unit TEXT NOT NULL DEFAULT 'pcs',
                 brand_id INTEGER NOT NULL,
@@ -105,6 +106,7 @@ def init_db() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_products_sku_lower ON Products(lower(sku));
             CREATE INDEX IF NOT EXISTS idx_products_name_lower ON Products(lower(name));
+            CREATE INDEX IF NOT EXISTS idx_products_supplier_sku_lower ON Products(lower(supplier_sku));
 
             CREATE TABLE IF NOT EXISTS ProductCategoryLinks (
                 product_id INTEGER NOT NULL,
@@ -284,6 +286,10 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
 
     _ensure_column(conn, "Products", "unit", "TEXT NOT NULL DEFAULT 'pcs'")
     _ensure_column(conn, "Products", "is_active", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(conn, "Products", "supplier_sku", "TEXT")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_products_supplier_sku_lower ON Products(lower(supplier_sku))"
+    )
 
     _ensure_column(conn, "Categories", "parent_id", "INTEGER REFERENCES Categories(id) ON DELETE SET NULL")
     _ensure_column(conn, "Categories", "sort_order", "INTEGER NOT NULL DEFAULT 0")
@@ -745,7 +751,7 @@ def list_products(
     include_subcategories: bool = False,
 ) -> List[sqlite3.Row]:
     base_query = (
-        "SELECT p.id, p.sku, p.name, p.unit, p.is_active, b.name AS brand, c.name AS category, "
+        "SELECT p.id, p.sku, p.supplier_sku, p.name, p.unit, p.is_active, b.name AS brand, c.name AS category, "
         "p.brand_id, p.category_id, "
         "REPLACE(GROUP_CONCAT(DISTINCT c2.name), ',', ', ') AS extra_categories "
         "FROM Products p "
@@ -770,11 +776,16 @@ def list_products(
 
     if search:
         term = f"%{search.lower()}%"
-        where_clauses.append("(lower(p.sku) LIKE ? OR lower(p.name) LIKE ?)")
-        params.extend([term, term])
+        where_clauses.append("(lower(p.sku) LIKE ? OR lower(p.name) LIKE ? OR lower(p.supplier_sku) LIKE ?)")
+        params.extend([term, term, term])
 
     where = " WHERE " + " AND ".join(where_clauses) if where_clauses else ""
-    query = base_query + where + " GROUP BY p.id, p.sku, p.name, p.unit, p.is_active, b.name, c.name, p.brand_id, p.category_id ORDER BY p.name"
+    query = (
+        base_query
+        + where
+        + " GROUP BY p.id, p.sku, p.supplier_sku, p.name, p.unit, p.is_active, b.name, c.name, p.brand_id, p.category_id"
+        + " ORDER BY p.name"
+    )
 
     with get_connection() as conn:
         return list(conn.execute(query, tuple(params)))
@@ -787,26 +798,41 @@ def add_product(
     category_id: int,
     unit: str = "pcs",
     is_active: bool = True,
+    supplier_sku: str | None = None,
 ) -> int:
     with get_connection() as conn:
         cur = conn.execute(
-            "INSERT INTO Products (sku, name, brand_id, category_id, unit, is_active) VALUES (?, ?, ?, ?, ?, ?)",
-            (sku.strip(), name.strip(), brand_id, category_id, unit.strip() or "pcs", 1 if is_active else 0),
+            "INSERT INTO Products (sku, supplier_sku, name, brand_id, category_id, unit, is_active) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                sku.strip(),
+                (supplier_sku or "").strip() or None,
+                name.strip(),
+                brand_id,
+                category_id,
+                unit.strip() or "pcs",
+                1 if is_active else 0,
+            ),
         )
         conn.commit()
         return cur.lastrowid
 
 
-def find_product_by_sku_or_name(sku: Optional[str], name: Optional[str]) -> Optional[sqlite3.Row]:
-    """Find product by SKU or name (case-insensitive)."""
+def find_product_by_sku_or_name(
+    sku: Optional[str], name: Optional[str], supplier_sku: Optional[str] = None
+) -> Optional[sqlite3.Row]:
+    """Find product by SKU, supplier SKU, or name (case-insensitive)."""
 
     sku = (sku or "").strip()
     name = (name or "").strip()
+    supplier_sku = (supplier_sku or "").strip()
     clauses: List[str] = []
     params: List[str] = []
     if sku:
         clauses.append("lower(sku)=?")
         params.append(sku.lower())
+    if supplier_sku:
+        clauses.append("lower(supplier_sku)=?")
+        params.append(supplier_sku.lower())
     if name:
         clauses.append("lower(name)=?")
         params.append(name.lower())
@@ -815,7 +841,7 @@ def find_product_by_sku_or_name(sku: Optional[str], name: Optional[str]) -> Opti
     where = " OR ".join(clauses)
     with get_connection() as conn:
         return conn.execute(
-            f"SELECT id, sku, name, brand_id, category_id, unit, is_active FROM Products WHERE {where} LIMIT 1",
+            f"SELECT id, sku, supplier_sku, name, brand_id, category_id, unit, is_active FROM Products WHERE {where} LIMIT 1",
             tuple(params),
         ).fetchone()
 
@@ -828,11 +854,21 @@ def update_product(
     category_id: int,
     unit: str = "pcs",
     is_active: bool = True,
+    supplier_sku: str | None = None,
 ) -> None:
     with get_connection() as conn:
         conn.execute(
-            "UPDATE Products SET sku=?, name=?, brand_id=?, category_id=?, unit=?, is_active=? WHERE id=?",
-            (sku.strip(), name.strip(), brand_id, category_id, unit.strip() or "pcs", 1 if is_active else 0, product_id),
+            "UPDATE Products SET sku=?, supplier_sku=?, name=?, brand_id=?, category_id=?, unit=?, is_active=? WHERE id=?",
+            (
+                sku.strip(),
+                (supplier_sku or "").strip() or None,
+                name.strip(),
+                brand_id,
+                category_id,
+                unit.strip() or "pcs",
+                1 if is_active else 0,
+                product_id,
+            ),
         )
         conn.commit()
 
@@ -866,7 +902,7 @@ def delete_product(product_id: int) -> None:
 def get_product(product_id: int) -> Optional[dict]:
     with get_connection() as conn:
         row = conn.execute(
-            "SELECT id, sku, name, brand_id, category_id, unit, is_active FROM Products WHERE id=?",
+            "SELECT id, sku, supplier_sku, name, brand_id, category_id, unit, is_active FROM Products WHERE id=?",
             (product_id,),
         ).fetchone()
         if not row:
@@ -877,6 +913,7 @@ def get_product(product_id: int) -> Optional[dict]:
     return {
         "id": row["id"],
         "sku": row["sku"],
+        "supplier_sku": row["supplier_sku"],
         "name": row["name"],
         "brand_id": row["brand_id"],
         "category_id": row["category_id"],

@@ -831,6 +831,7 @@ class InventoryApp(tk.Tk):
 
         columns = [
             ("sku", "SKU", 120),
+            ("supplier_sku", "Артикул постачальника", 170),
             ("name", "Назва", 230),
             ("brand", "Бренд", 140),
             ("category", "Категорія", 140),
@@ -869,9 +870,9 @@ class InventoryApp(tk.Tk):
         values = product_prompt(brands, categories, "Новий товар", settings=self.settings)
         if not values:
             return
-        sku, name, brand_id, category_id, unit, is_active, extras = values
+        sku, supplier_sku, name, brand_id, category_id, unit, is_active, extras = values
         try:
-            product_id = db.add_product(sku, name, brand_id, category_id, unit, is_active)
+            product_id = db.add_product(sku, name, brand_id, category_id, unit, is_active, supplier_sku)
             db.set_product_categories(product_id, category_id, extras)
             self.refresh_products()
         except sqlite3.IntegrityError:
@@ -896,6 +897,7 @@ class InventoryApp(tk.Tk):
             "Редагувати товар",
             (
                 product["sku"],
+                product.get("supplier_sku"),
                 product["name"],
                 product["brand_id"],
                 product["category_id"],
@@ -907,9 +909,9 @@ class InventoryApp(tk.Tk):
         )
         if not values:
             return
-        sku, name, brand_id, category_id, unit, is_active, extras = values
+        sku, supplier_sku, name, brand_id, category_id, unit, is_active, extras = values
         try:
-            db.update_product(product_id, sku, name, brand_id, category_id, unit, is_active)
+            db.update_product(product_id, sku, name, brand_id, category_id, unit, is_active, supplier_sku)
             db.set_product_categories(product_id, category_id, extras)
             self.refresh_products()
         except sqlite3.IntegrityError:
@@ -1565,6 +1567,7 @@ class InventoryApp(tk.Tk):
         product_rows = db.list_products()
         products_by_sku = {p["sku"].lower(): dict(p) for p in product_rows if p["sku"]}
         products_by_name = {p["name"].lower(): dict(p) for p in product_rows if p["name"]}
+        products_by_supplier_sku = {p["supplier_sku"].lower(): dict(p) for p in product_rows if p.get("supplier_sku")}
 
         default_brand = self.settings.get("defaults", "product", "brand") or "Імпорт"
         default_category = self.settings.get("defaults", "product", "category") or "Імпорт"
@@ -1592,6 +1595,7 @@ class InventoryApp(tk.Tk):
                 comments.append(comment_val)
 
             sku = (row.get("sku") or "").strip()
+            supplier_sku = (row.get("supplier_sku") or "").strip()
             name = (row.get("product_name") or sku or "Без назви").strip()
             qty = float(row.get("quantity") or 0)
             price = float(row.get("price") or 0)
@@ -1599,18 +1603,30 @@ class InventoryApp(tk.Tk):
             if not price and qty and amount:
                 price = amount / qty
 
-            product_row = products_by_sku.get(sku.lower()) if sku else None
+            product_row = products_by_supplier_sku.get(supplier_sku.lower()) if supplier_sku else None
+            if not product_row:
+                product_row = products_by_sku.get(sku.lower()) if sku else None
             if not product_row and name:
                 product_row = products_by_name.get(name.lower())
             if not product_row and create_products:
                 final_sku = sku or self._generate_unique_sku(name, set(products_by_sku.keys()))
-                product_id = db.add_product(final_sku, name, brand_id, category_id, unit=default_unit)
+                product_id = db.add_product(
+                    final_sku,
+                    name,
+                    brand_id,
+                    category_id,
+                    unit=default_unit,
+                    supplier_sku=supplier_sku,
+                )
                 product_row = {
                     "id": product_id,
                     "sku": final_sku,
                     "name": name,
+                    "supplier_sku": supplier_sku,
                 }
                 products_by_sku[final_sku.lower()] = product_row
+                if supplier_sku:
+                    products_by_supplier_sku[supplier_sku.lower()] = product_row
                 products_by_name[name.lower()] = product_row
                 created_products += 1
 
@@ -2124,6 +2140,7 @@ class InventoryApp(tk.Tk):
         product_rows = db.list_products()
         products_by_sku = {p["sku"].lower(): dict(p) for p in product_rows if p["sku"]}
         products_by_name = {p["name"].lower(): dict(p) for p in product_rows if p["name"]}
+        products_by_supplier_sku = {p["supplier_sku"].lower(): dict(p) for p in product_rows if p.get("supplier_sku")}
         counterparties = db.list_counterparties()
         allowed_customer_types = {"customer", "both", "other"}
         customers_by_name = {
@@ -2184,6 +2201,7 @@ class InventoryApp(tk.Tk):
 
             for row in lines:
                 sku = (row.get("sku") or "").strip()
+                supplier_sku = (row.get("supplier_sku") or "").strip()
                 name = (row.get("product_name") or sku or "Без назви").strip()
                 qty = float(row.get("quantity") or 0)
                 price = float(row.get("price") or 0)
@@ -2191,18 +2209,30 @@ class InventoryApp(tk.Tk):
                 if not price and qty and amount:
                     price = amount / qty
 
-                product_row = products_by_sku.get(sku.lower()) if sku else None
+                product_row = products_by_supplier_sku.get(supplier_sku.lower()) if supplier_sku else None
+                if not product_row:
+                    product_row = products_by_sku.get(sku.lower()) if sku else None
                 if not product_row and name:
                     product_row = products_by_name.get(name.lower())
                 if not product_row and create_products:
                     final_sku = sku or self._generate_unique_sku(name, set(products_by_sku.keys()))
-                    product_id = db.add_product(final_sku, name, brand_id, category_id, unit=default_unit)
+                    product_id = db.add_product(
+                        final_sku,
+                        name,
+                        brand_id,
+                        category_id,
+                        unit=default_unit,
+                        supplier_sku=supplier_sku,
+                    )
                     product_row = {
                         "id": product_id,
                         "sku": final_sku,
                         "name": name,
+                        "supplier_sku": supplier_sku,
                     }
                     products_by_sku[final_sku.lower()] = product_row
+                    if supplier_sku:
+                        products_by_supplier_sku[supplier_sku.lower()] = product_row
                     products_by_name[name.lower()] = product_row
                     created_products += 1
 
@@ -3003,6 +3033,7 @@ class InventoryApp(tk.Tk):
                 {
                     "id": r["id"],
                     "sku": r["sku"],
+                    "supplier_sku": r["supplier_sku"] or "",
                     "name": r["name"],
                     "brand": r["brand"],
                     "category": r["category"],
@@ -3134,6 +3165,7 @@ SALES_FIELDS: list[SalesField] = [
     ("phone", "Телефон", ("телефон", "phone")),
     ("email", "Email", ("email", "e-mail")),
     ("sku", "SKU", ("sku", "артикул", "код")),
+    ("supplier_sku", "Артикул постачальника", ("артикул постачальника", "supplier_sku", "vendor_sku", "vendor code")),
     ("product_name", "Товар", ("товар", "product", "назва", "item")),
     ("quantity", "Кількість", ("кількість", "к-сть", "qty", "quantity", "шт")),
     ("price", "Ціна", ("ціна", "price", "amount")),
@@ -3146,6 +3178,7 @@ SALES_FIELDS: list[SalesField] = [
 
 PURCHASE_FIELDS: list[SalesField] = [
     ("sku", "SKU", ("sku", "артикул", "код")),
+    ("supplier_sku", "Артикул постачальника", ("артикул постачальника", "supplier_sku", "vendor_sku", "vendor code")),
     ("product_name", "Товар", ("товар", "product", "назва", "item")),
     ("quantity", "Кількість", ("кількість", "к-сть", "qty", "quantity", "шт")),
     ("price", "Ціна", ("ціна", "price", "amount")),
@@ -3196,6 +3229,7 @@ def _normalize_sales_records(rows: list[dict[str, object]], mapping: dict[str, s
                 "phone": pick("phone"),
                 "email": pick("email"),
                 "sku": pick("sku"),
+                "supplier_sku": pick("supplier_sku"),
                 "product_name": pick("product_name"),
                 "quantity": pick("quantity", _parse_float_value),
                 "price": pick("price", _parse_float_value),
@@ -3231,6 +3265,7 @@ def _normalize_purchase_records(
                 "doc_date": default_doc_date or pick("doc_date", _parse_date_value),
                 "supplier": default_supplier if default_supplier else pick("supplier"),
                 "sku": pick("sku"),
+                "supplier_sku": pick("supplier_sku"),
                 "product_name": pick("product_name"),
                 "quantity": pick("quantity", _parse_float_value),
                 "price": pick("price", _parse_float_value),
@@ -3820,6 +3855,7 @@ def _find_index_by_name(items: list[str], target: str | None) -> int | None:
 def product_prompt(brands, categories, title: str, initial=None, settings: Settings | None = None):
     base_initial = {
         "sku": "",
+        "supplier_sku": "",
         "name": "",
         "brand_id": None,
         "category_id": None,
@@ -3836,12 +3872,13 @@ def product_prompt(brands, categories, title: str, initial=None, settings: Setti
         normalized_initial.update(
             {
                 "sku": initial[0] if len(initial) > 0 else "",
-                "name": initial[1] if len(initial) > 1 else "",
-                "brand_id": initial[2] if len(initial) > 2 else None,
-                "category_id": initial[3] if len(initial) > 3 else None,
-                "unit": initial[4] if len(initial) > 4 else "pcs",
-                "is_active": bool(initial[5]) if len(initial) > 5 else True,
-                "extras": initial[6] if len(initial) > 6 else [],
+                "supplier_sku": initial[1] if len(initial) > 1 else "",
+                "name": initial[2] if len(initial) > 2 else "",
+                "brand_id": initial[3] if len(initial) > 3 else None,
+                "category_id": initial[4] if len(initial) > 4 else None,
+                "unit": initial[5] if len(initial) > 5 else "pcs",
+                "is_active": bool(initial[6]) if len(initial) > 6 else True,
+                "extras": initial[7] if len(initial) > 7 else [],
             }
         )
     else:
@@ -3856,20 +3893,24 @@ def product_prompt(brands, categories, title: str, initial=None, settings: Setti
     sku_var = tk.StringVar(value=normalized_initial.get("sku", ""))
     ttk.Entry(dlg, textvariable=sku_var, width=30).grid(row=0, column=1, padx=6, pady=4, sticky="ew")
 
-    ttk.Label(dlg, text="Назва").grid(row=1, column=0, padx=6, pady=4, sticky="w")
-    name_var = tk.StringVar(value=normalized_initial.get("name", ""))
-    ttk.Entry(dlg, textvariable=name_var, width=30).grid(row=1, column=1, padx=6, pady=4, sticky="ew")
+    ttk.Label(dlg, text="Артикул постачальника").grid(row=1, column=0, padx=6, pady=4, sticky="w")
+    supplier_sku_var = tk.StringVar(value=normalized_initial.get("supplier_sku", ""))
+    ttk.Entry(dlg, textvariable=supplier_sku_var, width=30).grid(row=1, column=1, padx=6, pady=4, sticky="ew")
 
-    ttk.Label(dlg, text="Бренд").grid(row=2, column=0, padx=6, pady=4, sticky="w")
+    ttk.Label(dlg, text="Назва").grid(row=2, column=0, padx=6, pady=4, sticky="w")
+    name_var = tk.StringVar(value=normalized_initial.get("name", ""))
+    ttk.Entry(dlg, textvariable=name_var, width=30).grid(row=2, column=1, padx=6, pady=4, sticky="ew")
+
+    ttk.Label(dlg, text="Бренд").grid(row=3, column=0, padx=6, pady=4, sticky="w")
     brand_var = tk.StringVar()
     brand_names = [b["name"] for b in brands]
     brand_combo = ttk.Combobox(dlg, textvariable=brand_var, state="readonly", values=brand_names)
-    brand_combo.grid(row=2, column=1, padx=6, pady=4, sticky="ew")
+    brand_combo.grid(row=3, column=1, padx=6, pady=4, sticky="ew")
 
-    ttk.Label(dlg, text="Головна категорія").grid(row=3, column=0, padx=6, pady=4, sticky="w")
+    ttk.Label(dlg, text="Головна категорія").grid(row=4, column=0, padx=6, pady=4, sticky="w")
     category_var = tk.StringVar()
     category_combo = ttk.Combobox(dlg, textvariable=category_var, values=[c["label"] for c in categories])
-    category_combo.grid(row=3, column=1, padx=6, pady=4, sticky="ew")
+    category_combo.grid(row=4, column=1, padx=6, pady=4, sticky="ew")
 
     def refresh_category_options(*_args):
         search = category_var.get().strip().lower()
@@ -3878,9 +3919,9 @@ def product_prompt(brands, categories, title: str, initial=None, settings: Setti
 
     category_combo.bind("<KeyRelease>", refresh_category_options)
 
-    ttk.Label(dlg, text="Додаткові категорії").grid(row=4, column=0, padx=6, pady=4, sticky="nw")
+    ttk.Label(dlg, text="Додаткові категорії").grid(row=5, column=0, padx=6, pady=4, sticky="nw")
     extras_frame = ttk.Frame(dlg)
-    extras_frame.grid(row=4, column=1, padx=6, pady=4, sticky="nsew")
+    extras_frame.grid(row=5, column=1, padx=6, pady=4, sticky="nsew")
     extras_frame.columnconfigure(0, weight=1)
     extras_frame.rowconfigure(1, weight=1)
     extras_search_var = tk.StringVar()
@@ -3913,14 +3954,14 @@ def product_prompt(brands, categories, title: str, initial=None, settings: Setti
     extras_search_var.trace_add("write", refresh_extra_list)
     refresh_extra_list()
 
-    dlg.rowconfigure(4, weight=1)
+    dlg.rowconfigure(5, weight=1)
 
-    ttk.Label(dlg, text="Одиниця").grid(row=5, column=0, padx=6, pady=4, sticky="w")
+    ttk.Label(dlg, text="Одиниця").grid(row=6, column=0, padx=6, pady=4, sticky="w")
     unit_var = tk.StringVar(value=normalized_initial.get("unit", "pcs"))
-    ttk.Entry(dlg, textvariable=unit_var, width=12).grid(row=5, column=1, padx=6, pady=4, sticky="w")
+    ttk.Entry(dlg, textvariable=unit_var, width=12).grid(row=6, column=1, padx=6, pady=4, sticky="w")
 
     is_active_var = tk.BooleanVar(value=normalized_initial.get("is_active", True))
-    ttk.Checkbutton(dlg, text="Активний", variable=is_active_var).grid(row=6, column=1, padx=6, pady=4, sticky="w")
+    ttk.Checkbutton(dlg, text="Активний", variable=is_active_var).grid(row=7, column=1, padx=6, pady=4, sticky="w")
 
     if initial:
         brand_combo.current(next((i for i, b in enumerate(brands) if b["id"] == normalized_initial["brand_id"]), 0))
@@ -3971,6 +4012,7 @@ def product_prompt(brands, categories, title: str, initial=None, settings: Setti
         selected = [filtered_extra_categories[i]["id"] for i in extras_box.curselection() if i < len(filtered_extra_categories)]
         result = (
             sku,
+            supplier_sku_var.get().strip(),
             name,
             brand_id,
             matched_category["id"],
@@ -3984,7 +4026,7 @@ def product_prompt(brands, categories, title: str, initial=None, settings: Setti
         dlg.destroy()
 
     btns = ttk.Frame(dlg)
-    btns.grid(row=7, column=0, columnspan=2, pady=8, sticky="e")
+    btns.grid(row=8, column=0, columnspan=2, pady=8, sticky="e")
     ttk.Button(btns, text="OK", command=on_ok).pack(side=tk.LEFT, padx=4)
     ttk.Button(btns, text="Скасувати", command=on_cancel).pack(side=tk.LEFT, padx=4)
     dlg.bind("<Return>", lambda e: on_ok())

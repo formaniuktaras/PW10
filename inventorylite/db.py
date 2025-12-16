@@ -884,8 +884,91 @@ def set_product_categories(product_id: int, category_id: int, additional_categor
             conn.execute(
                 "INSERT OR IGNORE INTO ProductCategoryLinks (product_id, category_id) VALUES (?,?)",
                 (product_id, cid),
-            )
+        )
         conn.commit()
+
+
+def bulk_update_products_is_active(conn: sqlite3.Connection, product_ids: list[int], is_active: int) -> int:
+    if not product_ids:
+        return 0
+    placeholders = ",".join("?" * len(product_ids))
+    conn.execute("BEGIN")
+    cur = conn.execute(
+        f"UPDATE Products SET is_active=? WHERE id IN ({placeholders})", (is_active, *product_ids)
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+def bulk_update_products_brand(conn: sqlite3.Connection, product_ids: list[int], brand_id: int) -> int:
+    if not product_ids:
+        return 0
+    placeholders = ",".join("?" * len(product_ids))
+    conn.execute("BEGIN")
+    cur = conn.execute(
+        f"UPDATE Products SET brand_id=? WHERE id IN ({placeholders})", (brand_id, *product_ids)
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+def bulk_update_products_category(conn: sqlite3.Connection, product_ids: list[int], category_id: int) -> int:
+    if not product_ids:
+        return 0
+    placeholders = ",".join("?" * len(product_ids))
+    conn.execute("BEGIN")
+    cur = conn.execute(
+        f"UPDATE Products SET category_id=? WHERE id IN ({placeholders})", (category_id, *product_ids)
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+def bulk_update_products_unit(conn: sqlite3.Connection, product_ids: list[int], unit: str) -> int:
+    if not product_ids:
+        return 0
+    placeholders = ",".join("?" * len(product_ids))
+    conn.execute("BEGIN")
+    cur = conn.execute(
+        f"UPDATE Products SET unit=? WHERE id IN ({placeholders})", (unit.strip() or "pcs", *product_ids)
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+def bulk_add_product_category_links(
+    conn: sqlite3.Connection, product_ids: list[int], category_ids: list[int]
+) -> int:
+    if not product_ids or not category_ids:
+        return 0
+    conn.execute("BEGIN")
+    inserted = 0
+    for pid in product_ids:
+        for cid in category_ids:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO ProductCategoryLinks (product_id, category_id) VALUES (?,?)", (pid, cid)
+            )
+            inserted += cur.rowcount
+    conn.commit()
+    return inserted
+
+
+def bulk_remove_product_category_links(
+    conn: sqlite3.Connection, product_ids: list[int], category_ids: list[int]
+) -> int:
+    if not product_ids or not category_ids:
+        return 0
+    conn.execute("BEGIN")
+    deleted = 0
+    for pid in product_ids:
+        placeholders = ",".join("?" * len(category_ids))
+        cur = conn.execute(
+            f"DELETE FROM ProductCategoryLinks WHERE product_id=? AND category_id IN ({placeholders})",
+            (pid, *category_ids),
+        )
+        deleted += cur.rowcount
+    conn.commit()
+    return deleted
 
 
 def get_product_additional_categories(product_id: int) -> List[int]:

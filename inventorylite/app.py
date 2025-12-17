@@ -1272,10 +1272,35 @@ class InventoryApp(tk.Tk):
             ("address", "Адреса", 200),
             ("note", "Нотатка", 200),
         ]
-        self.counterparty_table = TableFrame(self.counterparties_frame, columns)
-        self.counterparty_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-        self.counterparty_table.on_double_click(self.edit_counterparty)
-        self.counterparty_table.register_context_menu(self.edit_counterparty, self.delete_counterparty)
+
+        def make_table(parent: tk.Widget) -> TableFrame:
+            table = TableFrame(parent, columns)
+            table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+            table.on_double_click(self.edit_counterparty)
+            table.register_context_menu(self.edit_counterparty, self.delete_counterparty)
+            return table
+
+        self.counterparty_notebook = ttk.Notebook(self.counterparties_frame)
+        self.counterparty_notebook.pack(fill=tk.BOTH, expand=True)
+
+        supplier_tab = ttk.Frame(self.counterparty_notebook)
+        customer_tab = ttk.Frame(self.counterparty_notebook)
+        all_tab = ttk.Frame(self.counterparty_notebook)
+
+        self.counterparty_notebook.add(supplier_tab, text="Постачальники")
+        self.counterparty_notebook.add(customer_tab, text="Покупці")
+        self.counterparty_notebook.add(all_tab, text="Всі/Інші")
+
+        self.counterparty_tables = {
+            "suppliers": make_table(supplier_tab),
+            "customers": make_table(customer_tab),
+            "all": make_table(all_tab),
+        }
+        self.counterparty_tab_frames = {
+            "suppliers": supplier_tab,
+            "customers": customer_tab,
+            "all": all_tab,
+        }
 
         btns = ttk.Frame(self.counterparties_frame)
         btns.pack(pady=4)
@@ -1283,8 +1308,23 @@ class InventoryApp(tk.Tk):
         ttk.Button(btns, text="Змінити", command=self.edit_counterparty).pack(side=tk.LEFT, padx=4)
         ttk.Button(btns, text="Видалити", command=self.delete_counterparty).pack(side=tk.LEFT, padx=4)
 
+    def get_active_counterparty_selection(self) -> tuple[str, TableFrame | None, int | None]:
+        if not hasattr(self, "counterparty_notebook"):
+            return "suppliers", None, None
+        current_tab = self.counterparty_notebook.select()
+        active_key = "suppliers"
+        for key, frame in self.counterparty_tab_frames.items():
+            if str(frame) == current_tab:
+                active_key = key
+                break
+        table = self.counterparty_tables.get(active_key)
+        selected_id = table.selected_id() if table else None
+        return active_key, table, selected_id
+
     def add_counterparty(self) -> None:
-        values = counterparty_prompt()
+        active_key, _, _ = self.get_active_counterparty_selection()
+        default_types = {"suppliers": "supplier", "customers": "customer", "all": "other"}
+        values = counterparty_prompt(default_type=default_types.get(active_key))
         if not values:
             return
         try:
@@ -1297,7 +1337,7 @@ class InventoryApp(tk.Tk):
             show_error("Контрагенти", "Не вдалося додати контрагента.")
 
     def edit_counterparty(self) -> None:
-        counterparty_id = self.counterparty_table.selected_id()
+        _, _, counterparty_id = self.get_active_counterparty_selection()
         if not counterparty_id:
             show_error("Контрагенти", "Оберіть контрагента.")
             return
@@ -1305,7 +1345,9 @@ class InventoryApp(tk.Tk):
         if not rows:
             return
         c = rows[0]
-        values = counterparty_prompt((c["name"], c["type"], c["phone"], c["email"], c["address"], c["note"]))
+        values = counterparty_prompt(
+            (c["name"], c["type"], c["phone"], c["email"], c["address"], c["note"])
+        )
         if not values:
             return
         try:
@@ -1318,7 +1360,7 @@ class InventoryApp(tk.Tk):
             show_error("Контрагенти", "Не вдалося змінити контрагента.")
 
     def delete_counterparty(self) -> None:
-        counterparty_id = self.counterparty_table.selected_id()
+        _, _, counterparty_id = self.get_active_counterparty_selection()
         if not counterparty_id:
             show_error("Контрагенти", "Оберіть контрагента для видалення.")
             return
@@ -3429,20 +3471,30 @@ class InventoryApp(tk.Tk):
             "both": "Постачальник/Покупець",
             "other": "Інший",
         }
-        self.counterparty_table.set_rows(
-            [
-                {
-                    "id": r["id"],
-                    "name": r["name"],
-                    "type": type_labels.get(r["type"], r["type"]),
-                    "phone": r["phone"] or "",
-                    "email": r["email"] or "",
-                    "address": r["address"] or "",
-                    "note": r["note"] or "",
-                }
-                for r in rows
-            ]
-        )
+
+        suppliers: list[dict] = []
+        customers: list[dict] = []
+        all_rows: list[dict] = []
+
+        for r in rows:
+            mapped = {
+                "id": r["id"],
+                "name": r["name"],
+                "type": type_labels.get(r["type"], r["type"]),
+                "phone": r["phone"] or "",
+                "email": r["email"] or "",
+                "address": r["address"] or "",
+                "note": r["note"] or "",
+            }
+            all_rows.append(mapped)
+            if r["type"] in ("supplier", "both"):
+                suppliers.append(mapped)
+            if r["type"] in ("customer", "both"):
+                customers.append(mapped)
+
+        self.counterparty_tables["suppliers"].set_rows(suppliers)
+        self.counterparty_tables["customers"].set_rows(customers)
+        self.counterparty_tables["all"].set_rows(all_rows)
 
     def refresh_warehouses(self) -> None:
         rows = db.list_warehouses()
@@ -5083,7 +5135,7 @@ def select_category_dialog(title: str, options: list[tuple[Optional[int], str]])
     return result
 
 
-def counterparty_prompt(initial=None):
+def counterparty_prompt(initial=None, default_type: str | None = None):
     dlg = tk.Toplevel()
     dlg.title("Контрагент")
     dlg.grab_set()
@@ -5103,6 +5155,9 @@ def counterparty_prompt(initial=None):
     if initial:
         inv_map = {v: k for k, v in type_values.items()}
         type_combo.set(inv_map.get(initial[1], types[0]))
+    elif default_type:
+        inv_map = {v: k for k, v in type_values.items()}
+        type_combo.set(inv_map.get(default_type, types[0]))
     else:
         type_combo.current(0)
 

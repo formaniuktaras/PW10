@@ -1353,6 +1353,11 @@ def list_suppliers() -> list[sqlite3.Row]:
     with get_connection() as conn:
         return list(conn.execute(query))
 
+def list_customers() -> list[sqlite3.Row]:
+    query = "SELECT id, name FROM Counterparties WHERE type IN ('customer','both') ORDER BY name"
+    with get_connection() as conn:
+        return list(conn.execute(query))
+
 
 def add_counterparty(
     name: str, ctype: str, phone: str = "", email: str = "", address: str = "", note: str = ""

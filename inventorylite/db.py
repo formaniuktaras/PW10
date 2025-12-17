@@ -111,6 +111,18 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_psc_product
                 ON ProductSupplierCodes(product_id);
 
+            CREATE TABLE IF NOT EXISTS ProductBarcodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                product_id INTEGER NOT NULL,
+                code TEXT NOT NULL,
+                note TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (product_id) REFERENCES Products(id) ON DELETE CASCADE,
+                UNIQUE(code)
+            );
+            CREATE INDEX IF NOT EXISTS idx_pb_product_id ON ProductBarcodes(product_id);
+            CREATE INDEX IF NOT EXISTS idx_pb_code_lower ON ProductBarcodes(lower(code));
+
             CREATE TABLE IF NOT EXISTS AdditionalProductCategories (
                 product_id INTEGER NOT NULL,
                 category_id INTEGER NOT NULL,
@@ -322,6 +334,18 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             ON ProductSupplierCodes(supplier_id, lower(supplier_sku));
         CREATE INDEX IF NOT EXISTS idx_psc_product
             ON ProductSupplierCodes(product_id);
+
+        CREATE TABLE IF NOT EXISTS ProductBarcodes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id INTEGER NOT NULL,
+            code TEXT NOT NULL,
+            note TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (product_id) REFERENCES Products(id) ON DELETE CASCADE,
+            UNIQUE(code)
+        );
+        CREATE INDEX IF NOT EXISTS idx_pb_product_id ON ProductBarcodes(product_id);
+        CREATE INDEX IF NOT EXISTS idx_pb_code_lower ON ProductBarcodes(lower(code));
         """
     )
 
@@ -810,8 +834,11 @@ def list_products(
 
     if search:
         term = f"%{search.lower()}%"
-        where_clauses.append("(lower(p.sku) LIKE ? OR lower(p.name) LIKE ? OR lower(p.supplier_sku) LIKE ?)")
-        params.extend([term, term, term])
+        where_clauses.append(
+            "(lower(p.sku) LIKE ? OR lower(p.name) LIKE ? OR lower(p.supplier_sku) LIKE ?"
+            " OR EXISTS (SELECT 1 FROM ProductBarcodes pb WHERE pb.product_id=p.id AND lower(pb.code) LIKE ?))"
+        )
+        params.extend([term, term, term, term])
 
     where = " WHERE " + " AND ".join(where_clauses) if where_clauses else ""
     query = (
@@ -939,6 +966,73 @@ def replace_product_supplier_codes(product_id: int, codes: list[dict]) -> None:
                 sanitized,
             )
         conn.commit()
+
+
+def list_product_barcodes(product_id: int) -> list[sqlite3.Row]:
+    query = "SELECT id, code, note FROM ProductBarcodes WHERE product_id=? ORDER BY id"
+    with get_connection() as conn:
+        return list(conn.execute(query, (product_id,)))
+
+
+def replace_product_barcodes(product_id: int, codes: list[dict]) -> None:
+    unique_codes = set()
+    sanitized: list[tuple[int, str, str | None]] = []
+    for code in codes or []:
+        raw_code = (code.get("code") or "").strip()
+        if not raw_code:
+            continue
+        normalized = raw_code.lower()
+        if normalized in unique_codes:
+            continue
+        unique_codes.add(normalized)
+        note = (code.get("note") or "").strip()
+        sanitized.append((product_id, raw_code, note or None))
+
+    with get_connection() as conn:
+        conn.execute("BEGIN")
+        conn.execute("DELETE FROM ProductBarcodes WHERE product_id=?", (product_id,))
+        if sanitized:
+            conn.executemany(
+                "INSERT INTO ProductBarcodes (product_id, code, note) VALUES (?,?,?)",
+                sanitized,
+            )
+        conn.commit()
+
+
+def find_product_by_scan_code(code: str, barcode_prefix: str = "") -> Optional[sqlite3.Row]:
+    clean_code = (code or "").strip()
+    if not clean_code:
+        return None
+    prefix = (barcode_prefix or "").strip()
+    lower_code = clean_code.lower()
+
+    product_query = (
+        "SELECT id, sku, supplier_sku, name, brand_id, category_id, unit, is_active FROM Products WHERE lower(sku)=? LIMIT 1"
+    )
+
+    with get_connection() as conn:
+        row = conn.execute(product_query, (lower_code,)).fetchone()
+        if row:
+            return row
+
+        if prefix and lower_code.startswith(prefix.lower()):
+            stripped = clean_code[len(prefix) :]
+            if stripped:
+                row = conn.execute(product_query, (stripped.lower(),)).fetchone()
+                if row:
+                    return row
+
+        alias_row = conn.execute(
+            """
+            SELECT p.id, p.sku, p.supplier_sku, p.name, p.brand_id, p.category_id, p.unit, p.is_active
+            FROM ProductBarcodes pb
+            JOIN Products p ON p.id = pb.product_id
+            WHERE lower(pb.code)=?
+            LIMIT 1
+            """,
+            (lower_code,),
+        ).fetchone()
+        return alias_row
 
 
 def get_product_by_supplier_code(supplier_id: int, supplier_sku: str) -> sqlite3.Row | None:

@@ -25,6 +25,7 @@ from typing import Optional
 from openpyxl import load_workbook
 
 import db
+import labels
 from utils import (
     APP_NAME,
     VERSION,
@@ -41,6 +42,7 @@ from utils import (
     get_base_currency_name,
     get_base_currency_decimals,
     open_data_folder,
+    open_file,
     restore_all_data,
     show_error,
     backup_database,
@@ -817,7 +819,9 @@ class InventoryApp(tk.Tk):
         top.pack(fill=tk.X, padx=8, pady=4)
         ttk.Label(top, text="Пошук:").pack(side=tk.LEFT)
         self.product_search_var = tk.StringVar()
-        ttk.Entry(top, textvariable=self.product_search_var, width=30).pack(side=tk.LEFT, padx=4)
+        search_entry = ttk.Entry(top, textvariable=self.product_search_var, width=30)
+        search_entry.pack(side=tk.LEFT, padx=4)
+        search_entry.bind("<Return>", self.on_product_search_enter)
         ttk.Label(top, text="Категорія:").pack(side=tk.LEFT, padx=6)
         self.product_category_filter_var = tk.StringVar()
         self.product_category_filter_combo = ttk.Combobox(
@@ -832,6 +836,7 @@ class InventoryApp(tk.Tk):
 
         columns = [
             ("sku", "SKU", 120),
+            ("barcode", "Штрихкод", 160),
             ("supplier_sku", "Артикул постачальника", 170),
             ("name", "Назва", 230),
             ("brand", "Бренд", 140),
@@ -871,13 +876,28 @@ class InventoryApp(tk.Tk):
             include_subtree=bool(self.include_subcategories_var.get()),
         )
 
+    def on_product_search_enter(self, _event=None) -> None:
+        value = self.product_search_var.get().strip()
+        prefix = _sanitize_barcode_prefix(self.settings.get("defaults", "product", "barcode_prefix") or "")
+        product = db.find_product_by_scan_code(value, prefix)
+        if product:
+            self.product_search_var.set("")
+            self.product_category_filter_var.set("Усі категорії")
+            self.refresh_products()
+            pid = str(product["id"])
+            self.product_table.tree.selection_set(pid)
+            self.product_table.tree.focus(pid)
+            self.product_table.tree.see(pid)
+            return
+        self.on_search_products()
+
     def add_product(self) -> None:
         brands = db.list_brands()
         categories = self.flatten_categories()
         values = product_prompt(brands, categories, "Новий товар", settings=self.settings)
         if not values:
             return
-        sku, supplier_sku_legacy, name, brand_id, category_id, unit, is_active, extras, supplier_codes = values
+        sku, supplier_sku_legacy, name, brand_id, category_id, unit, is_active, extras, supplier_codes, barcodes = values
         try:
             effective_supplier_sku = supplier_sku_legacy or (
                 supplier_codes[0]["supplier_sku"] if len(supplier_codes) == 1 else None
@@ -886,6 +906,8 @@ class InventoryApp(tk.Tk):
             db.set_product_categories(product_id, category_id, extras)
             if supplier_codes:
                 db.replace_product_supplier_codes(product_id, supplier_codes)
+            if barcodes:
+                db.replace_product_barcodes(product_id, barcodes)
             self.refresh_products()
         except sqlite3.IntegrityError as exc:
             if "ProductSupplierCodes" in str(exc):
@@ -893,6 +915,8 @@ class InventoryApp(tk.Tk):
                     "Товари",
                     "Артикул постачальника вже прив’язаний до іншого товару для цього постачальника.",
                 )
+            elif "ProductBarcodes" in str(exc) or "UNIQUE" in str(exc):
+                show_error("Товари", "Цей штрихкод вже прив’язаний до іншого товару.")
             else:
                 show_error("Товари", "SKU або назва вже існує.")
         except Exception:
@@ -917,6 +941,10 @@ class InventoryApp(tk.Tk):
             }
             for row in db.list_product_supplier_codes(product_id)
         ]
+        barcodes = [
+            {"code": row["code"], "note": row["note"] or ""}
+            for row in db.list_product_barcodes(product_id)
+        ]
         values = product_prompt(
             brands,
             categories,
@@ -931,16 +959,18 @@ class InventoryApp(tk.Tk):
                 bool(product["is_active"]),
                 db.get_product_additional_categories(product_id),
                 supplier_codes,
+                barcodes,
             ),
             settings=self.settings,
         )
         if not values:
             return
-        sku, supplier_sku_legacy, name, brand_id, category_id, unit, is_active, extras, supplier_codes = values
+        sku, supplier_sku_legacy, name, brand_id, category_id, unit, is_active, extras, supplier_codes, barcodes = values
         try:
             db.update_product(product_id, sku, name, brand_id, category_id, unit, is_active, supplier_sku_legacy)
             db.set_product_categories(product_id, category_id, extras)
             db.replace_product_supplier_codes(product_id, supplier_codes)
+            db.replace_product_barcodes(product_id, barcodes)
             self.refresh_products()
         except sqlite3.IntegrityError as exc:
             if "ProductSupplierCodes" in str(exc):
@@ -948,6 +978,8 @@ class InventoryApp(tk.Tk):
                     "Товари",
                     "Артикул постачальника вже прив’язаний до іншого товару для цього постачальника.",
                 )
+            elif "ProductBarcodes" in str(exc) or "UNIQUE" in str(exc):
+                show_error("Товари", "Цей штрихкод вже прив’язаний до іншого товару.")
             else:
                 show_error("Товари", "SKU або назва вже існує.")
         except Exception:
@@ -3446,11 +3478,13 @@ class InventoryApp(tk.Tk):
                 break
 
         rows = db.list_products(search, category_id, self.include_subcategories_var.get())
+        prefix = _sanitize_barcode_prefix(self.settings.get("defaults", "product", "barcode_prefix") or "")
         self.product_table.set_rows(
             [
                 {
                     "id": r["id"],
                     "sku": r["sku"],
+                    "barcode": f"{prefix}{r['sku']}",
                     "supplier_sku": r["supplier_sku"] or "",
                     "name": r["name"],
                     "brand": r["brand"],
@@ -4571,6 +4605,13 @@ def _find_index_by_name(items: list[str], target: str | None) -> int | None:
     return next((i for i, name in enumerate(items) if str(name).lower() == target_lower), None)
 
 
+def _sanitize_barcode_prefix(prefix: str) -> str:
+    cleaned = (prefix or "").strip()
+    if not cleaned:
+        return ""
+    return re.sub(r"\s+", "-", cleaned)
+
+
 def product_prompt(brands, categories, title: str, initial=None, settings: Settings | None = None):
     base_initial = {
         "sku": "",
@@ -4582,6 +4623,7 @@ def product_prompt(brands, categories, title: str, initial=None, settings: Setti
         "is_active": True,
         "extras": [],
         "supplier_codes": [],
+        "barcodes": [],
     }
 
     if isinstance(initial, dict):
@@ -4600,6 +4642,7 @@ def product_prompt(brands, categories, title: str, initial=None, settings: Setti
                 "is_active": bool(initial[6]) if len(initial) > 6 else True,
                 "extras": initial[7] if len(initial) > 7 else [],
                 "supplier_codes": initial[8] if len(initial) > 8 else [],
+                "barcodes": initial[9] if len(initial) > 9 else [],
             }
         )
     else:
@@ -4699,6 +4742,14 @@ def product_prompt(brands, categories, title: str, initial=None, settings: Setti
             )
         except (TypeError, ValueError):
             continue
+
+    barcode_prefix = _sanitize_barcode_prefix((settings.get("defaults", "product", "barcode_prefix") if settings else "") or "")
+    barcodes_state: list[dict] = []
+    for code in normalized_initial.get("barcodes") or []:
+        raw = (code.get("code") or "").strip()
+        if not raw:
+            continue
+        barcodes_state.append({"code": raw, "note": (code.get("note") or "").strip()})
 
     supplier_codes_frame = ttk.LabelFrame(dlg, text="Артикули постачальників")
     supplier_codes_frame.grid(row=8, column=0, columnspan=2, padx=6, pady=4, sticky="nsew")
@@ -4816,6 +4867,79 @@ def product_prompt(brands, categories, title: str, initial=None, settings: Setti
         supplier_combo.current(0)
     refresh_supplier_codes_tree()
 
+    barcodes_frame = ttk.LabelFrame(dlg, text="Додаткові штрихкоди")
+    barcodes_frame.grid(row=9, column=0, columnspan=2, padx=6, pady=4, sticky="nsew")
+    barcodes_frame.columnconfigure(1, weight=1)
+    dlg.rowconfigure(9, weight=1)
+
+    def _main_barcode_value() -> str:
+        return f"{barcode_prefix}{sku_var.get().strip()}"
+
+    main_barcode_label = ttk.Label(barcodes_frame, text=f"Основний (SKU): {_main_barcode_value()}")
+    main_barcode_label.grid(row=0, column=0, columnspan=3, padx=4, pady=2, sticky="w")
+
+    def _update_main_barcode(*_args) -> None:
+        main_barcode_label.configure(text=f"Основний (SKU): {_main_barcode_value()}")
+
+    sku_var.trace_add("write", _update_main_barcode)
+
+    ttk.Label(barcodes_frame, text="Штрихкод:").grid(row=1, column=0, padx=4, pady=2, sticky="w")
+    barcode_code_var = tk.StringVar()
+    ttk.Entry(barcodes_frame, textvariable=barcode_code_var, width=22).grid(row=1, column=1, padx=4, pady=2, sticky="ew")
+
+    ttk.Label(barcodes_frame, text="Нотатка:").grid(row=2, column=0, padx=4, pady=2, sticky="w")
+    barcode_note_var = tk.StringVar()
+    ttk.Entry(barcodes_frame, textvariable=barcode_note_var, width=22).grid(row=2, column=1, padx=4, pady=2, sticky="ew")
+
+    def refresh_barcode_tree() -> None:
+        barcode_tree.delete(*barcode_tree.get_children())
+        for idx, code in enumerate(barcodes_state):
+            barcode_tree.insert("", "end", iid=str(idx), values=(code.get("code", ""), code.get("note", "")))
+
+    def add_barcode() -> None:
+        code_val = barcode_code_var.get().strip()
+        if not code_val:
+            messagebox.showerror("Штрихкоди", "Введіть штрихкод")
+            return
+        normalized = code_val.lower()
+        if any((c.get("code") or "").lower() == normalized for c in barcodes_state):
+            messagebox.showerror("Штрихкоди", "Такий штрихкод вже додано")
+            return
+        barcodes_state.append({"code": code_val, "note": barcode_note_var.get().strip()})
+        refresh_barcode_tree()
+        barcode_code_var.set("")
+        barcode_note_var.set("")
+
+    def delete_barcode() -> None:
+        selection = barcode_tree.selection()
+        if not selection:
+            return
+        idx = int(selection[0])
+        if 0 <= idx < len(barcodes_state):
+            barcodes_state.pop(idx)
+        refresh_barcode_tree()
+
+    ttk.Button(barcodes_frame, text="Додати", command=add_barcode).grid(row=1, column=2, padx=4, pady=2, sticky="w")
+
+    barcode_tree = ttk.Treeview(barcodes_frame, columns=("code", "note"), show="headings", selectmode="browse", height=5)
+    barcode_tree.heading("code", text="Штрихкод")
+    barcode_tree.heading("note", text="Нотатка")
+    barcode_tree.column("code", width=180, anchor="w")
+    barcode_tree.column("note", width=180, anchor="w")
+    barcode_tree.grid(row=3, column=0, columnspan=3, padx=4, pady=4, sticky="nsew")
+    barcodes_frame.rowconfigure(3, weight=1)
+    barcodes_frame.columnconfigure(0, weight=1)
+    barcodes_frame.columnconfigure(1, weight=1)
+    barcode_scroll = ttk.Scrollbar(barcodes_frame, orient="vertical", command=barcode_tree.yview)
+    barcode_tree.configure(yscrollcommand=barcode_scroll.set)
+    barcode_scroll.grid(row=3, column=3, sticky="ns")
+
+    ttk.Button(barcodes_frame, text="Видалити вибраний", command=delete_barcode).grid(
+        row=4, column=0, columnspan=3, padx=4, pady=(0, 4), sticky="w"
+    )
+
+    refresh_barcode_tree()
+
     if initial:
         brand_combo.current(next((i for i, b in enumerate(brands) if b["id"] == normalized_initial["brand_id"]), 0))
         category_var.set(next((c["label"] for c in categories if c["id"] == normalized_initial["category_id"]), ""))
@@ -4873,6 +4997,7 @@ def product_prompt(brands, categories, title: str, initial=None, settings: Setti
             bool(is_active_var.get()),
             selected,
             list(supplier_codes_state),
+            list(barcodes_state),
         )
         dlg.destroy()
 
@@ -4880,7 +5005,7 @@ def product_prompt(brands, categories, title: str, initial=None, settings: Setti
         dlg.destroy()
 
     btns = ttk.Frame(dlg)
-    btns.grid(row=9, column=0, columnspan=2, pady=8, sticky="e")
+    btns.grid(row=10, column=0, columnspan=2, pady=8, sticky="e")
     ttk.Button(btns, text="OK", command=on_ok).pack(side=tk.LEFT, padx=4)
     ttk.Button(btns, text="Скасувати", command=on_cancel).pack(side=tk.LEFT, padx=4)
     dlg.bind("<Return>", lambda e: on_ok())
@@ -5056,7 +5181,85 @@ def open_products_bulk_actions_dialog(parent, db_conn, table_frame) -> None:
         row=1, column=2, padx=6, pady=4, sticky="n"
     )
 
-    ttk.Button(dlg, text="Закрити", command=close_dialog).grid(row=6, column=0, columnspan=3, pady=8)
+    labels_frame = ttk.LabelFrame(dlg, text="Етикетки (Code128)")
+    labels_frame.grid(row=6, column=0, columnspan=3, padx=8, pady=4, sticky="ew")
+    ttk.Label(labels_frame, text="Шаблон:").pack(side=tk.LEFT, padx=4, pady=4)
+    template_var = tk.StringVar(value="A4_3x8_70x35")
+    ttk.Combobox(
+        labels_frame, textvariable=template_var, state="readonly", values=["A4_3x8_70x35", "THERMAL_58x40"], width=18
+    ).pack(side=tk.LEFT, padx=4, pady=4)
+
+    ttk.Label(labels_frame, text="К-сть етикеток на товар:").pack(side=tk.LEFT, padx=4, pady=4)
+    qty_var = tk.StringVar(value="1")
+    ttk.Spinbox(labels_frame, from_=1, to=999, textvariable=qty_var, width=5).pack(side=tk.LEFT, padx=4, pady=4)
+
+    include_aliases_var = tk.BooleanVar(value=False)
+    ttk.Checkbutton(labels_frame, text="Друкувати також додаткові штрихкоди (аліаси)", variable=include_aliases_var).pack(
+        side=tk.LEFT, padx=4, pady=4
+    )
+
+    def generate_labels() -> None:
+        try:
+            qty_each = int(qty_var.get())
+        except ValueError:
+            show_error("Етикетки", "Вкажіть кількість етикеток числом")
+            return
+        if qty_each <= 0:
+            show_error("Етикетки", "Кількість має бути більшою за 0")
+            return
+
+        file_path = filedialog.asksaveasfilename(
+            title="Файл PDF з етикетками",
+            defaultextension=".pdf",
+            filetypes=[("PDF", "*.pdf"), ("Усі файли", "*.*")],
+            initialdir=str(parent.default_workdir()),
+        )
+        if not file_path:
+            return
+
+        try:
+            placeholders = ",".join("?" * len(product_ids))
+            rows = db_conn.execute(
+                f"SELECT id, sku, name FROM Products WHERE id IN ({placeholders})",
+                tuple(product_ids),
+            ).fetchall()
+            if not rows:
+                show_error("Етикетки", "Не знайдено жодного товару")
+                return
+            alias_map: dict[int, list[str]] = defaultdict(list)
+            if include_aliases_var.get():
+                for alias_row in db_conn.execute(
+                    f"SELECT product_id, code FROM ProductBarcodes WHERE product_id IN ({placeholders})",
+                    tuple(product_ids),
+                ).fetchall():
+                    alias_map[int(alias_row["product_id"])].append(alias_row["code"])
+
+            prefix = _sanitize_barcode_prefix(parent.settings.get("defaults", "product", "barcode_prefix") or "")
+            items = [
+                {
+                    "product_id": row["id"],
+                    "sku": row["sku"],
+                    "name": row["name"],
+                    "aliases": alias_map.get(int(row["id"]), []),
+                }
+                for row in rows
+            ]
+            labels.generate_product_labels_pdf(
+                Path(file_path),
+                items,
+                barcode_prefix=prefix,
+                qty_each=qty_each,
+                template=template_var.get() or "A4_3x8_70x35",
+                include_aliases=bool(include_aliases_var.get()),
+            )
+            open_file(Path(file_path))
+        except Exception:
+            logging.exception("Labels generation error")
+            show_error("Етикетки", "Не вдалося згенерувати етикетки")
+
+    ttk.Button(labels_frame, text="Згенерувати PDF...", command=generate_labels).pack(side=tk.LEFT, padx=6, pady=4)
+
+    ttk.Button(dlg, text="Закрити", command=close_dialog).grid(row=7, column=0, columnspan=3, pady=8)
     dlg.protocol("WM_DELETE_WINDOW", close_dialog)
 
 def category_prompt(title: str, initial=None):
@@ -6220,6 +6423,18 @@ class SettingsDialog(tk.Toplevel):
             row=4, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 4)
         )
 
+        barcode_prefix = _sanitize_barcode_prefix(self.app.settings.get("defaults", "product", "barcode_prefix") or "")
+        barcode_prefix_var = self._add_var("defaults.product.barcode_prefix", tk.StringVar(value=barcode_prefix))
+        ttk.Label(product_frame, text="Префікс штрихкоду (додається перед SKU):").grid(
+            row=5, column=0, sticky="w", padx=6, pady=4
+        )
+        ttk.Entry(product_frame, textvariable=barcode_prefix_var, width=30).grid(
+            row=5, column=1, sticky="w", padx=6, pady=4
+        )
+        ttk.Label(product_frame, text="Залиште порожнім — без префікса (немає).").grid(
+            row=6, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 8)
+        )
+
         currency_frame = ttk.LabelFrame(self.defaults_tab, text="Валюти")
         currency_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
 
@@ -6428,6 +6643,8 @@ class SettingsDialog(tk.Toplevel):
     def save(self) -> None:
         for path, var in self.vars.items():
             value = var.get()
+            if path == "defaults.product.barcode_prefix":
+                value = _sanitize_barcode_prefix(str(value))
             keys = path.split(".")
             self.app.settings.set(value, *keys)
         base_code = str(self.vars.get("defaults.currency.base_code", tk.StringVar()).get()).strip().upper()

@@ -70,15 +70,16 @@ DEFAULT_SETTINGS = {
     },
     "sales_import": {"templates": {}, "last_template": ""},
     "purchase_import": {"templates": {}, "last_template": ""},
-    "defaults": {
-        "product": {
-            "unit": "pcs",
-            "brand": "",
-            "category": "",
-        },
-        "currency": {
-            "base_code": BASE_CURRENCY,
-            "base_name": BASE_CURRENCY_NAME,
+        "defaults": {
+            "product": {
+                "unit": "pcs",
+                "brand": "",
+                "category": "",
+                "barcode_prefix": "",
+            },
+            "currency": {
+                "base_code": BASE_CURRENCY,
+                "base_name": BASE_CURRENCY_NAME,
             "base_decimals": BASE_CURRENCY_DECIMALS,
         },
     },
@@ -529,5 +530,19 @@ def open_data_folder(path: Path) -> None:
             os.system(f"xdg-open '{path}' >/dev/null 2>&1 &")
     except Exception as exc:  # pragma: no cover - GUI feedback
         show_error("Open folder", str(exc))
+
+
+def open_file(path: Path) -> None:
+    """Open a file with the default system handler."""
+
+    try:
+        if sys.platform.startswith("win"):
+            os.startfile(str(path))  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            os.system(f"open '{path}'")
+        else:
+            os.system(f"xdg-open '{path}' >/dev/null 2>&1 &")
+    except Exception as exc:  # pragma: no cover - GUI feedback
+        show_error("Відкриття файлу", str(exc))
 
 

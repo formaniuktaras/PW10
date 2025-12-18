@@ -95,6 +95,36 @@ class TableFrame(ttk.Frame):
         self.tree.bind("<Button-3>", show_menu)
         self.context_menu = menu
 
+    def register_context_menu_actions(self, actions: list[tuple[str, Callable[[], None] | None]]) -> None:
+        """
+        Register a custom context menu for the table.
+
+        actions: list of (label, callback). If callback is None or label == '---', a separator is added.
+        On right-click the row under cursor becomes selected and the menu is shown. Clicking on empty
+        space does not open the menu.
+        """
+
+        menu = tk.Menu(self, tearoff=0)
+        for label, callback in actions:
+            if callback is None or label == "---":
+                menu.add_separator()
+                continue
+            menu.add_command(label=label, command=callback)
+
+        def show_menu(event: tk.Event) -> None:
+            row_id = self.tree.identify_row(event.y)
+            if not row_id:
+                return
+            self.tree.selection_set(row_id)
+            self.tree.focus(row_id)
+            try:
+                menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                menu.grab_release()
+
+        self.tree.bind("<Button-3>", show_menu)
+        self.context_menu = menu
+
 
 class DatePicker(ttk.Frame):
     """Date picker with a popup calendar."""

@@ -234,6 +234,7 @@ class TemplateManagerDialog:
         tpl["code"] = new_code
         if counter > 1:
             tpl["title"] = f"{tpl.get('title', 'Шаблон')} ({new_code})"
+        tpl["is_default"] = 0
         payload = {"template": tpl, "elements": data.get("elements") or []}
         try:
             db.create_label_template(payload)
@@ -401,6 +402,7 @@ class TemplateEditorDialog:
             "font_name": tk.StringVar(value="Helvetica"),
             "font_size": tk.StringVar(value="9"),
             "max_chars": tk.StringVar(value=""),
+            "wrap": tk.BooleanVar(value=False),
             "options.text_template": tk.StringVar(value="{code}"),
             "options.bar_height_mm": tk.StringVar(value="20"),
             "options.human_readable": tk.BooleanVar(value=True),
@@ -413,7 +415,13 @@ class TemplateEditorDialog:
             entry.grid(row=row, column=1, padx=4, pady=2, sticky="w")
             return entry
 
-        ef("Тип", "element_type", 0)
+        ttk.Label(form, text="Тип").grid(row=0, column=0, padx=4, pady=2, sticky="w")
+        ttk.Combobox(
+            form,
+            textvariable=self.element_vars["element_type"],
+            values=["text", "barcode", "rect", "line"],
+            state="readonly",
+        ).grid(row=0, column=1, padx=4, pady=2, sticky="w")
         ef("Поле", "field_key", 1)
         ef("X, мм", "x_mm", 2)
         ef("Y, мм", "y_mm", 3)
@@ -427,17 +435,20 @@ class TemplateEditorDialog:
         ef("Шрифт", "font_name", 8)
         ef("Розмір", "font_size", 9)
         ef("Макс. символів", "max_chars", 10)
-        ef("Шаблон тексту", "options.text_template", 11, width=24)
-        ef("Висота штрихкоду", "options.bar_height_mm", 12)
+        ttk.Checkbutton(form, text="Перенос рядків (wrap)", variable=self.element_vars["wrap"]).grid(
+            row=11, column=1, padx=4, pady=2, sticky="w"
+        )
+        ef("Шаблон тексту", "options.text_template", 12, width=24)
+        ef("Висота штрихкоду", "options.bar_height_mm", 13)
         ttk.Checkbutton(form, text="Людське читання", variable=self.element_vars["options.human_readable"]).grid(
-            row=13, column=1, padx=4, pady=2, sticky="w"
+            row=14, column=1, padx=4, pady=2, sticky="w"
         )
         ttk.Checkbutton(form, text="Активний", variable=self.element_vars["is_active"]).grid(
-            row=14, column=1, padx=4, pady=2, sticky="w"
+            row=15, column=1, padx=4, pady=2, sticky="w"
         )
 
         ttk.Button(form, text="Оновити елемент", command=self.update_selected_element).grid(
-            row=15, column=0, columnspan=2, pady=6
+            row=16, column=0, columnspan=2, pady=6
         )
 
         # Preview
@@ -502,6 +513,7 @@ class TemplateEditorDialog:
             "font_name": el.get("font_name", "Helvetica"),
             "font_size": el.get("font_size", 9),
             "max_chars": el.get("max_chars", ""),
+            "wrap": el.get("wrap", 0),
             "options.text_template": options.get("text_template", "{code}"),
             "options.bar_height_mm": options.get("bar_height_mm", 20),
             "options.human_readable": bool(options.get("human_readable", True)),
@@ -601,6 +613,7 @@ class TemplateEditorDialog:
                     "font_name": self.element_vars["font_name"].get() or "Helvetica",
                     "font_size": float(self.element_vars["font_size"].get() or 9),
                     "max_chars": int(self.element_vars["max_chars"].get() or 0) or None,
+                    "wrap": 1 if self.element_vars["wrap"].get() else 0,
                     "is_active": int(bool(self.element_vars["is_active"].get())),
                 }
             )

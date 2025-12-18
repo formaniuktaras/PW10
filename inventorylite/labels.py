@@ -7,6 +7,7 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.units import mm
 from reportlab.graphics.barcode import code128
 from reportlab.lib.pagesizes import A4
+from reportlab.lib.utils import simpleSplit
 import logging
 import datetime
 
@@ -50,44 +51,81 @@ def _apply_text_template(template: str, context: dict) -> str:
         return template
 
 
-def _draw_element(c: canvas.Canvas, element: dict, origin_x: float, origin_y: float, context: dict, scale_x: float, scale_y: float) -> None:
+def _draw_element(c: canvas.Canvas, element: dict, origin_x: float, origin_y: float, context: dict) -> None:
     etype = element.get("element_type")
     options = element.get("options") or {}
-    x = origin_x + element.get("x_mm", 0) * mm * scale_x
-    y = origin_y + element.get("y_mm", 0) * mm * scale_y
-    width = element.get("w_mm", 0) * mm * scale_x
-    height = element.get("h_mm", 0) * mm * scale_y
+    x = origin_x + element.get("x_mm", 0) * mm
+    y = origin_y + element.get("y_mm", 0) * mm
+    width = element.get("w_mm", 0) * mm
+    height = element.get("h_mm", 0) * mm
+    rotation_deg = float(element.get("rotation_deg") or 0)
+
+    def _with_rotation(draw_fn):
+        if rotation_deg:
+            c.saveState()
+            c.translate(x + width / 2, y + height / 2)
+            c.rotate(rotation_deg)
+            draw_fn(-width / 2, -height / 2)
+            c.restoreState()
+        else:
+            draw_fn(x, y)
     if etype == "barcode":
         code_value = str(context.get(element.get("field_key") or "code") or "")
-        bar_height = (options.get("bar_height_mm") or (height / mm - 2)) * mm * scale_y
-        try:
-            barcode_obj = code128.Code128(code_value, barHeight=bar_height, humanReadable=bool(options.get("human_readable")))
-            if barcode_obj.width > width and barcode_obj.width > 0:
-                ratio = width / barcode_obj.width
-                barcode_obj.barWidth *= ratio
-            barcode_x = x + (width - barcode_obj.width) / 2
-            barcode_obj.drawOn(c, barcode_x, y)
-        except Exception:
-            logging.warning("Не вдалося намалювати штрихкод %s", code_value)
+        bar_height_mm = options.get("bar_height_mm")
+        bar_height = bar_height_mm * mm if bar_height_mm is not None else max(0, height - 2 * mm)
+
+        def draw_barcode(px: float, py: float) -> None:
+            try:
+                barcode_obj = code128.Code128(code_value, barHeight=bar_height, humanReadable=bool(options.get("human_readable")))
+                if barcode_obj.width > width and barcode_obj.width > 0:
+                    ratio = width / barcode_obj.width
+                    barcode_obj.barWidth *= ratio
+                barcode_x = px + (width - barcode_obj.width) / 2
+                barcode_obj.drawOn(c, barcode_x, py)
+            except Exception:
+                logging.warning("Не вдалося намалювати штрихкод %s", code_value)
+
+        _with_rotation(lambda px, py: draw_barcode(px, py))
     elif etype == "text":
         text_value = _apply_text_template(options.get("text_template") or "{code}", context)
         max_chars = element.get("max_chars")
         if max_chars:
             text_value = _truncate(text_value, int(max_chars))
-        c.saveState()
-        c.setFont(element.get("font_name") or "Helvetica", float(element.get("font_size") or 9))
-        align = element.get("align") or "left"
-        if align == "center":
-            c.drawCentredString(x + width / 2, y, text_value)
-        elif align == "right":
-            c.drawRightString(x + width, y, text_value)
-        else:
-            c.drawString(x, y, text_value)
-        c.restoreState()
+
+        def draw_text(px: float, py: float) -> None:
+            c.saveState()
+            font_name = element.get("font_name") or "Helvetica"
+            font_size = float(element.get("font_size") or 9)
+            c.setFont(font_name, font_size)
+            align = element.get("align") or "left"
+            if element.get("wrap"):
+                lines = simpleSplit(text_value, font_name, font_size, width)
+                line_h = font_size * 1.2
+                current_y = py + height - line_h
+                for line in lines:
+                    if current_y < py:
+                        break
+                    if align == "center":
+                        c.drawCentredString(px + width / 2, current_y, line)
+                    elif align == "right":
+                        c.drawRightString(px + width, current_y, line)
+                    else:
+                        c.drawString(px, current_y, line)
+                    current_y -= line_h
+            else:
+                if align == "center":
+                    c.drawCentredString(px + width / 2, py, text_value)
+                elif align == "right":
+                    c.drawRightString(px + width, py, text_value)
+                else:
+                    c.drawString(px, py, text_value)
+            c.restoreState()
+
+        _with_rotation(lambda px, py: draw_text(px, py))
     elif etype == "rect":
-        c.rect(x, y, width, height)
+        _with_rotation(lambda px, py: c.rect(px, py, width, height))
     elif etype == "line":
-        c.line(x, y, x + width, y + height)
+        _with_rotation(lambda px, py: c.line(px, py, px + width, py + height))
 
 
 def _draw_label(c: canvas.Canvas, x: float, y: float, width: float, height: float, code_value: str, name: str) -> None:
@@ -219,24 +257,37 @@ def generate_product_labels_pdf_v2(
         start_index = 0
     printed_on_page = 0
 
+    def apply_page_transform():
+        c.saveState()
+        c.scale(scale_x, scale_y)
+        c.translate(offset_x / scale_x, offset_y / scale_y)
+
+    def reset_page_state():
+        c.restoreState()
+        c.showPage()
+        apply_page_transform()
+
+    apply_page_transform()
+    first_label = True
+
     for code, name in labels_iterator:
         if kind == "thermal":
+            if not first_label:
+                reset_page_state()
+            first_label = False
             col = row = 0
         else:
             idx = start_index + printed_on_page
             if idx >= total_cells:
-                c.showPage()
+                reset_page_state()
                 printed_on_page = 0
                 start_index = 0
                 idx = 0
             row = idx // cols
             col = idx % cols
-        if kind == "thermal" and printed_on_page:
-            c.showPage()
-            printed_on_page = 0
 
-        x = margin_left + col * (label_w + gap_x) + offset_x
-        y = page_h - margin_top - label_h - row * (label_h + gap_y) + offset_y
+        x = margin_left + col * (label_w + gap_x)
+        y = page_h - margin_top - label_h - row * (label_h + gap_y)
         context = {
             "code": f"{prefix}{code}",
             "name": name,
@@ -246,14 +297,14 @@ def generate_product_labels_pdf_v2(
         for element in elements:
             if not element.get("is_active", 1):
                 continue
-            _draw_element(c, element, x, y, context, scale_x, scale_y)
+            _draw_element(c, element, x, y, context)
         printed_on_page += 1
         if kind == "thermal":
-            c.showPage()
-            printed_on_page = 0
+            pass
         elif printed_on_page >= total_cells:
-            c.showPage()
+            reset_page_state()
             printed_on_page = 0
             start_index = 0
 
+    c.restoreState()
     c.save()

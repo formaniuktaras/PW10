@@ -33,15 +33,15 @@ def _truncate(text: str, max_length: int) -> str:
     return text if len(text) <= max_length else text[: max_length - 1] + "…"
 
 
-def _iter_labels(items: list[dict], qty_each: int, include_aliases: bool) -> Iterable[tuple[str, str]]:
+def _iter_labels(items: list[dict], qty_each: int, include_aliases: bool) -> Iterable[tuple[str, str, str, int]]:
     for item in items:
         name = str(item.get("name") or "")
         sku = str(item.get("sku") or "")
         for _ in range(max(qty_each, 0)):
-            yield sku, name
+            yield sku, name, sku, 0
         if include_aliases:
             for alias in item.get("aliases") or []:
-                yield str(alias), name
+                yield str(alias), name, sku, 1
 
 
 def _apply_text_template(template: str, context: dict) -> str:
@@ -166,7 +166,7 @@ def generate_product_labels_pdf(
     current_col = 0
     current_row = 0
 
-    for code, name in _iter_labels(items, qty_each, include_aliases):
+    for barcode_value, name, base_sku, is_alias in _iter_labels(items, qty_each, include_aliases):
         if current_row >= tpl.rows:
             c.showPage()
             current_row = 0
@@ -175,7 +175,7 @@ def generate_product_labels_pdf(
         x = col_margin + current_col * (label_width + gap)
         y = page_height - row_margin - label_height - current_row * (label_height + gap)
 
-        _draw_label(c, x, y, label_width, label_height, f"{prefix}{code}", name)
+        _draw_label(c, x, y, label_width, label_height, f"{prefix}{barcode_value}", name)
 
         current_col += 1
         if current_col >= tpl.cols:
@@ -270,7 +270,7 @@ def generate_product_labels_pdf_v2(
     apply_page_transform()
     first_label = True
 
-    for code, name in labels_iterator:
+    for barcode_value, name, base_sku, is_alias in labels_iterator:
         if kind == "thermal":
             if not first_label:
                 reset_page_state()
@@ -289,9 +289,11 @@ def generate_product_labels_pdf_v2(
         x = margin_left + col * (label_w + gap_x)
         y = page_h - margin_top - label_h - row * (label_h + gap_y)
         context = {
-            "code": f"{prefix}{code}",
+            "code": f"{prefix}{barcode_value}",
+            "raw_code": barcode_value,
             "name": name,
-            "sku": code,
+            "sku": base_sku,
+            "is_alias": is_alias,
             "date": today,
         }
         for element in elements:
@@ -301,10 +303,6 @@ def generate_product_labels_pdf_v2(
         printed_on_page += 1
         if kind == "thermal":
             pass
-        elif printed_on_page >= total_cells:
-            reset_page_state()
-            printed_on_page = 0
-            start_index = 0
 
     c.restoreState()
     c.save()

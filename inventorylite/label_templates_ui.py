@@ -369,6 +369,10 @@ class TemplateEditorDialog:
         self._drag_last_values: tuple[float, float, float, float] | None = None
         self._preview_redraw_job: str | None = None
 
+        self.snap_enabled_var = tk.BooleanVar(value=True)
+        self.snap_step_var = tk.StringVar(value="0.5")
+        self.status_var = tk.StringVar(value="")
+
         self._load_data()
         self._build_ui()
         self.root.wait_window(self.root)
@@ -550,7 +554,17 @@ class TemplateEditorDialog:
         self.canvas.bind("<Motion>", self._on_canvas_hover)
         self.canvas.bind("<Leave>", self._on_canvas_leave)
         self.canvas.bind("<Configure>", self._on_canvas_configure)
-        ttk.Button(preview_frame, text="Оновити прев'ю", command=self.draw_preview).grid(row=1, column=0, pady=4)
+        self.canvas.bind("<KeyPress>", self._on_preview_keypress)
+
+        snap_bar = ttk.Frame(preview_frame)
+        snap_bar.grid(row=1, column=0, sticky="ew", padx=4)
+        snap_bar.columnconfigure(3, weight=1)
+        ttk.Checkbutton(snap_bar, text="Snap", variable=self.snap_enabled_var).grid(row=0, column=0, padx=4, pady=2, sticky="w")
+        ttk.Label(snap_bar, text="Крок, мм").grid(row=0, column=1, padx=4, pady=2, sticky="w")
+        ttk.Entry(snap_bar, width=6, textvariable=self.snap_step_var).grid(row=0, column=2, padx=2, pady=2, sticky="w")
+        ttk.Label(snap_bar, textvariable=self.status_var, foreground="#444").grid(row=0, column=3, padx=6, pady=2, sticky="w")
+
+        ttk.Button(preview_frame, text="Оновити прев'ю", command=self.draw_preview).grid(row=2, column=0, pady=4)
 
         action_bar = ttk.Frame(outer)
         action_bar.pack(side=tk.BOTTOM, fill=tk.X)
@@ -632,9 +646,12 @@ class TemplateEditorDialog:
         idx = int(sel[0]) if sel else None
         if idx is not None and idx < len(self.elements):
             self._active_elem_index = idx
+            self._update_status_for_idx(idx)
         else:
             self._active_elem_index = None
+            self.status_var.set("")
         self._fill_element_form()
+        self.canvas.focus_set()
         self.draw_preview()
 
     def _parse_float(self, raw: str | None, default: float = 0.0) -> float:
@@ -778,6 +795,7 @@ class TemplateEditorDialog:
             self.refresh_elements_tree()
             self.mark_dirty()
             self.draw_preview()
+            self._update_status_for_idx(idx)
         except ValueError:
             show_error("Елементи", "Перевірте числа (X, Y, W, H, Розмір, Макс. символів).")
 
@@ -916,6 +934,52 @@ class TemplateEditorDialog:
         label_h = float(tpl.get("label_h_mm") or 1.0)
         return (label_w, label_h)
 
+    def _get_snap_step_mm(self) -> float:
+        s = (self.snap_step_var.get() or "").strip().replace(",", ".")
+        try:
+            v = float(s)
+        except Exception:
+            v = 0.5
+        return max(0.05, min(v, 10.0))
+
+    def _snap_mm(self, v: float, step: float) -> float:
+        return round(v / step) * step
+
+    def _apply_snap_and_clamp(
+        self,
+        x: float,
+        y: float,
+        w: float,
+        h: float,
+        label_w_mm: float,
+        label_h_mm: float,
+        step: float,
+        do_snap: bool,
+    ) -> tuple[float, float, float, float]:
+        # min sizes
+        w = max(1.0, w)
+        h = max(1.0, h)
+
+        if do_snap:
+            x = self._snap_mm(x, step)
+            y = self._snap_mm(y, step)
+            w = self._snap_mm(w, step)
+            h = self._snap_mm(h, step)
+            w = max(1.0, w)
+            h = max(1.0, h)
+
+        # clamp to bounds
+        x = max(0.0, min(x, label_w_mm - w))
+        y = max(0.0, min(y, label_h_mm - h))
+        return x, y, w, h
+
+    def _update_status_for_idx(self, idx: int) -> None:
+        if idx < 0 or idx >= len(self.elements):
+            self.status_var.set("")
+            return
+        el = self.elements[idx]
+        self.status_var.set(f"X={el['x_mm']:.2f}  Y={el['y_mm']:.2f}  W={el['w_mm']:.2f}  H={el['h_mm']:.2f} мм")
+
     def _mm_to_px(self, value_mm: float) -> float:
         return float(value_mm or 0.0) * (self._preview_scale or 1.0)
 
@@ -932,6 +996,7 @@ class TemplateEditorDialog:
             self.elem_tree.selection_set(str(idx))
             self.elem_tree.see(str(idx))
         self._fill_element_form()
+        self._update_status_for_idx(idx)
         if redraw:
             self.draw_preview()
 
@@ -996,6 +1061,7 @@ class TemplateEditorDialog:
         if idx is None or idx >= len(self.elements):
             self._drag_mode = None
             return
+        self.canvas.focus_set()
         if "handle" in tags:
             handle_tag = next((t for t in tags if t in ("nw", "ne", "sw", "se")), None)
             if not handle_tag:
@@ -1090,13 +1156,21 @@ class TemplateEditorDialog:
         if self._drag_mode not in ("move", "resize") or self._active_elem_index is None or not self._drag_start:
             return
         label_w, label_h = self._get_label_size_mm()
+        step = self._get_snap_step_mm()
+        snap_enabled = self.snap_enabled_var.get()
+        alt_pressed = bool(event.state & 0x0008)
+        do_snap = snap_enabled and (not alt_pressed)
         dx_px = float(event.x) - self._drag_start.get("x_px", 0.0)
         dy_px = float(event.y) - self._drag_start.get("y_px", 0.0)
         dx_mm = self._px_to_mm(dx_px)
         dy_mm = self._px_to_mm(dy_px)
         new_x, new_y, new_w, new_h = self._compute_drag_values(dx_mm, dy_mm, label_w, label_h)
+        new_x, new_y, new_w, new_h = self._apply_snap_and_clamp(
+            new_x, new_y, new_w, new_h, label_w, label_h, step, do_snap
+        )
         self._drag_last_values = (new_x, new_y, new_w, new_h)
         self._update_element_vars_live(new_x, new_y, new_w, new_h)
+        self.status_var.set(f"X={new_x:.2f}  Y={new_y:.2f}  W={new_w:.2f}  H={new_h:.2f} мм")
         self._update_canvas_geometry(self._active_elem_index, new_x, new_y, new_w, new_h)
 
     def _on_canvas_button_release(self, event: tk.Event) -> None:
@@ -1106,6 +1180,10 @@ class TemplateEditorDialog:
         if idx >= len(self.elements):
             return
         label_w, label_h = self._get_label_size_mm()
+        step = self._get_snap_step_mm()
+        snap_enabled = self.snap_enabled_var.get()
+        alt_pressed = bool(event.state & 0x0008)
+        do_snap = snap_enabled and (not alt_pressed)
         if self._drag_start and not self._drag_last_values:
             dx_mm = self._px_to_mm(float(event.x) - self._drag_start.get("x_px", 0.0))
             dy_mm = self._px_to_mm(float(event.y) - self._drag_start.get("y_px", 0.0))
@@ -1113,6 +1191,9 @@ class TemplateEditorDialog:
         if not self._drag_last_values:
             return
         new_x, new_y, new_w, new_h = self._drag_last_values
+        new_x, new_y, new_w, new_h = self._apply_snap_and_clamp(
+            new_x, new_y, new_w, new_h, label_w, label_h, step, do_snap
+        )
         el = self.elements[idx]
         orig_vals = (
             float(el.get("x_mm", 0.0)),
@@ -1128,12 +1209,49 @@ class TemplateEditorDialog:
             return
         el.update({"x_mm": float(new_x), "y_mm": float(new_y), "w_mm": float(new_w), "h_mm": float(new_h)})
         self._update_tree_item(idx, el)
+        self._update_status_for_idx(idx)
         self.mark_dirty()
         self.draw_preview()
         self._drag_mode = None
         self._resize_handle = None
         self._drag_start = None
         self._drag_last_values = None
+
+    def _on_preview_keypress(self, event: tk.Event) -> str | None:
+        if self._active_elem_index is None or self._active_elem_index >= len(self.elements):
+            return None
+        if event.keysym not in ("Left", "Right", "Up", "Down"):
+            return None
+        idx = self._active_elem_index
+        el = self.elements[idx]
+        base_step = self._get_snap_step_mm() if self.snap_enabled_var.get() else 0.5
+        if event.state & 0x0001:
+            base_step *= 10
+        if event.state & 0x0004:
+            base_step *= 0.2
+        dx = dy = 0.0
+        if event.keysym == "Left":
+            dx = -base_step
+        elif event.keysym == "Right":
+            dx = base_step
+        elif event.keysym == "Up":
+            dy = -base_step
+        elif event.keysym == "Down":
+            dy = base_step
+        label_w, label_h = self._get_label_size_mm()
+        new_x = float(el.get("x_mm", 0.0)) + dx
+        new_y = float(el.get("y_mm", 0.0)) + dy
+        do_snap = self.snap_enabled_var.get() and not bool(event.state & 0x0008)
+        new_x, new_y, new_w, new_h = self._apply_snap_and_clamp(
+            new_x, new_y, float(el.get("w_mm", 0.0)), float(el.get("h_mm", 0.0)), label_w, label_h, base_step, do_snap
+        )
+        el.update({"x_mm": float(new_x), "y_mm": float(new_y)})
+        self._update_tree_item(idx, el)
+        self._update_element_vars_live(new_x, new_y, new_w, new_h)
+        self._update_status_for_idx(idx)
+        self.mark_dirty()
+        self.draw_preview()
+        return "break"
 
     def _update_tree_item(self, idx: int, el: dict[str, Any]) -> None:
         if str(idx) not in self.elem_tree.get_children():
@@ -1217,6 +1335,10 @@ class TemplateEditorDialog:
                     )
                     handles.append(hid)
                 self._elem_handle_ids[idx] = handles
+        if selected is not None and selected < len(self.elements):
+            self._update_status_for_idx(selected)
+        else:
+            self.status_var.set("")
 
     def generate_test_pdf(self) -> None:
         try:

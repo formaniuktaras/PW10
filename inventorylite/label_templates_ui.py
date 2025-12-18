@@ -400,7 +400,7 @@ class TemplateEditorDialog:
             "h_mm": tk.StringVar(value="10"),
             "rotation_deg": tk.StringVar(value="0"),
             "align": tk.StringVar(value="left"),
-            "font_name": tk.StringVar(value="Helvetica"),
+            "font_name": tk.StringVar(value="IL_SANS"),
             "font_size": tk.StringVar(value="9"),
             "max_chars": tk.StringVar(value=""),
             "wrap": tk.BooleanVar(value=False),
@@ -433,7 +433,13 @@ class TemplateEditorDialog:
         ttk.Combobox(form, textvariable=self.element_vars["align"], values=["left", "center", "right"], state="readonly").grid(
             row=7, column=1, padx=4, pady=2, sticky="w"
         )
-        ef("Шрифт", "font_name", 8)
+        ttk.Label(form, text="Шрифт").grid(row=8, column=0, padx=4, pady=2, sticky="w")
+        ttk.Combobox(
+            form,
+            textvariable=self.element_vars["font_name"],
+            values=["IL_SANS", "IL_SANS_BOLD", "Helvetica"],
+            state="normal",
+        ).grid(row=8, column=1, padx=4, pady=2, sticky="w")
         ef("Розмір", "font_size", 9)
         ef("Макс. символів", "max_chars", 10)
         ttk.Checkbutton(form, text="Перенос рядків (wrap)", variable=self.element_vars["wrap"]).grid(
@@ -511,7 +517,7 @@ class TemplateEditorDialog:
             "h_mm": el.get("h_mm", 0),
             "rotation_deg": el.get("rotation_deg", 0),
             "align": el.get("align", "left"),
-            "font_name": el.get("font_name", "Helvetica"),
+            "font_name": el.get("font_name", "IL_SANS"),
             "font_size": el.get("font_size", 9),
             "max_chars": el.get("max_chars", ""),
             "wrap": el.get("wrap", 0),
@@ -537,7 +543,7 @@ class TemplateEditorDialog:
             "h_mm": 8,
             "rotation_deg": 0,
             "align": "left",
-            "font_name": "Helvetica",
+            "font_name": "IL_SANS",
             "font_size": 9,
             "max_chars": 0,
             "wrap": 0,
@@ -611,7 +617,7 @@ class TemplateEditorDialog:
                     "h_mm": float(self.element_vars["h_mm"].get() or 0),
                     "rotation_deg": float(self.element_vars["rotation_deg"].get() or 0),
                     "align": self.element_vars["align"].get() or "left",
-                    "font_name": self.element_vars["font_name"].get() or "Helvetica",
+                    "font_name": self.element_vars["font_name"].get() or "IL_SANS",
                     "font_size": float(self.element_vars["font_size"].get() or 9),
                     "max_chars": int(self.element_vars["max_chars"].get() or 0) or None,
                     "wrap": 1 if self.element_vars["wrap"].get() else 0,

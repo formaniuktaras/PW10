@@ -8,8 +8,15 @@ from reportlab.lib.units import mm
 from reportlab.graphics.barcode import code128
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.utils import simpleSplit
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+import sys
+import os
 import logging
 import datetime
+
+
+_UNICODE_FONT_MAPPING: dict[str, str] | None = None
 
 
 class LabelTemplate:
@@ -27,6 +34,98 @@ TEMPLATES: dict[str, LabelTemplate] = {
     "A4_3x8_70x35": LabelTemplate("A4_3x8_70x35", A4, cols=3, rows=8, label_width_mm=68, label_height_mm=35, gap_mm=2),
     "THERMAL_58x40": LabelTemplate("THERMAL_58x40", (58 * mm, 40 * mm), cols=1, rows=1, label_width_mm=58, label_height_mm=40, gap_mm=0),
 }
+
+
+def _candidate_font_paths() -> list[Path]:
+    paths: list[Path] = []
+
+    base_dir = Path(__file__).resolve().parent
+    assets_dir = base_dir / "assets" / "fonts"
+    paths.extend([
+        assets_dir / "DejaVuSans.ttf",
+        assets_dir / "DejaVuSans-Bold.ttf",
+    ])
+
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        meipass_assets = Path(meipass) / "assets" / "fonts"
+        paths.extend(
+            [
+                meipass_assets / "DejaVuSans.ttf",
+                meipass_assets / "DejaVuSans-Bold.ttf",
+            ]
+        )
+
+    windir = os.environ.get("WINDIR") or os.environ.get("windir")
+    if windir:
+        fonts_dir = Path(windir) / "Fonts"
+        paths.extend(
+            [
+                fonts_dir / "arial.ttf",
+                fonts_dir / "arialbd.ttf",
+                fonts_dir / "segoeui.ttf",
+                fonts_dir / "seguisb.ttf",
+            ]
+        )
+
+    paths.extend(
+        [
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+            Path("/System/Library/Fonts/Supplemental/Arial.ttf"),
+            Path("/System/Library/Fonts/Supplemental/Arial Bold.ttf"),
+        ]
+    )
+
+    return paths
+
+
+def _find_first_existing(paths: list[Path]) -> Path | None:
+    for path in paths:
+        if path and path.exists():
+            return path
+    return None
+
+
+def ensure_unicode_fonts_registered() -> dict:
+    global _UNICODE_FONT_MAPPING
+    if _UNICODE_FONT_MAPPING is not None:
+        return _UNICODE_FONT_MAPPING
+
+    mapping = {"regular": "IL_SANS", "bold": "IL_SANS_BOLD"}
+    registered = set(pdfmetrics.getRegisteredFontNames())
+    if mapping["regular"] in registered:
+        _UNICODE_FONT_MAPPING = mapping
+        return mapping
+
+    candidates = _candidate_font_paths()
+
+    regular_candidates = [
+        path
+        for path in candidates
+        if path.name in {"DejaVuSans.ttf", "arial.ttf", "segoeui.ttf"}
+    ]
+    bold_candidates = [
+        path
+        for path in candidates
+        if path.name in {"DejaVuSans-Bold.ttf", "arialbd.ttf", "seguisb.ttf", "Arial Bold.ttf"}
+    ]
+
+    regular_path = _find_first_existing(regular_candidates)
+    bold_path = _find_first_existing(bold_candidates)
+
+    if regular_path is None:
+        searched = "\n".join(str(p) for p in regular_candidates)
+        raise RuntimeError(f"Unicode font not found. Checked paths:\n{searched}")
+
+    if bold_path is None:
+        bold_path = regular_path
+
+    pdfmetrics.registerFont(TTFont(mapping["regular"], str(regular_path)))
+    pdfmetrics.registerFont(TTFont(mapping["bold"], str(bold_path)))
+
+    _UNICODE_FONT_MAPPING = mapping
+    return mapping
 
 
 def _truncate(text: str, max_length: int) -> str:
@@ -94,7 +193,14 @@ def _draw_element(c: canvas.Canvas, element: dict, origin_x: float, origin_y: fl
 
         def draw_text(px: float, py: float) -> None:
             c.saveState()
-            font_name = element.get("font_name") or "Helvetica"
+            font_map = ensure_unicode_fonts_registered()
+            requested_font = element.get("font_name") or font_map["regular"]
+            contains_cyrillic = any("\u0400" <= ch <= "\u04FF" for ch in text_value)
+            bold_flag = bool(element.get("bold") or options.get("bold"))
+            if contains_cyrillic or requested_font in {"Helvetica", "Times-Roman", "Courier", font_map["regular"], font_map["bold"]}:
+                font_name = font_map["bold"] if bold_flag else font_map["regular"]
+            else:
+                font_name = requested_font
             font_size = float(element.get("font_size") or 9)
             c.setFont(font_name, font_size)
             align = element.get("align") or "left"
@@ -151,6 +257,7 @@ def generate_product_labels_pdf(
     template: str,
     include_aliases: bool,
 ) -> None:
+    ensure_unicode_fonts_registered()
     tpl = TEMPLATES.get(template) or TEMPLATES["A4_3x8_70x35"]
     prefix = barcode_prefix or ""
     c = canvas.Canvas(str(output_path), pagesize=tpl.page_size)
@@ -196,6 +303,7 @@ def generate_product_labels_pdf_v2(
     start_row: int = 1,
     start_col: int = 1,
 ) -> None:
+    ensure_unicode_fonts_registered()
     tpl = template_full.get("template") if template_full else None
     elements = template_full.get("elements") if template_full else []
     if not tpl:

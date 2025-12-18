@@ -25,7 +25,15 @@ $iconBase64 = Get-Content -Raw "icons/app_ico_base64.txt"
 [IO.File]::WriteAllBytes("icons/app.ico", [Convert]::FromBase64String($iconBase64))
 
 $iconPath = "icons/app.ico"
-$cmd = "pyinstaller --onefile --noconsole --name InventoryLite --icon $iconPath app.py"
+$fontArgs = ""
+if (Test-Path "./assets/fonts/DejaVuSans.ttf") {
+    $fontArgs = "--add-data \"assets/fonts/DejaVuSans.ttf;assets/fonts\""
+    if (Test-Path "./assets/fonts/DejaVuSans-Bold.ttf") {
+        $fontArgs = "$fontArgs --add-data \"assets/fonts/DejaVuSans-Bold.ttf;assets/fonts\""
+    }
+}
+
+$cmd = "pyinstaller --onefile --noconsole --name InventoryLite --icon $iconPath $fontArgs app.py"
 Write-Host "Running: $cmd"
 Invoke-Expression $cmd
 

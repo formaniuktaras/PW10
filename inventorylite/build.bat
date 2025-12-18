@@ -26,7 +26,15 @@ icon_path.write_bytes(base64.b64decode(base64_path.read_text().strip()))
 PY
 
 set ICON=icons\app.ico
-pyinstaller --onefile --noconsole --name InventoryLite --icon %ICON% app.py
+set FONT_ARGS=
+if exist ".\assets\fonts\DejaVuSans.ttf" (
+    set FONT_ARGS=--add-data "assets\fonts\DejaVuSans.ttf;assets\fonts"
+    if exist ".\assets\fonts\DejaVuSans-Bold.ttf" (
+        set FONT_ARGS=%FONT_ARGS% --add-data "assets\fonts\DejaVuSans-Bold.ttf;assets\fonts"
+    )
+)
+
+pyinstaller --onefile --noconsole --name InventoryLite --icon %ICON% %FONT_ARGS% app.py
 
 if exist dist\InventoryLite.exe (
     echo Build complete: %CD%\dist\InventoryLite.exe

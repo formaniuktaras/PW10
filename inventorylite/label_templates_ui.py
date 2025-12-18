@@ -260,11 +260,21 @@ class TemplateEditorDialog:
         self.root.resizable(True, True)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        w = min(1200, int(sw * 0.92))
+        h = min(820, int(sh * 0.88))
+        x = max(0, (sw - w) // 2)
+        y = max(0, (sh - h) // 2)
+        self.root.geometry(f"{w}x{h}+{x}+{y}")
+        self.root.minsize(min(950, w), min(650, h))
+
         self.base_title = "Редактор шаблону"
 
         self.template_vars: dict[str, tk.StringVar] = {}
         self.bool_vars: dict[str, tk.BooleanVar] = {}
         self.elements: list[dict[str, Any]] = []
+        self._code_entry = None
 
         self._load_data()
         self._build_ui()
@@ -281,6 +291,17 @@ class TemplateEditorDialog:
         if tpl:
             tpl_data.update({k: tpl.get(k, v) for k, v in tpl_data.items()})
             tpl_data["id"] = tpl.get("id")
+        if self.template_id is None:
+            base_code = str(tpl_data.get("code") or "")
+            new_code = base_code
+            counter = 1
+            while new_code and db.get_label_template_by_code(new_code):
+                new_code = f"{base_code}_{counter}"
+                counter += 1
+            if new_code and new_code != base_code:
+                tpl_data["code"] = new_code
+                if tpl_data.get("title"):
+                    tpl_data["title"] = f"{tpl_data['title']} ({new_code})"
         self.template_vars = {k: tk.StringVar(value=str(v)) for k, v in tpl_data.items() if k not in {"is_active", "is_default"}}
         # Explicit vars for numeric/int flags
         self.bool_vars["is_active"] = tk.BooleanVar(value=bool(tpl_data.get("is_active", 1)))
@@ -295,11 +316,16 @@ class TemplateEditorDialog:
             self.elements.append(copied)
 
     def _build_ui(self) -> None:
-        main = ttk.Frame(self.root, padding=8)
-        main.pack(fill=tk.BOTH, expand=True)
-        main.columnconfigure(1, weight=1)
+        outer = ttk.Frame(self.root, padding=8)
+        outer.pack(fill=tk.BOTH, expand=True)
 
-        tpl_frame = ttk.LabelFrame(main, text="Параметри шаблону")
+        content = ttk.Frame(outer)
+        content.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        content.columnconfigure(1, weight=1)
+        content.rowconfigure(1, weight=1)
+        content.rowconfigure(2, weight=1)
+
+        tpl_frame = ttk.LabelFrame(content, text="Параметри шаблону")
         tpl_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=4)
         tpl_frame.columnconfigure(3, weight=1)
 
@@ -307,6 +333,8 @@ class TemplateEditorDialog:
             ttk.Label(tpl_frame, text=label).grid(row=row, column=col * 2, padx=4, pady=2, sticky="w")
             entry = ttk.Entry(tpl_frame, textvariable=self.template_vars[key], width=width)
             entry.grid(row=row, column=col * 2 + 1, padx=4, pady=2, sticky="w")
+            if key == "code":
+                self._code_entry = entry
             return entry
 
         add_field("Назва", "title", 0, 0, width=24)
@@ -352,7 +380,7 @@ class TemplateEditorDialog:
         )
 
         # Elements section
-        elems_frame = ttk.LabelFrame(main, text="Елементи")
+        elems_frame = ttk.LabelFrame(content, text="Елементи")
         elems_frame.grid(row=1, column=0, sticky="nsew", pady=4)
         elems_frame.columnconfigure(0, weight=1)
         elems_frame.rowconfigure(1, weight=1)
@@ -391,7 +419,7 @@ class TemplateEditorDialog:
         ttk.Button(elem_btns, text="Вниз", command=lambda: self.move_element(1)).pack(side=tk.LEFT, padx=3)
 
         # Element form
-        form = ttk.LabelFrame(main, text="Властивості елемента")
+        form = ttk.LabelFrame(content, text="Властивості елемента")
         form.grid(row=1, column=1, sticky="nsew", padx=(8, 0), pady=4)
         for i in range(2):
             form.columnconfigure(i, weight=1)
@@ -464,7 +492,7 @@ class TemplateEditorDialog:
         )
 
         # Preview
-        preview_frame = ttk.LabelFrame(main, text="Попередній перегляд")
+        preview_frame = ttk.LabelFrame(content, text="Попередній перегляд")
         preview_frame.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=4)
         preview_frame.columnconfigure(0, weight=1)
         preview_frame.rowconfigure(0, weight=1)
@@ -472,11 +500,11 @@ class TemplateEditorDialog:
         self.canvas.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
         ttk.Button(preview_frame, text="Оновити прев'ю", command=self.draw_preview).grid(row=1, column=0, pady=4)
 
-        action_frame = ttk.Frame(main)
-        action_frame.grid(row=3, column=0, columnspan=2, pady=8, sticky="e")
-        ttk.Button(action_frame, text="Тестовий PDF", command=self.generate_test_pdf).pack(side=tk.RIGHT, padx=5)
-        ttk.Button(action_frame, text="Зберегти шаблон", command=self.save_template).pack(side=tk.RIGHT, padx=5)
-        ttk.Button(action_frame, text="Закрити", command=self.on_close).pack(side=tk.RIGHT, padx=5)
+        action_bar = ttk.Frame(outer)
+        action_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        ttk.Button(action_bar, text="Закрити", command=self.on_close).pack(side=tk.RIGHT, padx=5, pady=6)
+        ttk.Button(action_bar, text="Зберегти шаблон", command=self.save_template).pack(side=tk.RIGHT, padx=5, pady=6)
+        ttk.Button(action_bar, text="Тестовий PDF", command=self.generate_test_pdf).pack(side=tk.RIGHT, padx=5, pady=6)
 
         self.refresh_elements_tree()
         self.draw_preview()
@@ -726,7 +754,14 @@ class TemplateEditorDialog:
             messagebox.showinfo("Збережено", "Шаблон збережено")
             return True
         except sqlite3.IntegrityError as exc:
-            show_error("Шаблон", str(exc))
+            msg = str(exc)
+            if "LabelTemplates.code" in msg or "UNIQUE constraint failed: LabelTemplates.code" in msg:
+                show_error("Шаблон", "Код шаблону має бути унікальним. Змініть поле 'Код' і спробуйте знову.")
+                if hasattr(self, "_code_entry") and self._code_entry:
+                    self._code_entry.focus_set()
+                    self._code_entry.selection_range(0, tk.END)
+            else:
+                show_error("Шаблон", msg)
         except Exception as exc:
             logging.exception("Failed to save template")
             show_error("Шаблон", str(exc))

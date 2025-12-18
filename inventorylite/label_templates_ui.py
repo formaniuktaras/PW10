@@ -762,6 +762,18 @@ class TemplateEditorDialog:
             except ValueError:
                 options["bar_height_mm"] = 0
             options["human_readable"] = bool(self.element_vars["options.human_readable"].get())
+            if el.get("element_type") == "barcode":
+                try:
+                    h_mm = float(el.get("h_mm", 0))
+                    bar_h = float(options.get("bar_height_mm") or 0)
+                    if bar_h > h_mm:
+                        options["bar_height_mm"] = max(h_mm - 2, 1)
+                        messagebox.showwarning(
+                            "Елементи",
+                            "Висота штрихкоду перевищує висоту елемента. Значення зменшено автоматично.",
+                        )
+                except Exception:
+                    pass
             el["options"] = options
             self.refresh_elements_tree()
             self.mark_dirty()

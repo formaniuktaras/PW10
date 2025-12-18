@@ -150,13 +150,27 @@ def _apply_text_template(template: str, context: dict) -> str:
         return template
 
 
-def _draw_element(c: canvas.Canvas, element: dict, origin_x: float, origin_y: float, context: dict) -> None:
+def _draw_element(
+    c: canvas.Canvas,
+    element: dict,
+    origin_x: float,
+    origin_y: float,
+    label_h: float,
+    context: dict,
+) -> None:
     etype = element.get("element_type")
     options = element.get("options") or {}
-    x = origin_x + element.get("x_mm", 0) * mm
-    y = origin_y + element.get("y_mm", 0) * mm
-    width = element.get("w_mm", 0) * mm
-    height = element.get("h_mm", 0) * mm
+    x_mm = float(element.get("x_mm", 0))
+    y_mm = float(element.get("y_mm", 0))
+    w_mm = float(element.get("w_mm", 0))
+    h_mm = float(element.get("h_mm", 0))
+
+    width = w_mm * mm
+    height = h_mm * mm
+
+    # y_mm у шаблоні задається від верхнього краю, а координати PDF йдуть знизу вгору
+    x = origin_x + x_mm * mm
+    y = origin_y + (label_h - (y_mm + h_mm) * mm)
     rotation_deg = float(element.get("rotation_deg") or 0)
 
     def _with_rotation(draw_fn):
@@ -170,17 +184,39 @@ def _draw_element(c: canvas.Canvas, element: dict, origin_x: float, origin_y: fl
             draw_fn(x, y)
     if etype == "barcode":
         code_value = str(context.get(element.get("field_key") or "code") or "")
-        bar_height_mm = options.get("bar_height_mm")
-        bar_height = bar_height_mm * mm if bar_height_mm is not None else max(0, height - 2 * mm)
+        padding = 0.5 * mm
+        hr_enabled = bool(options.get("human_readable"))
+        requested_font = element.get("font_name")
+        base_fonts = {"Helvetica", "Times-Roman", "Courier"}
+        hr_font_name = requested_font if requested_font in base_fonts else "Helvetica"
+        hr_font_size = float(element.get("font_size") or 8)
+        hr_block_h = hr_font_size * 1.2 if hr_enabled else 0
+
+        requested_bar_h_mm = options.get("bar_height_mm")
+        if requested_bar_h_mm is not None:
+            requested_bar_h = float(requested_bar_h_mm) * mm
+        else:
+            requested_bar_h = height - 2 * padding - hr_block_h
+
+        bar_h = max(1 * mm, min(requested_bar_h, height - 2 * padding - hr_block_h))
 
         def draw_barcode(px: float, py: float) -> None:
             try:
-                barcode_obj = code128.Code128(code_value, barHeight=bar_height, humanReadable=bool(options.get("human_readable")))
-                if barcode_obj.width > width and barcode_obj.width > 0:
-                    ratio = width / barcode_obj.width
+                barcode_obj = code128.Code128(code_value, barHeight=bar_h, humanReadable=False)
+                usable_width = width - 2 * padding
+                if barcode_obj.width > usable_width and barcode_obj.width > 0:
+                    ratio = usable_width / barcode_obj.width
                     barcode_obj.barWidth *= ratio
+                free_h = height - 2 * padding - hr_block_h
+                bars_y = py + padding + hr_block_h + max(0, (free_h - bar_h) / 2)
                 barcode_x = px + (width - barcode_obj.width) / 2
-                barcode_obj.drawOn(c, barcode_x, py)
+                barcode_obj.drawOn(c, barcode_x, bars_y)
+                if hr_enabled:
+                    c.saveState()
+                    c.setFont(hr_font_name, hr_font_size)
+                    text_y = py + padding + max(0, (hr_block_h - hr_font_size) / 2)
+                    c.drawCentredString(px + width / 2, text_y, code_value)
+                    c.restoreState()
             except Exception:
                 logging.warning("Не вдалося намалювати штрихкод %s", code_value)
 
@@ -407,7 +443,7 @@ def generate_product_labels_pdf_v2(
         for element in elements:
             if not element.get("is_active", 1):
                 continue
-            _draw_element(c, element, x, y, context)
+            _draw_element(c, element, x, y, label_h, context)
         printed_on_page += 1
         if kind == "thermal":
             pass

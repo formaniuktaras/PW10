@@ -443,6 +443,8 @@ class TemplateEditorDialog:
             "is_active": tk.BooleanVar(value=True),
         }
 
+        self._max_chars_entry: ttk.Entry | None = None
+
         def ef(label: str, key: str, row: int, width: int = 12):
             ttk.Label(form, text=label).grid(row=row, column=0, padx=4, pady=2, sticky="w")
             entry = ttk.Entry(form, textvariable=self.element_vars[key], width=width)
@@ -474,7 +476,7 @@ class TemplateEditorDialog:
             state="normal",
         ).grid(row=8, column=1, padx=4, pady=2, sticky="w")
         ef("Розмір", "font_size", 9)
-        ef("Макс. символів", "max_chars", 10)
+        self._max_chars_entry = ef("Макс. символів", "max_chars", 10)
         ttk.Checkbutton(form, text="Перенос рядків (wrap)", variable=self.element_vars["wrap"]).grid(
             row=11, column=1, padx=4, pady=2, sticky="w"
         )
@@ -534,6 +536,15 @@ class TemplateEditorDialog:
                 ),
             )
 
+    def _set_var_safe(self, var: tk.Variable, value: Any) -> None:
+        if isinstance(var, tk.BooleanVar):
+            var.set(bool(value))
+            return
+        if value is None:
+            var.set("")
+            return
+        var.set(str(value))
+
     def _fill_element_form(self) -> None:
         sel = self.elem_tree.selection()
         if not sel:
@@ -554,7 +565,7 @@ class TemplateEditorDialog:
             "align": el.get("align", "left"),
             "font_name": el.get("font_name", "IL_SANS"),
             "font_size": el.get("font_size", 9),
-            "max_chars": el.get("max_chars", ""),
+            "max_chars": "" if el.get("max_chars") is None else el.get("max_chars"),
             "wrap": el.get("wrap", 0),
             "options.text_template": options.get("text_template", "{code}"),
             "options.bar_height_mm": options.get("bar_height_mm", 20),
@@ -563,10 +574,24 @@ class TemplateEditorDialog:
         }
         for key, value in mapping.items():
             var = self.element_vars.get(key)
-            if isinstance(var, tk.BooleanVar):
-                var.set(bool(value))
-            elif var is not None:
-                var.set(str(value))
+            if var is not None:
+                self._set_var_safe(var, value)
+
+    def _parse_float(self, raw: str | None, default: float = 0.0) -> float:
+        s = (raw or "").strip()
+        if s == "":
+            return float(default)
+        s = s.replace(",", ".")
+        return float(s)
+
+    def _parse_optional_int(self, raw: str | None) -> int | None:
+        s = (raw or "").strip()
+        if s == "" or s.lower() in ("none", "null"):
+            return None
+        s = s.replace(",", ".")
+        if s.endswith(".0"):
+            s = s[:-2]
+        return int(s)
 
     def add_text_element(self) -> None:
         el = {
@@ -646,26 +671,34 @@ class TemplateEditorDialog:
         el = self.elements[idx]
         options = el.get("options") or {}
         try:
+            max_chars = self._parse_optional_int(self.element_vars["max_chars"].get())
+        except ValueError:
+            show_error("Елементи", "Поле 'Макс. символів' має бути числом або порожнім.")
+            if hasattr(self, "_max_chars_entry") and self._max_chars_entry:
+                self._max_chars_entry.focus_set()
+                self._max_chars_entry.selection_range(0, tk.END)
+            return
+        try:
             el.update(
                 {
                     "element_type": self.element_vars["element_type"].get().strip(),
                     "field_key": self.element_vars["field_key"].get().strip() or None,
-                    "x_mm": float(self.element_vars["x_mm"].get() or 0),
-                    "y_mm": float(self.element_vars["y_mm"].get() or 0),
-                    "w_mm": float(self.element_vars["w_mm"].get() or 0),
-                    "h_mm": float(self.element_vars["h_mm"].get() or 0),
-                    "rotation_deg": float(self.element_vars["rotation_deg"].get() or 0),
+                    "x_mm": self._parse_float(self.element_vars["x_mm"].get(), 0),
+                    "y_mm": self._parse_float(self.element_vars["y_mm"].get(), 0),
+                    "w_mm": self._parse_float(self.element_vars["w_mm"].get(), 0),
+                    "h_mm": self._parse_float(self.element_vars["h_mm"].get(), 0),
+                    "rotation_deg": self._parse_float(self.element_vars["rotation_deg"].get(), 0),
                     "align": self.element_vars["align"].get() or "left",
                     "font_name": self.element_vars["font_name"].get() or "IL_SANS",
-                    "font_size": float(self.element_vars["font_size"].get() or 9),
-                    "max_chars": int(self.element_vars["max_chars"].get() or 0) or None,
+                    "font_size": self._parse_float(self.element_vars["font_size"].get(), 9),
+                    "max_chars": max_chars,
                     "wrap": 1 if self.element_vars["wrap"].get() else 0,
                     "is_active": int(bool(self.element_vars["is_active"].get())),
                 }
             )
             options["text_template"] = self.element_vars["options.text_template"].get() or "{code}"
             try:
-                options["bar_height_mm"] = float(self.element_vars["options.bar_height_mm"].get() or 0)
+                options["bar_height_mm"] = self._parse_float(self.element_vars["options.bar_height_mm"].get(), 0)
             except ValueError:
                 options["bar_height_mm"] = 0
             options["human_readable"] = bool(self.element_vars["options.human_readable"].get())
@@ -673,7 +706,7 @@ class TemplateEditorDialog:
             self.refresh_elements_tree()
             self.mark_dirty()
         except ValueError:
-            show_error("Елементи", "Некоректні значення елемента")
+            show_error("Елементи", "Перевірте числа (X, Y, W, H, Розмір, Макс. символів).")
 
     def _collect_template_data(self) -> dict:
         tpl = {}

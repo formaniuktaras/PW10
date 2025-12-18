@@ -70,16 +70,17 @@ DEFAULT_SETTINGS = {
     },
     "sales_import": {"templates": {}, "last_template": ""},
     "purchase_import": {"templates": {}, "last_template": ""},
-        "defaults": {
-            "product": {
-                "unit": "pcs",
-                "brand": "",
-                "category": "",
-                "barcode_prefix": "",
-            },
-            "currency": {
-                "base_code": BASE_CURRENCY,
-                "base_name": BASE_CURRENCY_NAME,
+    "print": {"last_template_id": None},
+    "defaults": {
+        "product": {
+            "unit": "pcs",
+            "brand": "",
+            "category": "",
+            "barcode_prefix": "",
+        },
+        "currency": {
+            "base_code": BASE_CURRENCY,
+            "base_name": BASE_CURRENCY_NAME,
             "base_decimals": BASE_CURRENCY_DECIMALS,
         },
     },

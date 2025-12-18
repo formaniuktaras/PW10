@@ -5260,7 +5260,7 @@ def open_products_bulk_actions_dialog(parent, db_conn, table_frame) -> None:
     template_combo.bind("<<ComboboxSelected>>", update_start_controls)
 
     def open_template_manager() -> None:
-        TemplateManagerDialog(parent)
+        TemplateManagerDialog(parent, settings=getattr(parent, "settings", None))
         refresh_template_choices()
 
     ttk.Button(labels_frame, text="Шаблони…", command=open_template_manager).pack(side=tk.LEFT, padx=4, pady=4)

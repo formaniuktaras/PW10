@@ -3184,19 +3184,21 @@ def get_label_template_by_code(code: str) -> sqlite3.Row | None:
         return conn.execute("SELECT * FROM LabelTemplates WHERE code = ?", (code,)).fetchone()
 
 
-def list_label_template_elements(template_id: int) -> list[sqlite3.Row]:
+def list_label_template_elements(template_id: int, active_only: bool = True) -> list[sqlite3.Row]:
+    query = "SELECT * FROM LabelTemplateElements WHERE template_id = ?"
+    params: list = [template_id]
+    if active_only:
+        query += " AND is_active = 1"
+    query += " ORDER BY sort_order, id"
     with get_connection() as conn:
-        return conn.execute(
-            "SELECT * FROM LabelTemplateElements WHERE template_id = ? AND is_active = 1 ORDER BY sort_order, id",
-            (template_id,),
-        ).fetchall()
+        return conn.execute(query, params).fetchall()
 
 
 def get_label_template_full(template_id: int) -> dict | None:
     tpl_row = get_label_template(template_id)
     if not tpl_row:
         return None
-    elements = list_label_template_elements(template_id)
+    elements = list_label_template_elements(template_id, active_only=False)
     parsed = []
     for el in elements:
         options: dict

@@ -42,8 +42,9 @@ DEFAULT_TEMPLATE = {
 
 
 class TemplateManagerDialog:
-    def __init__(self, parent) -> None:
+    def __init__(self, parent, settings=None) -> None:
         self.parent = parent
+        self.settings = settings or getattr(parent, "settings", None)
         self.root = tk.Toplevel(parent)
         self.root.title("Шаблони етикеток")
         self.root.grab_set()
@@ -124,7 +125,7 @@ class TemplateManagerDialog:
             return None
 
     def add_template(self) -> None:
-        dlg = TemplateEditorDialog(self.parent)
+        dlg = TemplateEditorDialog(self.parent, settings=self.settings)
         if dlg.saved:
             self.load_templates()
 
@@ -133,7 +134,7 @@ class TemplateManagerDialog:
         if not tpl_id:
             messagebox.showwarning("Шаблони", "Оберіть шаблон")
             return
-        dlg = TemplateEditorDialog(self.parent, tpl_id)
+        dlg = TemplateEditorDialog(self.parent, tpl_id, settings=self.settings)
         if dlg.saved:
             self.load_templates()
 

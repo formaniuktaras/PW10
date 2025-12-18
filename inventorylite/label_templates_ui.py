@@ -360,7 +360,6 @@ class TemplateEditorDialog:
         self._code_entry = None
 
         self._preview_scale: float = 1.0
-        self._canvas_items: dict[int, int] = {}
         self._elem_rect_ids: dict[int, int] = {}
         self._elem_handle_ids: dict[int, list[int]] = {}
         self._active_elem_index: int | None = None
@@ -368,6 +367,7 @@ class TemplateEditorDialog:
         self._resize_handle: str | None = None
         self._drag_start: dict[str, float] | None = None
         self._drag_last_values: tuple[float, float, float, float] | None = None
+        self._preview_redraw_job: str | None = None
 
         self._load_data()
         self._build_ui()
@@ -547,6 +547,9 @@ class TemplateEditorDialog:
         self.canvas.bind("<Button-1>", self._on_canvas_button_press)
         self.canvas.bind("<B1-Motion>", self._on_canvas_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_canvas_button_release)
+        self.canvas.bind("<Motion>", self._on_canvas_hover)
+        self.canvas.bind("<Leave>", self._on_canvas_leave)
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
         ttk.Button(preview_frame, text="Оновити прев'ю", command=self.draw_preview).grid(row=1, column=0, pady=4)
 
         action_bar = ttk.Frame(outer)
@@ -961,15 +964,6 @@ class TemplateEditorDialog:
                 hx, hy = coords[handle_tag]
                 self.canvas.coords(handle_id, hx - half, hy - half, hx + half, hy + half)
 
-    def _on_canvas_select(self, event: tk.Event) -> None:
-        item = self.canvas.find_closest(event.x, event.y)
-        if not item:
-            return
-        idx = self._canvas_items.get(item[0])
-        if idx is None:
-            return
-        self._set_active_element(idx)
-
     def _on_canvas_button_press(self, event: tk.Event) -> None:
         self._drag_mode = None
         self._resize_handle = None
@@ -979,21 +973,25 @@ class TemplateEditorDialog:
         if not item:
             return
         item_id = item[0]
-        idx = None
         tags = self.canvas.gettags(item_id)
-        if "handle" in tags:
-            elem_tag = next((t for t in tags if t.startswith("elem:")), None)
-            handle_tag = next((t for t in tags if t in ("nw", "ne", "sw", "se")), None)
-            if elem_tag and handle_tag:
-                idx = int(elem_tag.split(":", 1)[1])
-                self._drag_mode = "resize"
-                self._resize_handle = handle_tag
-        elif item_id in self._canvas_items:
-            idx = self._canvas_items[item_id]
-            self._drag_mode = "move"
+        elem_tag = next((t for t in tags if t.startswith("elem:")), None)
+        if not elem_tag:
+            return
+        try:
+            idx = int(elem_tag.split(":", 1)[1])
+        except (TypeError, ValueError):
+            return
         if idx is None or idx >= len(self.elements):
             self._drag_mode = None
             return
+        if "handle" in tags:
+            handle_tag = next((t for t in tags if t in ("nw", "ne", "sw", "se")), None)
+            if not handle_tag:
+                return
+            self._drag_mode = "resize"
+            self._resize_handle = handle_tag
+        else:
+            self._drag_mode = "move"
         self._set_active_element(idx, redraw=True)
         el = self.elements[idx]
         self._drag_start = {
@@ -1004,6 +1002,31 @@ class TemplateEditorDialog:
             "orig_w_mm": float(el.get("w_mm", 0.0)),
             "orig_h_mm": float(el.get("h_mm", 0.0)),
         }
+
+    def _on_canvas_hover(self, event: tk.Event) -> None:
+        item = self.canvas.find_withtag("current")
+        cursor = ""
+        if item:
+            tags = self.canvas.gettags(item[0])
+            if "handle" in tags:
+                if "nw" in tags or "se" in tags:
+                    cursor = "size_nw_se"
+                elif "ne" in tags or "sw" in tags:
+                    cursor = "size_ne_sw"
+            elif "elem" in tags:
+                cursor = "fleur"
+        self.canvas.configure(cursor=cursor)
+
+    def _on_canvas_leave(self, _: tk.Event) -> None:
+        self.canvas.configure(cursor="")
+
+    def _on_canvas_configure(self, _: tk.Event) -> None:
+        if self._preview_redraw_job:
+            try:
+                self.root.after_cancel(self._preview_redraw_job)
+            except Exception:
+                pass
+        self._preview_redraw_job = self.root.after(80, self.draw_preview)
 
     def _compute_drag_values(self, dx_mm: float, dy_mm: float, label_w: float, label_h: float) -> tuple[float, float, float, float]:
         if not self._drag_start:
@@ -1112,16 +1135,16 @@ class TemplateEditorDialog:
         self.elem_tree.item(str(idx), values=values)
 
     def draw_preview(self) -> None:
+        self._preview_redraw_job = None
         self.canvas.update_idletasks()
         self.canvas.delete("all")
-        self._canvas_items.clear()
         self._elem_rect_ids.clear()
         self._elem_handle_ids.clear()
         label_w, label_h = self._get_label_size_mm()
         canvas_w = int(self.canvas.winfo_width() or 300)
         canvas_h = int(self.canvas.winfo_height() or 200)
         scale = min((canvas_w - 20) / label_w, (canvas_h - 20) / label_h)
-        scale = max(2.0, min(scale, 12.0))
+        scale = max(0.2, min(scale, 12.0))
         self._preview_scale = scale
         margin = 10
         ox = margin
@@ -1144,10 +1167,22 @@ class TemplateEditorDialog:
             x2 = x1 + float(el.get("w_mm", 0)) * scale
             y2 = y1 + float(el.get("h_mm", 0)) * scale
             is_selected = selected == idx
-            rect = self.canvas.create_rectangle(x1, y1, x2, y2, outline=color, width=2 if is_selected else 1)
-            self.canvas.create_text((x1 + x2) / 2, (y1 + y2) / 2, text=el.get("element_type"), fill=color)
-            self.canvas.tag_bind(rect, "<Button-1>", self._on_canvas_select)
-            self._canvas_items[rect] = idx
+            rect = self.canvas.create_rectangle(
+                x1,
+                y1,
+                x2,
+                y2,
+                outline=color,
+                width=2 if is_selected else 1,
+                tags=("elem", f"elem:{idx}", "rect"),
+            )
+            self.canvas.create_text(
+                (x1 + x2) / 2,
+                (y1 + y2) / 2,
+                text=el.get("element_type"),
+                fill=color,
+                tags=("elem", f"elem:{idx}", "label"),
+            )
             self._elem_rect_ids[idx] = rect
             if is_selected:
                 handles = []
@@ -1166,9 +1201,8 @@ class TemplateEditorDialog:
                         hy + half,
                         fill="#ff8800",
                         outline="black",
-                        tags=("handle", tag, f"elem:{idx}"),
+                        tags=("elem", f"elem:{idx}", "handle", tag),
                     )
-                    self.canvas.tag_bind(hid, "<Button-1>", self._on_canvas_button_press)
                     handles.append(hid)
                 self._elem_handle_ids[idx] = handles
 

@@ -246,6 +246,89 @@ class TemplateManagerDialog:
             show_error("Шаблони", str(exc))
 
 
+class ElementPropertiesDialog:
+    def __init__(self, parent: TemplateEditorDialog):
+        self.parent = parent
+        self.root = tk.Toplevel(parent.root)
+        self.root.title("Властивості елемента")
+        self.root.transient(parent.root)
+        self.root.protocol("WM_DELETE_WINDOW", self.hide)
+        self.root.withdraw()
+
+        form = ttk.Frame(self.root, padding=8)
+        form.grid(row=0, column=0, sticky="nsew")
+        self.root.columnconfigure(0, weight=1)
+
+        for i in range(2):
+            form.columnconfigure(i, weight=1)
+
+        def ef(label: str, key: str, row: int, width: int = 12):
+            ttk.Label(form, text=label).grid(row=row, column=0, padx=4, pady=2, sticky="w")
+            entry = ttk.Entry(form, textvariable=self.parent.element_vars[key], width=width)
+            entry.grid(row=row, column=1, padx=4, pady=2, sticky="w")
+            return entry
+
+        ttk.Label(form, text="Тип").grid(row=0, column=0, padx=4, pady=2, sticky="w")
+        ttk.Combobox(
+            form,
+            textvariable=self.parent.element_vars["element_type"],
+            values=["text", "barcode", "rect", "line"],
+            state="readonly",
+        ).grid(row=0, column=1, padx=4, pady=2, sticky="w")
+        ef("Поле", "field_key", 1)
+        ef("X, мм", "x_mm", 2)
+        ef("Y, мм", "y_mm", 3)
+        ef("W, мм", "w_mm", 4)
+        ef("H, мм", "h_mm", 5)
+        ef("Поворот", "rotation_deg", 6)
+        ttk.Label(form, text="Вирівнювання").grid(row=7, column=0, padx=4, pady=2, sticky="w")
+        ttk.Combobox(
+            form,
+            textvariable=self.parent.element_vars["align"],
+            values=["left", "center", "right"],
+            state="readonly",
+        ).grid(row=7, column=1, padx=4, pady=2, sticky="w")
+        ttk.Label(form, text="Шрифт").grid(row=8, column=0, padx=4, pady=2, sticky="w")
+        ttk.Combobox(
+            form,
+            textvariable=self.parent.element_vars["font_name"],
+            values=["IL_SANS", "IL_SANS_BOLD", "Helvetica"],
+            state="normal",
+        ).grid(row=8, column=1, padx=4, pady=2, sticky="w")
+        ef("Розмір", "font_size", 9)
+        self.parent._max_chars_entry = ef("Макс. символів", "max_chars", 10)
+        ttk.Checkbutton(form, text="Перенос рядків (wrap)", variable=self.parent.element_vars["wrap"]).grid(
+            row=11, column=1, padx=4, pady=2, sticky="w"
+        )
+        ef("Шаблон тексту", "options.text_template", 12, width=24)
+        ef("Висота штрихкоду", "options.bar_height_mm", 13)
+        ttk.Checkbutton(form, text="Людське читання", variable=self.parent.element_vars["options.human_readable"]).grid(
+            row=14, column=1, padx=4, pady=2, sticky="w"
+        )
+        ttk.Checkbutton(form, text="Активний", variable=self.parent.element_vars["is_active"]).grid(
+            row=15, column=1, padx=4, pady=2, sticky="w"
+        )
+
+        btns = ttk.Frame(form)
+        btns.grid(row=16, column=0, columnspan=2, pady=6)
+        ttk.Button(btns, text="Оновити елемент", command=self.parent.update_selected_element).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Закрити", command=self.hide).pack(side=tk.LEFT, padx=4)
+
+    def show_for_selected(self) -> None:
+        if not self.parent.elem_tree.selection():
+            messagebox.showwarning("Елементи", "Оберіть елемент")
+            return
+        self.parent._fill_element_form()
+        self.bring_to_front()
+
+    def bring_to_front(self) -> None:
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
+    def hide(self) -> None:
+        self.root.withdraw()
+
 class TemplateEditorDialog:
     def __init__(self, parent, template_id: int | None = None, settings=None) -> None:
         self.parent = parent
@@ -321,9 +404,9 @@ class TemplateEditorDialog:
 
         content = ttk.Frame(outer)
         content.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        content.columnconfigure(0, weight=1)
         content.columnconfigure(1, weight=1)
         content.rowconfigure(1, weight=1)
-        content.rowconfigure(2, weight=1)
 
         tpl_frame = ttk.LabelFrame(content, text="Параметри шаблону")
         tpl_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=4)
@@ -383,7 +466,7 @@ class TemplateEditorDialog:
         elems_frame = ttk.LabelFrame(content, text="Елементи")
         elems_frame.grid(row=1, column=0, sticky="nsew", pady=4)
         elems_frame.columnconfigure(0, weight=1)
-        elems_frame.rowconfigure(1, weight=1)
+        elems_frame.rowconfigure(0, weight=1)
 
         self.elem_tree = ttk.Treeview(
             elems_frame,
@@ -409,20 +492,7 @@ class TemplateEditorDialog:
             self.elem_tree.column(col, width=width, anchor="center")
         self.elem_tree.grid(row=0, column=0, columnspan=4, sticky="nsew")
         self.elem_tree.bind("<<TreeviewSelect>>", lambda e: self._fill_element_form())
-
-        elem_btns = ttk.Frame(elems_frame)
-        elem_btns.grid(row=1, column=0, columnspan=4, pady=4)
-        ttk.Button(elem_btns, text="Додати текст", command=self.add_text_element).pack(side=tk.LEFT, padx=3)
-        ttk.Button(elem_btns, text="Додати штрихкод", command=self.add_barcode_element).pack(side=tk.LEFT, padx=3)
-        ttk.Button(elem_btns, text="Видалити", command=self.delete_element).pack(side=tk.LEFT, padx=3)
-        ttk.Button(elem_btns, text="Вгору", command=lambda: self.move_element(-1)).pack(side=tk.LEFT, padx=3)
-        ttk.Button(elem_btns, text="Вниз", command=lambda: self.move_element(1)).pack(side=tk.LEFT, padx=3)
-
-        # Element form
-        form = ttk.LabelFrame(content, text="Властивості елемента")
-        form.grid(row=1, column=1, sticky="nsew", padx=(8, 0), pady=4)
-        for i in range(2):
-            form.columnconfigure(i, weight=1)
+        self.elem_tree.bind("<Double-1>", lambda e: self.properties_dialog.show_for_selected())
 
         self.element_vars: dict[str, tk.Variable] = {
             "element_type": tk.StringVar(value="text"),
@@ -444,58 +514,22 @@ class TemplateEditorDialog:
         }
 
         self._max_chars_entry: ttk.Entry | None = None
+        self.properties_dialog = ElementPropertiesDialog(self)
 
-        def ef(label: str, key: str, row: int, width: int = 12):
-            ttk.Label(form, text=label).grid(row=row, column=0, padx=4, pady=2, sticky="w")
-            entry = ttk.Entry(form, textvariable=self.element_vars[key], width=width)
-            entry.grid(row=row, column=1, padx=4, pady=2, sticky="w")
-            return entry
-
-        ttk.Label(form, text="Тип").grid(row=0, column=0, padx=4, pady=2, sticky="w")
-        ttk.Combobox(
-            form,
-            textvariable=self.element_vars["element_type"],
-            values=["text", "barcode", "rect", "line"],
-            state="readonly",
-        ).grid(row=0, column=1, padx=4, pady=2, sticky="w")
-        ef("Поле", "field_key", 1)
-        ef("X, мм", "x_mm", 2)
-        ef("Y, мм", "y_mm", 3)
-        ef("W, мм", "w_mm", 4)
-        ef("H, мм", "h_mm", 5)
-        ef("Поворот", "rotation_deg", 6)
-        ttk.Label(form, text="Вирівнювання").grid(row=7, column=0, padx=4, pady=2, sticky="w")
-        ttk.Combobox(form, textvariable=self.element_vars["align"], values=["left", "center", "right"], state="readonly").grid(
-            row=7, column=1, padx=4, pady=2, sticky="w"
-        )
-        ttk.Label(form, text="Шрифт").grid(row=8, column=0, padx=4, pady=2, sticky="w")
-        ttk.Combobox(
-            form,
-            textvariable=self.element_vars["font_name"],
-            values=["IL_SANS", "IL_SANS_BOLD", "Helvetica"],
-            state="normal",
-        ).grid(row=8, column=1, padx=4, pady=2, sticky="w")
-        ef("Розмір", "font_size", 9)
-        self._max_chars_entry = ef("Макс. символів", "max_chars", 10)
-        ttk.Checkbutton(form, text="Перенос рядків (wrap)", variable=self.element_vars["wrap"]).grid(
-            row=11, column=1, padx=4, pady=2, sticky="w"
-        )
-        ef("Шаблон тексту", "options.text_template", 12, width=24)
-        ef("Висота штрихкоду", "options.bar_height_mm", 13)
-        ttk.Checkbutton(form, text="Людське читання", variable=self.element_vars["options.human_readable"]).grid(
-            row=14, column=1, padx=4, pady=2, sticky="w"
-        )
-        ttk.Checkbutton(form, text="Активний", variable=self.element_vars["is_active"]).grid(
-            row=15, column=1, padx=4, pady=2, sticky="w"
-        )
-
-        ttk.Button(form, text="Оновити елемент", command=self.update_selected_element).grid(
-            row=16, column=0, columnspan=2, pady=6
+        elem_btns = ttk.Frame(elems_frame)
+        elem_btns.grid(row=1, column=0, columnspan=4, pady=4)
+        ttk.Button(elem_btns, text="Додати текст", command=self.add_text_element).pack(side=tk.LEFT, padx=3)
+        ttk.Button(elem_btns, text="Додати штрихкод", command=self.add_barcode_element).pack(side=tk.LEFT, padx=3)
+        ttk.Button(elem_btns, text="Видалити", command=self.delete_element).pack(side=tk.LEFT, padx=3)
+        ttk.Button(elem_btns, text="Вгору", command=lambda: self.move_element(-1)).pack(side=tk.LEFT, padx=3)
+        ttk.Button(elem_btns, text="Вниз", command=lambda: self.move_element(1)).pack(side=tk.LEFT, padx=3)
+        ttk.Button(elem_btns, text="Властивості…", command=lambda: self.properties_dialog.show_for_selected()).pack(
+            side=tk.LEFT, padx=3
         )
 
         # Preview
         preview_frame = ttk.LabelFrame(content, text="Попередній перегляд")
-        preview_frame.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=4)
+        preview_frame.grid(row=1, column=1, sticky="nsew", padx=(8, 0), pady=4)
         preview_frame.columnconfigure(0, weight=1)
         preview_frame.rowconfigure(0, weight=1)
         self.canvas = tk.Canvas(preview_frame, height=220, background="white")
@@ -808,6 +842,11 @@ class TemplateEditorDialog:
             if res is True:
                 if not self.save_template():
                     return
+        if hasattr(self, "properties_dialog"):
+            try:
+                self.properties_dialog.root.destroy()
+            except Exception:
+                pass
         self.root.destroy()
 
     def mark_dirty(self) -> None:

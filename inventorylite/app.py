@@ -26,6 +26,7 @@ from openpyxl import load_workbook
 
 import db
 import labels
+from label_templates_ui import TemplateManagerDialog
 from utils import (
     APP_NAME,
     VERSION,
@@ -5184,10 +5185,85 @@ def open_products_bulk_actions_dialog(parent, db_conn, table_frame) -> None:
     labels_frame = ttk.LabelFrame(dlg, text="Етикетки (Code128)")
     labels_frame.grid(row=6, column=0, columnspan=3, padx=8, pady=4, sticky="ew")
     ttk.Label(labels_frame, text="Шаблон:").pack(side=tk.LEFT, padx=4, pady=4)
-    template_var = tk.StringVar(value="A4_3x8_70x35")
-    ttk.Combobox(
-        labels_frame, textvariable=template_var, state="readonly", values=["A4_3x8_70x35", "THERMAL_58x40"], width=18
-    ).pack(side=tk.LEFT, padx=4, pady=4)
+    template_display_var = tk.StringVar()
+    template_combo = ttk.Combobox(labels_frame, textvariable=template_display_var, state="readonly", width=26)
+    template_combo.pack(side=tk.LEFT, padx=4, pady=4)
+    template_map: dict[str, int] = {}
+    templates_cache: dict[int, dict] = {}
+
+    start_row_var = tk.StringVar(value="1")
+    start_col_var = tk.StringVar(value="1")
+    start_frame = ttk.Frame(labels_frame)
+    start_row_label = ttk.Label(start_frame, text="Ряд:")
+    start_row_spin = ttk.Spinbox(start_frame, from_=1, to=1, textvariable=start_row_var, width=4)
+    start_col_label = ttk.Label(start_frame, text="Кол:")
+    start_col_spin = ttk.Spinbox(start_frame, from_=1, to=1, textvariable=start_col_var, width=4)
+
+    def refresh_template_choices(selected_id: int | None = None) -> None:
+        nonlocal templates_cache
+        template_map.clear()
+        templates_cache = {}
+        try:
+            templates = db.list_label_templates(active_only=True)
+        except Exception:
+            logging.exception("Failed to load label templates")
+            show_error("Етикетки", "Не вдалося завантажити шаблони")
+            return
+        display_values: list[str] = []
+        default_display: str | None = None
+        last_selected_id = None
+        try:
+            last_selected_id = int(parent.settings.get("print", "last_template_id") or 0)
+        except Exception:
+            last_selected_id = None
+        for tpl in templates:
+            display = f"{tpl['title']} [{tpl['code']}]"
+            display_values.append(display)
+            template_map[display] = int(tpl["id"])
+            templates_cache[int(tpl["id"])] = dict(tpl)
+            if tpl.get("is_default"):
+                default_display = display
+        template_combo.configure(values=display_values)
+        target_id = selected_id or last_selected_id
+        if target_id and target_id in template_map.values():
+            for disp, tid in template_map.items():
+                if tid == target_id:
+                    template_display_var.set(disp)
+                    break
+        elif default_display:
+            template_display_var.set(default_display)
+        elif display_values:
+            template_display_var.set(display_values[0])
+        update_start_controls()
+
+    def update_start_controls(*_args) -> None:
+        display = template_display_var.get()
+        tpl_id = template_map.get(display)
+        tpl_row = templates_cache.get(tpl_id or -1)
+        is_sheet = tpl_row and (tpl_row.get("kind") == "sheet")
+        for widget in [start_row_label, start_row_spin, start_col_label, start_col_spin, start_frame]:
+            widget.pack_forget()
+        if is_sheet:
+            rows = max(int(tpl_row.get("rows", 1)), 1)
+            cols = max(int(tpl_row.get("cols", 1)), 1)
+            start_row_spin.configure(to=rows)
+            start_col_spin.configure(to=cols)
+            start_row_label.pack(side=tk.LEFT, padx=2)
+            start_row_spin.pack(side=tk.LEFT, padx=2)
+            start_col_label.pack(side=tk.LEFT, padx=2)
+            start_col_spin.pack(side=tk.LEFT, padx=2)
+            start_frame.pack(side=tk.LEFT, padx=4, pady=4)
+        else:
+            start_row_var.set("1")
+            start_col_var.set("1")
+
+    template_combo.bind("<<ComboboxSelected>>", update_start_controls)
+
+    def open_template_manager() -> None:
+        TemplateManagerDialog(parent)
+        refresh_template_choices()
+
+    ttk.Button(labels_frame, text="Шаблони…", command=open_template_manager).pack(side=tk.LEFT, padx=4, pady=4)
 
     ttk.Label(labels_frame, text="К-сть етикеток на товар:").pack(side=tk.LEFT, padx=4, pady=4)
     qty_var = tk.StringVar(value="1")
@@ -5197,6 +5273,8 @@ def open_products_bulk_actions_dialog(parent, db_conn, table_frame) -> None:
     ttk.Checkbutton(labels_frame, text="Друкувати також додаткові штрихкоди (аліаси)", variable=include_aliases_var).pack(
         side=tk.LEFT, padx=4, pady=4
     )
+
+    refresh_template_choices()
 
     def generate_labels() -> None:
         try:
@@ -5244,14 +5322,35 @@ def open_products_bulk_actions_dialog(parent, db_conn, table_frame) -> None:
                 }
                 for row in rows
             ]
-            labels.generate_product_labels_pdf(
+            tpl_display = template_display_var.get()
+            tpl_id = template_map.get(tpl_display)
+            if not tpl_id:
+                show_error("Етикетки", "Оберіть шаблон")
+                return
+            template_full = db.get_label_template_full(tpl_id)
+            if not template_full:
+                show_error("Етикетки", "Шаблон не знайдено")
+                return
+            try:
+                start_row = max(1, int(start_row_var.get() or 1))
+                start_col = max(1, int(start_col_var.get() or 1))
+            except ValueError:
+                start_row = start_col = 1
+            labels.generate_product_labels_pdf_v2(
                 Path(file_path),
                 items,
                 barcode_prefix=prefix,
                 qty_each=qty_each,
-                template=template_var.get() or "A4_3x8_70x35",
+                template_full=template_full,
                 include_aliases=bool(include_aliases_var.get()),
+                start_row=start_row,
+                start_col=start_col,
             )
+            try:
+                parent.settings.set(tpl_id, "print", "last_template_id")
+                parent.settings.save()
+            except Exception:
+                logging.exception("Failed to save template selection")
             open_file(Path(file_path))
         except Exception:
             logging.exception("Labels generation error")

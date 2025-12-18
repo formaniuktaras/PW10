@@ -210,34 +210,30 @@ def generate_product_labels_pdf_v2(
     today = datetime.date.today().isoformat()
 
     labels_iterator = _iter_labels(items, qty_each, include_aliases)
-    current_row = start_row - 1 if start_row > 0 else 0
-    current_col = start_col - 1 if start_col > 0 else 0
-
-    def next_position():
-        nonlocal current_col, current_row
-        if kind == "thermal":
-            if current_row or current_col:
-                current_row = current_col = 0
-            return 0, 0
-        col, row = current_col, current_row
-        current_col += 1
-        if current_col >= cols:
-            current_col = 0
-            current_row += 1
-        if current_row >= rows:
-            current_row = 0
-        return col, row
+    total_cells = max(cols * rows, 1)
+    try:
+        start_index = (max(start_row, 1) - 1) * cols + (max(start_col, 1) - 1)
+    except Exception:
+        start_index = 0
+    if start_index < 0 or start_index >= total_cells:
+        start_index = 0
+    printed_on_page = 0
 
     for code, name in labels_iterator:
-        col, row = next_position()
-        if kind != "thermal" and row >= rows:
-            c.showPage()
-            current_row = 0
-            current_col = 0
-            col, row = next_position()
-        if kind == "thermal" and (col != 0 or row != 0):
-            c.showPage()
+        if kind == "thermal":
             col = row = 0
+        else:
+            idx = start_index + printed_on_page
+            if idx >= total_cells:
+                c.showPage()
+                printed_on_page = 0
+                start_index = 0
+                idx = 0
+            row = idx // cols
+            col = idx % cols
+        if kind == "thermal" and printed_on_page:
+            c.showPage()
+            printed_on_page = 0
 
         x = margin_left + col * (label_w + gap_x) + offset_x
         y = page_h - margin_top - label_h - row * (label_h + gap_y) + offset_y
@@ -251,10 +247,13 @@ def generate_product_labels_pdf_v2(
             if not element.get("is_active", 1):
                 continue
             _draw_element(c, element, x, y, context, scale_x, scale_y)
+        printed_on_page += 1
         if kind == "thermal":
             c.showPage()
-        elif current_row >= rows:
+            printed_on_page = 0
+        elif printed_on_page >= total_cells:
             c.showPage()
-            current_row = current_col = 0
+            printed_on_page = 0
+            start_index = 0
 
     c.save()

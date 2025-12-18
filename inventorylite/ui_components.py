@@ -115,7 +115,9 @@ class TableFrame(ttk.Frame):
             row_id = self.tree.identify_row(event.y)
             if not row_id:
                 return
-            self.tree.selection_set(row_id)
+            selected = set(self.tree.selection())
+            if row_id not in selected:
+                self.tree.selection_set(row_id)
             self.tree.focus(row_id)
             try:
                 menu.tk_popup(event.x_root, event.y_root)

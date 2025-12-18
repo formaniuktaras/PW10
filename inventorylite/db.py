@@ -3269,6 +3269,9 @@ def create_label_template(payload: dict) -> int:
                     "options_json": options_json,
                 },
             )
+        if int(tpl.get("is_default", 0)):
+            conn.execute("UPDATE LabelTemplates SET is_default = 0 WHERE id <> ?", (tpl_id,))
+            conn.execute("UPDATE LabelTemplates SET is_default = 1 WHERE id = ?", (tpl_id,))
         return tpl_id
 
 
@@ -3311,6 +3314,9 @@ def update_label_template(template_id: int, payload: dict) -> None:
                     "options_json": options_json,
                 },
             )
+        if int(tpl.get("is_default", 0)):
+            conn.execute("UPDATE LabelTemplates SET is_default = 0 WHERE id <> ?", (template_id,))
+            conn.execute("UPDATE LabelTemplates SET is_default = 1 WHERE id = ?", (template_id,))
 
 
 def delete_label_template(template_id: int) -> None:

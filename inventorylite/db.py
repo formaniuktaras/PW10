@@ -10,6 +10,7 @@ transactions but are not added into inventory cost.
 """
 from __future__ import annotations
 
+import json
 import logging
 import math
 import sqlite3
@@ -291,9 +292,62 @@ def init_db() -> None:
                 FOREIGN KEY (purchase_line_id) REFERENCES PurchaseLines(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_extra_cost_allocations_doc ON ExtraCostAllocations(extra_cost_id);
+
+            CREATE TABLE IF NOT EXISTS LabelTemplates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code TEXT UNIQUE NOT NULL,
+                title TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                page_w_mm REAL NOT NULL,
+                page_h_mm REAL NOT NULL,
+                orientation TEXT NOT NULL DEFAULT 'portrait',
+                cols INTEGER NOT NULL,
+                rows INTEGER NOT NULL,
+                label_w_mm REAL NOT NULL,
+                label_h_mm REAL NOT NULL,
+                gap_x_mm REAL NOT NULL DEFAULT 0,
+                gap_y_mm REAL NOT NULL DEFAULT 0,
+                margin_left_mm REAL NOT NULL DEFAULT 0,
+                margin_top_mm REAL NOT NULL DEFAULT 0,
+                margin_right_mm REAL NOT NULL DEFAULT 0,
+                margin_bottom_mm REAL NOT NULL DEFAULT 0,
+                offset_x_mm REAL NOT NULL DEFAULT 0,
+                offset_y_mm REAL NOT NULL DEFAULT 0,
+                scale_x REAL NOT NULL DEFAULT 1.0,
+                scale_y REAL NOT NULL DEFAULT 1.0,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                is_default INTEGER NOT NULL DEFAULT 0,
+                schema_version INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_label_templates_active ON LabelTemplates(is_active);
+
+            CREATE TABLE IF NOT EXISTS LabelTemplateElements (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                template_id INTEGER NOT NULL REFERENCES LabelTemplates(id) ON DELETE CASCADE,
+                element_type TEXT NOT NULL,
+                field_key TEXT,
+                x_mm REAL NOT NULL,
+                y_mm REAL NOT NULL,
+                w_mm REAL NOT NULL,
+                h_mm REAL NOT NULL,
+                rotation_deg REAL NOT NULL DEFAULT 0,
+                align TEXT NOT NULL DEFAULT 'left',
+                font_name TEXT NOT NULL DEFAULT 'Helvetica',
+                font_size REAL NOT NULL DEFAULT 9,
+                max_chars INTEGER,
+                wrap INTEGER NOT NULL DEFAULT 0,
+                options_json TEXT,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                FOREIGN KEY (template_id) REFERENCES LabelTemplates(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_label_elements_template_sort ON LabelTemplateElements(template_id, sort_order);
             """
         )
         _migrate_schema(conn)
+        _ensure_label_templates(conn)
     logging.info("Database initialized at %s", db_path)
 
 
@@ -378,6 +432,63 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "PurchaseLines", "amount", "REAL NOT NULL DEFAULT 0")
     _ensure_column(conn, "PurchaseLines", "amount_doc", "REAL NOT NULL DEFAULT 0")
     _ensure_column(conn, "PurchaseLines", "purchase_price_base", "REAL NOT NULL DEFAULT 0")
+
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS LabelTemplates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT UNIQUE NOT NULL,
+            title TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            page_w_mm REAL NOT NULL,
+            page_h_mm REAL NOT NULL,
+            orientation TEXT NOT NULL DEFAULT 'portrait',
+            cols INTEGER NOT NULL,
+            rows INTEGER NOT NULL,
+            label_w_mm REAL NOT NULL,
+            label_h_mm REAL NOT NULL,
+            gap_x_mm REAL NOT NULL DEFAULT 0,
+            gap_y_mm REAL NOT NULL DEFAULT 0,
+            margin_left_mm REAL NOT NULL DEFAULT 0,
+            margin_top_mm REAL NOT NULL DEFAULT 0,
+            margin_right_mm REAL NOT NULL DEFAULT 0,
+            margin_bottom_mm REAL NOT NULL DEFAULT 0,
+            offset_x_mm REAL NOT NULL DEFAULT 0,
+            offset_y_mm REAL NOT NULL DEFAULT 0,
+            scale_x REAL NOT NULL DEFAULT 1.0,
+            scale_y REAL NOT NULL DEFAULT 1.0,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            is_default INTEGER NOT NULL DEFAULT 0,
+            schema_version INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_label_templates_active ON LabelTemplates(is_active);
+
+        CREATE TABLE IF NOT EXISTS LabelTemplateElements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            template_id INTEGER NOT NULL REFERENCES LabelTemplates(id) ON DELETE CASCADE,
+            element_type TEXT NOT NULL,
+            field_key TEXT,
+            x_mm REAL NOT NULL,
+            y_mm REAL NOT NULL,
+            w_mm REAL NOT NULL,
+            h_mm REAL NOT NULL,
+            rotation_deg REAL NOT NULL DEFAULT 0,
+            align TEXT NOT NULL DEFAULT 'left',
+            font_name TEXT NOT NULL DEFAULT 'Helvetica',
+            font_size REAL NOT NULL DEFAULT 9,
+            max_chars INTEGER,
+            wrap INTEGER NOT NULL DEFAULT 0,
+            options_json TEXT,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            FOREIGN KEY (template_id) REFERENCES LabelTemplates(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_label_elements_template_sort ON LabelTemplateElements(template_id, sort_order);
+        """
+    )
+
     _ensure_column(conn, "PurchaseLines", "extra_cost_allocated_base", "REAL NOT NULL DEFAULT 0")
 
     conn.execute(
@@ -413,6 +524,201 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
 
     _ensure_column(conn, "CashTransactions", "type", "TEXT NOT NULL DEFAULT 'other_income'")
     _ensure_column(conn, "CashTransactions", "counterparty_id", "INTEGER")
+
+
+def _ensure_label_templates(conn: sqlite3.Connection) -> None:
+    cur = conn.execute("SELECT COUNT(*) FROM LabelTemplates")
+    if cur.fetchone()[0]:
+        return
+
+    def _insert_template(payload: dict, elements: list[dict]) -> None:
+        conn.execute(
+            """
+            INSERT INTO LabelTemplates (
+                code, title, kind, page_w_mm, page_h_mm, orientation, cols, rows,
+                label_w_mm, label_h_mm, gap_x_mm, gap_y_mm, margin_left_mm, margin_top_mm,
+                margin_right_mm, margin_bottom_mm, offset_x_mm, offset_y_mm, scale_x, scale_y,
+                is_active, is_default
+            ) VALUES (
+                :code, :title, :kind, :page_w_mm, :page_h_mm, :orientation, :cols, :rows,
+                :label_w_mm, :label_h_mm, :gap_x_mm, :gap_y_mm, :margin_left_mm, :margin_top_mm,
+                :margin_right_mm, :margin_bottom_mm, :offset_x_mm, :offset_y_mm, :scale_x, :scale_y,
+                :is_active, :is_default
+            )
+            """,
+            payload,
+        )
+        tpl_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        for order, element in enumerate(elements):
+            element = {**element, "template_id": tpl_id, "sort_order": order}
+            element["options_json"] = json.dumps(element.get("options", {}))
+            conn.execute(
+                """
+                INSERT INTO LabelTemplateElements (
+                    template_id, element_type, field_key, x_mm, y_mm, w_mm, h_mm,
+                    rotation_deg, align, font_name, font_size, max_chars, wrap, options_json,
+                    sort_order, is_active
+                ) VALUES (
+                    :template_id, :element_type, :field_key, :x_mm, :y_mm, :w_mm, :h_mm,
+                    :rotation_deg, :align, :font_name, :font_size, :max_chars, :wrap, :options_json,
+                    :sort_order, :is_active
+                )
+                """,
+                element,
+            )
+
+    a4_template = {
+        "code": "A4_3x8_70x35",
+        "title": "A4 70x35 3x8",
+        "kind": "sheet",
+        "page_w_mm": 210,
+        "page_h_mm": 297,
+        "orientation": "portrait",
+        "cols": 3,
+        "rows": 8,
+        "label_w_mm": 68,
+        "label_h_mm": 35,
+        "gap_x_mm": 2,
+        "gap_y_mm": 2,
+        "margin_left_mm": 0,
+        "margin_top_mm": 0,
+        "margin_right_mm": 0,
+        "margin_bottom_mm": 0,
+        "offset_x_mm": 0,
+        "offset_y_mm": 0,
+        "scale_x": 1.0,
+        "scale_y": 1.0,
+        "is_active": 1,
+        "is_default": 1,
+    }
+    a4_elements = [
+        {
+            "element_type": "barcode",
+            "field_key": "code",
+            "x_mm": 2,
+            "y_mm": 14,
+            "w_mm": 64,
+            "h_mm": 17,
+            "rotation_deg": 0,
+            "align": "center",
+            "font_name": "Helvetica",
+            "font_size": 9,
+            "max_chars": None,
+            "wrap": 0,
+            "options": {"bar_height_mm": 12, "human_readable": False},
+            "is_active": 1,
+        },
+        {
+            "element_type": "text",
+            "field_key": "code",
+            "x_mm": 2,
+            "y_mm": 12,
+            "w_mm": 64,
+            "h_mm": 4,
+            "align": "center",
+            "font_name": "Helvetica",
+            "font_size": 8,
+            "max_chars": 32,
+            "wrap": 0,
+            "options": {"text_template": "{code}"},
+            "rotation_deg": 0,
+            "is_active": 1,
+        },
+        {
+            "element_type": "text",
+            "field_key": "name",
+            "x_mm": 2,
+            "y_mm": 2,
+            "w_mm": 64,
+            "h_mm": 8,
+            "align": "left",
+            "font_name": "Helvetica",
+            "font_size": 9,
+            "max_chars": 40,
+            "wrap": 0,
+            "options": {"text_template": "{name}"},
+            "rotation_deg": 0,
+            "is_active": 1,
+        },
+    ]
+
+    thermal_template = {
+        "code": "THERMAL_58x40",
+        "title": "Термал 58x40",
+        "kind": "thermal",
+        "page_w_mm": 58,
+        "page_h_mm": 40,
+        "orientation": "portrait",
+        "cols": 1,
+        "rows": 1,
+        "label_w_mm": 58,
+        "label_h_mm": 40,
+        "gap_x_mm": 0,
+        "gap_y_mm": 0,
+        "margin_left_mm": 0,
+        "margin_top_mm": 0,
+        "margin_right_mm": 0,
+        "margin_bottom_mm": 0,
+        "offset_x_mm": 0,
+        "offset_y_mm": 0,
+        "scale_x": 1.0,
+        "scale_y": 1.0,
+        "is_active": 1,
+        "is_default": 0,
+    }
+    thermal_elements = [
+        {
+            "element_type": "barcode",
+            "field_key": "code",
+            "x_mm": 2,
+            "y_mm": 20,
+            "w_mm": 54,
+            "h_mm": 16,
+            "rotation_deg": 0,
+            "align": "center",
+            "font_name": "Helvetica",
+            "font_size": 9,
+            "max_chars": None,
+            "wrap": 0,
+            "options": {"bar_height_mm": 12, "human_readable": False},
+            "is_active": 1,
+        },
+        {
+            "element_type": "text",
+            "field_key": "code",
+            "x_mm": 2,
+            "y_mm": 16,
+            "w_mm": 54,
+            "h_mm": 4,
+            "align": "center",
+            "font_name": "Helvetica",
+            "font_size": 8,
+            "max_chars": 32,
+            "wrap": 0,
+            "options": {"text_template": "{code}"},
+            "rotation_deg": 0,
+            "is_active": 1,
+        },
+        {
+            "element_type": "text",
+            "field_key": "name",
+            "x_mm": 2,
+            "y_mm": 4,
+            "w_mm": 54,
+            "h_mm": 10,
+            "align": "left",
+            "font_name": "Helvetica",
+            "font_size": 9,
+            "max_chars": 40,
+            "wrap": 0,
+            "options": {"text_template": "{name}"},
+            "rotation_deg": 0,
+            "is_active": 1,
+        },
+    ]
+
+    _insert_template(a4_template, a4_elements)
+    _insert_template(thermal_template, thermal_elements)
     _ensure_column(conn, "CashTransactions", "related_doc_type", "TEXT")
     _ensure_column(conn, "CashTransactions", "related_doc_id", "INTEGER")
     _ensure_column(conn, "CashTransactions", "channel", "TEXT")
@@ -2855,5 +3161,181 @@ def export_table_to_csv(table: str, output_path: Path) -> None:
         writer.writerow([col[0] for col in rows.description])
         writer.writerows(rows)
     logging.info("Exported %s to %s", table, output_path)
+
+
+# Label template helpers
+def list_label_templates(active_only: bool = True) -> list[sqlite3.Row]:
+    query = "SELECT * FROM LabelTemplates"
+    params: list = []
+    if active_only:
+        query += " WHERE is_active = 1"
+    query += " ORDER BY is_default DESC, title"
+    with get_connection() as conn:
+        return conn.execute(query, params).fetchall()
+
+
+def get_label_template(template_id: int) -> sqlite3.Row | None:
+    with get_connection() as conn:
+        return conn.execute("SELECT * FROM LabelTemplates WHERE id = ?", (template_id,)).fetchone()
+
+
+def get_label_template_by_code(code: str) -> sqlite3.Row | None:
+    with get_connection() as conn:
+        return conn.execute("SELECT * FROM LabelTemplates WHERE code = ?", (code,)).fetchone()
+
+
+def list_label_template_elements(template_id: int) -> list[sqlite3.Row]:
+    with get_connection() as conn:
+        return conn.execute(
+            "SELECT * FROM LabelTemplateElements WHERE template_id = ? AND is_active = 1 ORDER BY sort_order, id",
+            (template_id,),
+        ).fetchall()
+
+
+def get_label_template_full(template_id: int) -> dict | None:
+    tpl_row = get_label_template(template_id)
+    if not tpl_row:
+        return None
+    elements = list_label_template_elements(template_id)
+    parsed = []
+    for el in elements:
+        options: dict
+        try:
+            options = json.loads(el["options_json"] or "{}")
+        except Exception:
+            options = {}
+        parsed.append({**dict(el), "options": options})
+    return {"template": dict(tpl_row), "elements": parsed}
+
+
+def _validate_template_payload(payload: dict) -> None:
+    tpl = payload.get("template") or {}
+    required_numeric_positive = [
+        "page_w_mm",
+        "page_h_mm",
+        "cols",
+        "rows",
+        "label_w_mm",
+        "label_h_mm",
+    ]
+    for key in required_numeric_positive:
+        if tpl.get(key) is None or float(tpl[key]) <= 0:
+            raise ValueError(f"Некоректне поле шаблону: {key}")
+    if tpl.get("code"):
+        tpl["code"] = str(tpl["code"]).strip()
+    if not tpl.get("code"):
+        raise ValueError("Код шаблону обов'язковий")
+    if tpl.get("kind") not in ("sheet", "thermal"):
+        raise ValueError("Непідтримуваний тип шаблону")
+
+
+def create_label_template(payload: dict) -> int:
+    _validate_template_payload(payload)
+    tpl = payload.get("template") or {}
+    elements = payload.get("elements") or []
+    with get_connection() as conn:
+        conn.execute("BEGIN")
+        cur = conn.execute(
+            """
+            INSERT INTO LabelTemplates (
+                code, title, kind, page_w_mm, page_h_mm, orientation, cols, rows, label_w_mm, label_h_mm,
+                gap_x_mm, gap_y_mm, margin_left_mm, margin_top_mm, margin_right_mm, margin_bottom_mm,
+                offset_x_mm, offset_y_mm, scale_x, scale_y, is_active, is_default
+            ) VALUES (
+                :code, :title, :kind, :page_w_mm, :page_h_mm, :orientation, :cols, :rows, :label_w_mm, :label_h_mm,
+                :gap_x_mm, :gap_y_mm, :margin_left_mm, :margin_top_mm, :margin_right_mm, :margin_bottom_mm,
+                :offset_x_mm, :offset_y_mm, :scale_x, :scale_y, :is_active, :is_default
+            )
+            """,
+            tpl,
+        )
+        tpl_id = cur.lastrowid
+        for order, element in enumerate(elements):
+            options_json = json.dumps(element.get("options", {}))
+            conn.execute(
+                """
+                INSERT INTO LabelTemplateElements (
+                    template_id, element_type, field_key, x_mm, y_mm, w_mm, h_mm, rotation_deg, align, font_name,
+                    font_size, max_chars, wrap, options_json, sort_order, is_active
+                ) VALUES (
+                    :template_id, :element_type, :field_key, :x_mm, :y_mm, :w_mm, :h_mm, :rotation_deg, :align, :font_name,
+                    :font_size, :max_chars, :wrap, :options_json, :sort_order, :is_active
+                )
+                """,
+                {
+                    **element,
+                    "template_id": tpl_id,
+                    "sort_order": element.get("sort_order", order),
+                    "options_json": options_json,
+                },
+            )
+        return tpl_id
+
+
+def update_label_template(template_id: int, payload: dict) -> None:
+    _validate_template_payload(payload)
+    tpl = payload.get("template") or {}
+    elements = payload.get("elements") or []
+    with get_connection() as conn:
+        conn.execute("BEGIN")
+        conn.execute(
+            """
+            UPDATE LabelTemplates SET
+                code=:code, title=:title, kind=:kind, page_w_mm=:page_w_mm, page_h_mm=:page_h_mm,
+                orientation=:orientation, cols=:cols, rows=:rows, label_w_mm=:label_w_mm, label_h_mm=:label_h_mm,
+                gap_x_mm=:gap_x_mm, gap_y_mm=:gap_y_mm, margin_left_mm=:margin_left_mm, margin_top_mm=:margin_top_mm,
+                margin_right_mm=:margin_right_mm, margin_bottom_mm=:margin_bottom_mm, offset_x_mm=:offset_x_mm,
+                offset_y_mm=:offset_y_mm, scale_x=:scale_x, scale_y=:scale_y, is_active=:is_active,
+                updated_at=CURRENT_TIMESTAMP
+            WHERE id = :id
+            """,
+            {**tpl, "id": template_id},
+        )
+        conn.execute("DELETE FROM LabelTemplateElements WHERE template_id = ?", (template_id,))
+        for order, element in enumerate(elements):
+            options_json = json.dumps(element.get("options", {}))
+            conn.execute(
+                """
+                INSERT INTO LabelTemplateElements (
+                    template_id, element_type, field_key, x_mm, y_mm, w_mm, h_mm, rotation_deg, align, font_name,
+                    font_size, max_chars, wrap, options_json, sort_order, is_active
+                ) VALUES (
+                    :template_id, :element_type, :field_key, :x_mm, :y_mm, :w_mm, :h_mm, :rotation_deg, :align, :font_name,
+                    :font_size, :max_chars, :wrap, :options_json, :sort_order, :is_active
+                )
+                """,
+                {
+                    **element,
+                    "template_id": template_id,
+                    "sort_order": element.get("sort_order", order),
+                    "options_json": options_json,
+                },
+            )
+
+
+def delete_label_template(template_id: int) -> None:
+    tpl = get_label_template(template_id)
+    if not tpl:
+        return
+    if tpl["is_default"]:
+        raise ValueError("Спочатку призначте інший шаблон типовим")
+    with get_connection() as conn:
+        conn.execute("DELETE FROM LabelTemplates WHERE id = ?", (template_id,))
+
+
+def set_default_label_template(template_id: int) -> None:
+    with get_connection() as conn:
+        conn.execute("BEGIN")
+        conn.execute("UPDATE LabelTemplates SET is_default = 0")
+        conn.execute("UPDATE LabelTemplates SET is_default = 1 WHERE id = ?", (template_id,))
+
+
+def duplicate_label_template(template_id: int, new_code: str, new_title: str) -> int:
+    data = get_label_template_full(template_id)
+    if not data:
+        raise ValueError("Шаблон не знайдено")
+    tpl = data["template"].copy()
+    tpl.update({"code": new_code, "title": new_title, "is_default": 0})
+    return create_label_template({"template": tpl, "elements": data["elements"]})
 
 

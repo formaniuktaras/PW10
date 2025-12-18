@@ -5638,13 +5638,16 @@ def open_labels_print_dialog(parent, items: list[dict], mode_title: str) -> None
 
     def update_summary(*_args) -> None:
         positions, labels_count, skipped = compute_summary()
-        text = f"Позицій: {positions} | Етикеток (без аліасів): {labels_count}"
+        text = f"Позицій: {positions} | Етикеток (SKU): {labels_count}"
+        if include_aliases_var.get():
+            text += " + аліаси"
         if rounding_var.get() == "skip" and skipped:
             text += f" | Пропущено дробових: {skipped}"
         info_var.set(text)
 
     rounding_combo.bind("<<ComboboxSelected>>", update_summary)
     multiplier_var.trace_add("write", update_summary)
+    include_aliases_var.trace_add("write", update_summary)
 
     refresh_template_choices()
     update_summary()

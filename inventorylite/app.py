@@ -5216,12 +5216,14 @@ def open_products_bulk_actions_dialog(parent, db_conn, table_frame) -> None:
             last_selected_id = int(parent.settings.get("print", "last_template_id") or 0)
         except Exception:
             last_selected_id = None
-        for tpl in templates:
+        for row in templates:
+            tpl = dict(row)
             display = f"{tpl['title']} [{tpl['code']}]"
             display_values.append(display)
-            template_map[display] = int(tpl["id"])
-            templates_cache[int(tpl["id"])] = dict(tpl)
-            if tpl.get("is_default"):
+            tid = int(tpl["id"])
+            template_map[display] = tid
+            templates_cache[tid] = tpl
+            if int(tpl.get("is_default") or 0) == 1:
                 default_display = display
         template_combo.configure(values=display_values)
         target_id = selected_id or last_selected_id
@@ -5260,7 +5262,8 @@ def open_products_bulk_actions_dialog(parent, db_conn, table_frame) -> None:
     template_combo.bind("<<ComboboxSelected>>", update_start_controls)
 
     def open_template_manager() -> None:
-        TemplateManagerDialog(parent, settings=getattr(parent, "settings", None))
+        dlg = TemplateManagerDialog(parent, settings=getattr(parent, "settings", None))
+        parent.wait_window(dlg.root)
         refresh_template_choices()
 
     ttk.Button(labels_frame, text="Шаблони…", command=open_template_manager).pack(side=tk.LEFT, padx=4, pady=4)

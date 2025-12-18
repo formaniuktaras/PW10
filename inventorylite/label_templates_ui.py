@@ -359,6 +359,16 @@ class TemplateEditorDialog:
         self.elements: list[dict[str, Any]] = []
         self._code_entry = None
 
+        self._preview_scale: float = 1.0
+        self._canvas_items: dict[int, int] = {}
+        self._elem_rect_ids: dict[int, int] = {}
+        self._elem_handle_ids: dict[int, list[int]] = {}
+        self._active_elem_index: int | None = None
+        self._drag_mode: str | None = None
+        self._resize_handle: str | None = None
+        self._drag_start: dict[str, float] | None = None
+        self._drag_last_values: tuple[float, float, float, float] | None = None
+
         self._load_data()
         self._build_ui()
         self.root.wait_window(self.root)
@@ -491,7 +501,7 @@ class TemplateEditorDialog:
             self.elem_tree.heading(col, text=text)
             self.elem_tree.column(col, width=width, anchor="center")
         self.elem_tree.grid(row=0, column=0, columnspan=4, sticky="nsew")
-        self.elem_tree.bind("<<TreeviewSelect>>", lambda e: self._fill_element_form())
+        self.elem_tree.bind("<<TreeviewSelect>>", self._on_tree_select)
         self.elem_tree.bind("<Double-1>", lambda e: self.properties_dialog.show_for_selected())
 
         self.element_vars: dict[str, tk.Variable] = {
@@ -534,6 +544,9 @@ class TemplateEditorDialog:
         preview_frame.rowconfigure(0, weight=1)
         self.canvas = tk.Canvas(preview_frame, height=220, background="white")
         self.canvas.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        self.canvas.bind("<Button-1>", self._on_canvas_button_press)
+        self.canvas.bind("<B1-Motion>", self._on_canvas_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_canvas_button_release)
         ttk.Button(preview_frame, text="Оновити прев'ю", command=self.draw_preview).grid(row=1, column=0, pady=4)
 
         action_bar = ttk.Frame(outer)
@@ -610,6 +623,16 @@ class TemplateEditorDialog:
             var = self.element_vars.get(key)
             if var is not None:
                 self._set_var_safe(var, value)
+
+    def _on_tree_select(self, *_: Any) -> None:
+        sel = self.elem_tree.selection()
+        idx = int(sel[0]) if sel else None
+        if idx is not None and idx < len(self.elements):
+            self._active_elem_index = idx
+        else:
+            self._active_elem_index = None
+        self._fill_element_form()
+        self.draw_preview()
 
     def _parse_float(self, raw: str | None, default: float = 0.0) -> float:
         s = (raw or "").strip()
@@ -739,6 +762,7 @@ class TemplateEditorDialog:
             el["options"] = options
             self.refresh_elements_tree()
             self.mark_dirty()
+            self.draw_preview()
         except ValueError:
             show_error("Елементи", "Перевірте числа (X, Y, W, H, Розмір, Макс. символів).")
 
@@ -868,33 +892,285 @@ class TemplateEditorDialog:
         self.base_title = base
         self.root.title(f"{self.base_title}{' *' if self.dirty else ''}")
 
-    def draw_preview(self) -> None:
-        self.canvas.delete("all")
+    def _get_label_size_mm(self) -> tuple[float, float]:
         try:
             tpl = self._collect_template_data()
         except Exception:
+            return (1.0, 1.0)
+        label_w = float(tpl.get("label_w_mm") or 1.0)
+        label_h = float(tpl.get("label_h_mm") or 1.0)
+        return (label_w, label_h)
+
+    def _mm_to_px(self, value_mm: float) -> float:
+        return float(value_mm or 0.0) * (self._preview_scale or 1.0)
+
+    def _px_to_mm(self, value_px: float) -> float:
+        if not self._preview_scale:
+            return 0.0
+        return float(value_px) / self._preview_scale
+
+    def _set_active_element(self, idx: int | None, redraw: bool = True, update_tree: bool = True) -> None:
+        if idx is None or idx >= len(self.elements):
             return
-        label_w = float(tpl.get("label_w_mm") or 1)
-        label_h = float(tpl.get("label_h_mm") or 1)
-        padding = 10
+        self._active_elem_index = idx
+        if update_tree:
+            self.elem_tree.selection_set(str(idx))
+            self.elem_tree.see(str(idx))
+        self._fill_element_form()
+        if redraw:
+            self.draw_preview()
+
+    def _update_element_vars_live(self, x_mm: float, y_mm: float, w_mm: float, h_mm: float) -> None:
+        if not getattr(self, "properties_dialog", None):
+            return
+        if not self.properties_dialog.root.winfo_viewable():
+            return
+        for key, val in {
+            "x_mm": f"{x_mm:.2f}",
+            "y_mm": f"{y_mm:.2f}",
+            "w_mm": f"{w_mm:.2f}",
+            "h_mm": f"{h_mm:.2f}",
+        }.items():
+            var = self.element_vars.get(key)
+            if var is not None:
+                self._set_var_safe(var, val)
+
+    def _update_canvas_geometry(self, idx: int, x_mm: float, y_mm: float, w_mm: float, h_mm: float) -> None:
+        rect_id = self._elem_rect_ids.get(idx)
+        if not rect_id:
+            return
+        margin = 10
+        scale = self._preview_scale or 1.0
+        x1 = margin + x_mm * scale
+        y1 = margin + y_mm * scale
+        x2 = x1 + w_mm * scale
+        y2 = y1 + h_mm * scale
+        self.canvas.coords(rect_id, x1, y1, x2, y2)
+        coords = {
+            "nw": (x1, y1),
+            "ne": (x2, y1),
+            "sw": (x1, y2),
+            "se": (x2, y2),
+        }
+        handle_size = 6
+        half = handle_size / 2
+        for handle_id in self._elem_handle_ids.get(idx, []):
+            tags = self.canvas.gettags(handle_id)
+            handle_tag = next((t for t in tags if t in coords), None)
+            if handle_tag:
+                hx, hy = coords[handle_tag]
+                self.canvas.coords(handle_id, hx - half, hy - half, hx + half, hy + half)
+
+    def _on_canvas_select(self, event: tk.Event) -> None:
+        item = self.canvas.find_closest(event.x, event.y)
+        if not item:
+            return
+        idx = self._canvas_items.get(item[0])
+        if idx is None:
+            return
+        self._set_active_element(idx)
+
+    def _on_canvas_button_press(self, event: tk.Event) -> None:
+        self._drag_mode = None
+        self._resize_handle = None
+        self._drag_start = None
+        self._drag_last_values = None
+        item = self.canvas.find_withtag("current")
+        if not item:
+            return
+        item_id = item[0]
+        idx = None
+        tags = self.canvas.gettags(item_id)
+        if "handle" in tags:
+            elem_tag = next((t for t in tags if t.startswith("elem:")), None)
+            handle_tag = next((t for t in tags if t in ("nw", "ne", "sw", "se")), None)
+            if elem_tag and handle_tag:
+                idx = int(elem_tag.split(":", 1)[1])
+                self._drag_mode = "resize"
+                self._resize_handle = handle_tag
+        elif item_id in self._canvas_items:
+            idx = self._canvas_items[item_id]
+            self._drag_mode = "move"
+        if idx is None or idx >= len(self.elements):
+            self._drag_mode = None
+            return
+        self._set_active_element(idx, redraw=True)
+        el = self.elements[idx]
+        self._drag_start = {
+            "x_px": float(event.x),
+            "y_px": float(event.y),
+            "orig_x_mm": float(el.get("x_mm", 0.0)),
+            "orig_y_mm": float(el.get("y_mm", 0.0)),
+            "orig_w_mm": float(el.get("w_mm", 0.0)),
+            "orig_h_mm": float(el.get("h_mm", 0.0)),
+        }
+
+    def _compute_drag_values(self, dx_mm: float, dy_mm: float, label_w: float, label_h: float) -> tuple[float, float, float, float]:
+        if not self._drag_start:
+            return (0.0, 0.0, 0.0, 0.0)
+        min_size = 1.0
+        handle = self._resize_handle or ""
+        orig_x = self._drag_start["orig_x_mm"]
+        orig_y = self._drag_start["orig_y_mm"]
+        orig_w = self._drag_start["orig_w_mm"]
+        orig_h = self._drag_start["orig_h_mm"]
+        if self._drag_mode == "move":
+            new_x = min(max(orig_x + dx_mm, 0.0), max(0.0, label_w - orig_w))
+            new_y = min(max(orig_y + dy_mm, 0.0), max(0.0, label_h - orig_h))
+            return (new_x, new_y, orig_w, orig_h)
+
+        x1 = orig_x
+        y1 = orig_y
+        x2 = orig_x + orig_w
+        y2 = orig_y + orig_h
+        if "w" in handle:
+            x1 += dx_mm
+        if "n" in handle:
+            y1 += dy_mm
+        if "e" in handle:
+            x2 += dx_mm
+        if "s" in handle:
+            y2 += dy_mm
+        x1 = max(0.0, x1)
+        y1 = max(0.0, y1)
+        x2 = min(label_w, x2)
+        y2 = min(label_h, y2)
+        if x2 - x1 < min_size:
+            if "w" in handle:
+                x1 = x2 - min_size
+            else:
+                x2 = x1 + min_size
+        if y2 - y1 < min_size:
+            if "n" in handle:
+                y1 = y2 - min_size
+            else:
+                y2 = y1 + min_size
+        x1 = min(max(0.0, x1), max(0.0, label_w - min_size))
+        y1 = min(max(0.0, y1), max(0.0, label_h - min_size))
+        x2 = min(label_w, max(x1 + min_size, x2))
+        y2 = min(label_h, max(y1 + min_size, y2))
+        return (x1, y1, x2 - x1, y2 - y1)
+
+    def _on_canvas_drag(self, event: tk.Event) -> None:
+        if self._drag_mode not in ("move", "resize") or self._active_elem_index is None or not self._drag_start:
+            return
+        label_w, label_h = self._get_label_size_mm()
+        dx_px = float(event.x) - self._drag_start.get("x_px", 0.0)
+        dy_px = float(event.y) - self._drag_start.get("y_px", 0.0)
+        dx_mm = self._px_to_mm(dx_px)
+        dy_mm = self._px_to_mm(dy_px)
+        new_x, new_y, new_w, new_h = self._compute_drag_values(dx_mm, dy_mm, label_w, label_h)
+        self._drag_last_values = (new_x, new_y, new_w, new_h)
+        self._update_element_vars_live(new_x, new_y, new_w, new_h)
+        self._update_canvas_geometry(self._active_elem_index, new_x, new_y, new_w, new_h)
+
+    def _on_canvas_button_release(self, event: tk.Event) -> None:
+        if self._drag_mode not in ("move", "resize") or self._active_elem_index is None:
+            return
+        idx = self._active_elem_index
+        if idx >= len(self.elements):
+            return
+        label_w, label_h = self._get_label_size_mm()
+        if self._drag_start and not self._drag_last_values:
+            dx_mm = self._px_to_mm(float(event.x) - self._drag_start.get("x_px", 0.0))
+            dy_mm = self._px_to_mm(float(event.y) - self._drag_start.get("y_px", 0.0))
+            self._drag_last_values = self._compute_drag_values(dx_mm, dy_mm, label_w, label_h)
+        if not self._drag_last_values:
+            return
+        new_x, new_y, new_w, new_h = self._drag_last_values
+        el = self.elements[idx]
+        orig_vals = (
+            float(el.get("x_mm", 0.0)),
+            float(el.get("y_mm", 0.0)),
+            float(el.get("w_mm", 0.0)),
+            float(el.get("h_mm", 0.0)),
+        )
+        if all(abs(n - o) < 1e-6 for n, o in zip((new_x, new_y, new_w, new_h), orig_vals)):
+            self._drag_mode = None
+            self._resize_handle = None
+            self._drag_start = None
+            self._drag_last_values = None
+            return
+        el.update({"x_mm": float(new_x), "y_mm": float(new_y), "w_mm": float(new_w), "h_mm": float(new_h)})
+        self._update_tree_item(idx, el)
+        self.mark_dirty()
+        self.draw_preview()
+        self._drag_mode = None
+        self._resize_handle = None
+        self._drag_start = None
+        self._drag_last_values = None
+
+    def _update_tree_item(self, idx: int, el: dict[str, Any]) -> None:
+        if str(idx) not in self.elem_tree.get_children():
+            return
+        values = list(self.elem_tree.item(str(idx), "values"))
+        if len(values) >= 7:
+            values[3] = el.get("x_mm")
+            values[4] = el.get("y_mm")
+            values[5] = el.get("w_mm")
+            values[6] = el.get("h_mm")
+        self.elem_tree.item(str(idx), values=values)
+
+    def draw_preview(self) -> None:
+        self.canvas.update_idletasks()
+        self.canvas.delete("all")
+        self._canvas_items.clear()
+        self._elem_rect_ids.clear()
+        self._elem_handle_ids.clear()
+        label_w, label_h = self._get_label_size_mm()
         canvas_w = int(self.canvas.winfo_width() or 300)
         canvas_h = int(self.canvas.winfo_height() or 200)
-        scale = min((canvas_w - 2 * padding) / label_w, (canvas_h - 2 * padding) / label_h)
-        scale = max(scale, 1)
-        ox = padding
-        oy = padding
+        scale = min((canvas_w - 20) / label_w, (canvas_h - 20) / label_h)
+        scale = max(2.0, min(scale, 12.0))
+        self._preview_scale = scale
+        margin = 10
+        ox = margin
+        oy = margin
         self.canvas.create_rectangle(ox, oy, ox + label_w * scale, oy + label_h * scale, outline="black")
-        for el in self.elements:
+        selected = self._active_elem_index
+        if selected is None:
+            sel = self.elem_tree.selection()
+            if sel:
+                try:
+                    selected = int(sel[0])
+                except ValueError:
+                    selected = None
+        for idx, el in enumerate(self.elements):
             if not el.get("is_active", 1):
-                color = "#cccccc"
-            else:
-                color = "#4287f5"
+                continue
+            color = "#4287f5"
             x1 = ox + float(el.get("x_mm", 0)) * scale
             y1 = oy + float(el.get("y_mm", 0)) * scale
             x2 = x1 + float(el.get("w_mm", 0)) * scale
             y2 = y1 + float(el.get("h_mm", 0)) * scale
-            self.canvas.create_rectangle(x1, y1, x2, y2, outline=color)
+            is_selected = selected == idx
+            rect = self.canvas.create_rectangle(x1, y1, x2, y2, outline=color, width=2 if is_selected else 1)
             self.canvas.create_text((x1 + x2) / 2, (y1 + y2) / 2, text=el.get("element_type"), fill=color)
+            self.canvas.tag_bind(rect, "<Button-1>", self._on_canvas_select)
+            self._canvas_items[rect] = idx
+            self._elem_rect_ids[idx] = rect
+            if is_selected:
+                handles = []
+                handle_size = 6
+                half = handle_size / 2
+                for hx, hy, tag in [
+                    (x1, y1, "nw"),
+                    (x2, y1, "ne"),
+                    (x1, y2, "sw"),
+                    (x2, y2, "se"),
+                ]:
+                    hid = self.canvas.create_rectangle(
+                        hx - half,
+                        hy - half,
+                        hx + half,
+                        hy + half,
+                        fill="#ff8800",
+                        outline="black",
+                        tags=("handle", tag, f"elem:{idx}"),
+                    )
+                    self.canvas.tag_bind(hid, "<Button-1>", self._on_canvas_button_press)
+                    handles.append(hid)
+                self._elem_handle_ids[idx] = handles
 
     def generate_test_pdf(self) -> None:
         try:

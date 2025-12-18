@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -251,11 +252,15 @@ class TemplateEditorDialog:
         self.settings = settings
         self.template_id = template_id
         self.saved = False
+        self.dirty = False
 
         self.root = tk.Toplevel(parent)
         self.root.title("Редактор шаблону")
         self.root.grab_set()
         self.root.resizable(True, True)
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        self.base_title = "Редактор шаблону"
 
         self.template_vars: dict[str, tk.StringVar] = {}
         self.bool_vars: dict[str, tk.BooleanVar] = {}
@@ -468,13 +473,15 @@ class TemplateEditorDialog:
         ttk.Button(preview_frame, text="Оновити прев'ю", command=self.draw_preview).grid(row=1, column=0, pady=4)
 
         action_frame = ttk.Frame(main)
-        action_frame.grid(row=3, column=0, columnspan=2, pady=8)
-        ttk.Button(action_frame, text="Тестовий PDF", command=self.generate_test_pdf).pack(side=tk.LEFT, padx=5)
-        ttk.Button(action_frame, text="Зберегти", command=self.save).pack(side=tk.LEFT, padx=5)
-        ttk.Button(action_frame, text="Закрити", command=self.root.destroy).pack(side=tk.LEFT, padx=5)
+        action_frame.grid(row=3, column=0, columnspan=2, pady=8, sticky="e")
+        ttk.Button(action_frame, text="Тестовий PDF", command=self.generate_test_pdf).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(action_frame, text="Зберегти шаблон", command=self.save_template).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(action_frame, text="Закрити", command=self.on_close).pack(side=tk.RIGHT, padx=5)
 
         self.refresh_elements_tree()
         self.draw_preview()
+        self._bind_dirty_traces()
+        self._update_title()
 
     def refresh_elements_tree(self) -> None:
         for i in self.elem_tree.get_children():
@@ -553,6 +560,7 @@ class TemplateEditorDialog:
         }
         self.elements.append(el)
         self.refresh_elements_tree()
+        self.mark_dirty()
 
     def add_barcode_element(self) -> None:
         el = {
@@ -574,6 +582,7 @@ class TemplateEditorDialog:
         }
         self.elements.append(el)
         self.refresh_elements_tree()
+        self.mark_dirty()
 
     def delete_element(self) -> None:
         sel = self.elem_tree.selection()
@@ -584,6 +593,7 @@ class TemplateEditorDialog:
             return
         self.elements.pop(idx)
         self.refresh_elements_tree()
+        self.mark_dirty()
 
     def move_element(self, direction: int) -> None:
         sel = self.elem_tree.selection()
@@ -596,6 +606,7 @@ class TemplateEditorDialog:
         self.elements[idx], self.elements[new_idx] = self.elements[new_idx], self.elements[idx]
         self.refresh_elements_tree()
         self.elem_tree.selection_set(str(new_idx))
+        self.mark_dirty()
 
     def update_selected_element(self) -> None:
         sel = self.elem_tree.selection()
@@ -632,6 +643,7 @@ class TemplateEditorDialog:
             options["human_readable"] = bool(self.element_vars["options.human_readable"].get())
             el["options"] = options
             self.refresh_elements_tree()
+            self.mark_dirty()
         except ValueError:
             show_error("Елементи", "Некоректні значення елемента")
 
@@ -665,6 +677,10 @@ class TemplateEditorDialog:
         return tpl
 
     def _validate_template(self, tpl: dict) -> None:
+        if not str(tpl.get("title", "")).strip():
+            raise ValueError("Поле title не може бути порожнім")
+        if not str(tpl.get("code", "")).strip():
+            raise ValueError("Поле code не може бути порожнім")
         required_positive = [
             "page_w_mm",
             "page_h_mm",
@@ -680,26 +696,70 @@ class TemplateEditorDialog:
                 raise ValueError(f"Поле {key} має бути більше 0")
 
     def _collect_elements(self) -> list[dict]:
+        cleaned = []
         for idx, el in enumerate(self.elements):
-            el["sort_order"] = idx
-            if "options" not in el:
-                el["options"] = {}
-        return self.elements
+            copy = dict(el)
+            copy.pop("options_json", None)
+            copy["sort_order"] = idx
+            copy["wrap"] = 1 if copy.get("wrap") else 0
+            copy["is_active"] = 1 if copy.get("is_active", 1) else 0
+            copy["options"] = dict(copy.get("options") or {})
+            cleaned.append(copy)
+        return cleaned
 
-    def save(self) -> None:
+    def build_payload(self) -> dict:
+        tpl = self._collect_template_data()
+        self._validate_template(tpl)
+        elements = self._collect_elements()
+        return {"template": tpl, "elements": elements}
+
+    def save_template(self) -> bool:
         try:
-            tpl = self._collect_template_data()
-            self._validate_template(tpl)
-            payload = {"template": tpl, "elements": self._collect_elements()}
+            payload = self.build_payload()
             if self.template_id:
                 db.update_label_template(self.template_id, payload)
             else:
                 self.template_id = db.create_label_template(payload)
+            self.dirty = False
             self.saved = True
-            self.root.destroy()
+            self._update_title()
+            messagebox.showinfo("Збережено", "Шаблон збережено")
+            return True
+        except sqlite3.IntegrityError as exc:
+            show_error("Шаблон", str(exc))
         except Exception as exc:
             logging.exception("Failed to save template")
             show_error("Шаблон", str(exc))
+        return False
+
+    def on_close(self) -> None:
+        if self.dirty:
+            res = messagebox.askyesnocancel("Незбережені зміни", "Зберегти зміни шаблону?")
+            if res is None:
+                return
+            if res is True:
+                if not self.save_template():
+                    return
+        self.root.destroy()
+
+    def mark_dirty(self) -> None:
+        if not self.dirty:
+            self.dirty = True
+            self._update_title()
+
+    def _bind_dirty_traces(self) -> None:
+        for var in list(self.template_vars.values()) + list(self.bool_vars.values()):
+            var.trace_add("write", lambda *_, self=self: self.mark_dirty())
+
+    def _update_title(self) -> None:
+        title = self.template_vars.get("title").get().strip() if self.template_vars.get("title") else ""
+        code = self.template_vars.get("code").get().strip() if self.template_vars.get("code") else ""
+        suffix = title or code
+        base = "Редактор шаблону"
+        if suffix:
+            base = f"{base} — {suffix}"
+        self.base_title = base
+        self.root.title(f"{self.base_title}{' *' if self.dirty else ''}")
 
     def draw_preview(self) -> None:
         self.canvas.delete("all")

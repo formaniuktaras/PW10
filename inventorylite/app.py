@@ -1065,223 +1065,218 @@ class InventoryApp(tk.Tk):
 
         conn = db.get_connection()
         try:
-            conn.execute("BEGIN")
-            product_rows = list(
-                conn.execute(
-                    "SELECT id, sku, name, supplier_sku, brand_id, category_id, unit, is_active FROM Products"
+            with db.safe_transaction(conn):
+                product_rows = list(
+                    conn.execute(
+                        "SELECT id, sku, name, supplier_sku, brand_id, category_id, unit, is_active FROM Products"
+                    )
                 )
-            )
-            products_by_sku = {r["sku"].lower(): dict(r) for r in product_rows if r["sku"]}
-            products_by_name = {r["name"].lower(): dict(r) for r in product_rows if r["name"]}
+                products_by_sku = {r["sku"].lower(): dict(r) for r in product_rows if r["sku"]}
+                products_by_name = {r["name"].lower(): dict(r) for r in product_rows if r["name"]}
 
-            brands = list(conn.execute("SELECT id, name FROM Brands"))
-            categories = list(conn.execute("SELECT id, name FROM Categories"))
-            brands_by_id = {int(b["id"]): b for b in brands}
-            categories_by_id = {int(c["id"]): c for c in categories}
-            brands_by_name = {b["name"].lower(): b for b in brands}
-            categories_by_name = {c["name"].lower(): c for c in categories}
+                brands = list(conn.execute("SELECT id, name FROM Brands"))
+                categories = list(conn.execute("SELECT id, name FROM Categories"))
+                brands_by_id = {int(b["id"]): b for b in brands}
+                categories_by_id = {int(c["id"]): c for c in categories}
+                brands_by_name = {b["name"].lower(): b for b in brands}
+                categories_by_name = {c["name"].lower(): c for c in categories}
 
-            def next_sort_order(parent_id=None):
-                row = conn.execute(
-                    "SELECT COALESCE(MAX(sort_order),0) FROM Categories WHERE parent_id IS ?", (parent_id,)
-                ).fetchone()
-                return int(row[0]) + 1
+                def next_sort_order(parent_id=None):
+                    row = conn.execute(
+                        "SELECT COALESCE(MAX(sort_order),0) FROM Categories WHERE parent_id IS ?", (parent_id,)
+                    ).fetchone()
+                    return int(row[0]) + 1
 
-            def resolve_brand(name: str, brand_id: Optional[int], row_idx: int) -> Optional[int]:
-                if brand_id:
-                    if brand_id in brands_by_id:
-                        return brand_id
-                    errors.append(f"Рядок {row_idx}: ID бренду {brand_id} не знайдено")
-                    return None
-                clean = (name or "").strip()
-                if not clean:
-                    return None
-                existing = brands_by_name.get(clean.lower())
-                if existing:
-                    return int(existing["id"])
-                if not create_missing:
-                    errors.append(f"Рядок {row_idx}: Бренд '{clean}' не знайдено")
-                    return None
-                cur = conn.execute("INSERT INTO Brands (name) VALUES (?)", (clean,))
-                brand_id = cur.lastrowid
-                brand_row = {"id": brand_id, "name": clean}
-                brands_by_id[int(brand_id)] = brand_row
-                brands_by_name[clean.lower()] = brand_row
-                return int(brand_id)
-
-            def resolve_category(name: str, category_id: Optional[int], row_idx: int) -> Optional[int]:
-                if category_id:
-                    if category_id in categories_by_id:
-                        return category_id
-                    errors.append(f"Рядок {row_idx}: Категорію з ID {category_id} не знайдено")
-                    return None
-                clean = (name or "").strip()
-                if not clean:
-                    return None
-                existing = categories_by_name.get(clean.lower())
-                if existing:
-                    return int(existing["id"])
-                if not create_missing:
-                    errors.append(f"Рядок {row_idx}: Категорію '{clean}' не знайдено")
-                    return None
-                sort_order = next_sort_order(None)
-                cur = conn.execute(
-                    "INSERT INTO Categories (name, parent_id, sort_order, is_service, is_hidden) VALUES (?, NULL, ?, 0, 0)",
-                    (clean, sort_order),
-                )
-                cat_id = cur.lastrowid
-                cat_row = {"id": cat_id, "name": clean}
-                categories_by_id[int(cat_id)] = cat_row
-                categories_by_name[clean.lower()] = cat_row
-                return int(cat_id)
-
-            for idx, row in enumerate(rows, start=1):
-                sku = (row.get("sku") or "").strip()
-                name = (row.get("name") or "").strip()
-                supplier_sku = (row.get("supplier_sku") or "").strip()
-                unit = (row.get("unit") or "").strip()
-                is_active = row.get("is_active")
-                brand_val = (row.get("brand") or "").strip()
-                category_val = (row.get("category") or "").strip()
-                extra_categories = list(row.get("extra_categories") or [])
-
-                matched_by = None
-                product = None
-                if sku:
-                    product = products_by_sku.get(sku.lower())
-                    matched_by = "sku" if product else None
-                if not product and mode in {"update", "upsert"} and not sku and name:
-                    product = products_by_name.get(name.lower())
-                    matched_by = "name" if product else None
-
-                if mode == "create" and product:
-                    errors.append(f"Рядок {idx}: SKU або назва вже існує")
-                    skipped += 1
-                    continue
-
-                if mode == "update" and not product:
-                    skipped += 1
-                    continue
-
-                brand_id = resolve_brand(brand_val, row.get("brand_id"), idx)
-                category_id = resolve_category(category_val, row.get("category_id"), idx)
-
-                if mode in {"create", "upsert"} and not product:
-                    final_sku = sku.strip()
-                    final_name = name.strip()
-                    if not final_sku or not final_name:
-                        errors.append(f"Рядок {idx}: Потрібні SKU і назва для створення")
-                        skipped += 1
-                        continue
-                    if final_sku.lower() in products_by_sku:
-                        errors.append(f"Рядок {idx}: SKU '{final_sku}' вже існує")
-                        skipped += 1
-                        continue
-                    if final_name.lower() in products_by_name:
-                        errors.append(f"Рядок {idx}: Назва '{final_name}' вже існує")
-                        skipped += 1
-                        continue
-
-                    if not brand_id:
-                        brand_id = resolve_brand(default_brand, None, idx) or None
-                    if not category_id:
-                        category_id = resolve_category(default_category, None, idx)
-                    if not category_id or not brand_id:
-                        skipped += 1
-                        continue
-
-                    try:
-                        cur = conn.execute(
-                            "INSERT INTO Products (sku, supplier_sku, name, brand_id, category_id, unit, is_active) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                            (
-                                final_sku,
-                                supplier_sku or None,
-                                final_name,
-                                brand_id,
-                                category_id,
-                                unit or default_unit,
-                                1 if (is_active is None or is_active) else 0,
-                            ),
-                        )
-                    except sqlite3.IntegrityError as exc:
-                        errors.append(f"Рядок {idx}: Конфлікт унікальності ({exc})")
-                        skipped += 1
-                        continue
-
-                    product_id = int(cur.lastrowid)
-                    product_row = {
-                        "id": product_id,
-                        "sku": final_sku,
-                        "name": final_name,
-                        "supplier_sku": supplier_sku,
-                        "brand_id": brand_id,
-                        "category_id": category_id,
-                        "unit": unit or default_unit,
-                        "is_active": 1 if (is_active is None or is_active) else 0,
-                    }
-                    products_by_sku[final_sku.lower()] = product_row
-                    products_by_name[final_name.lower()] = product_row
-                    product = product_row
-                    created += 1
-                elif product:
-                    old_name = product.get("name")
-                    updates: dict[str, object] = {}
-                    if supplier_sku:
-                        updates["supplier_sku"] = supplier_sku
-                    if unit:
-                        updates["unit"] = unit
+                def resolve_brand(name: str, brand_id: Optional[int], row_idx: int) -> Optional[int]:
                     if brand_id:
-                        updates["brand_id"] = brand_id
-                    if category_id:
-                        updates["category_id"] = category_id
-                    if is_active is not None:
-                        updates["is_active"] = 1 if is_active else 0
+                        if brand_id in brands_by_id:
+                            return brand_id
+                        errors.append(f"Рядок {row_idx}: ID бренду {brand_id} не знайдено")
+                        return None
+                    clean = (name or "").strip()
+                    if not clean:
+                        return None
+                    existing = brands_by_name.get(clean.lower())
+                    if existing:
+                        return int(existing["id"])
+                    if not create_missing:
+                        errors.append(f"Рядок {row_idx}: Бренд '{clean}' не знайдено")
+                        return None
+                    cur = conn.execute("INSERT INTO Brands (name) VALUES (?)", (clean,))
+                    brand_id = cur.lastrowid
+                    brand_row = {"id": brand_id, "name": clean}
+                    brands_by_id[int(brand_id)] = brand_row
+                    brands_by_name[clean.lower()] = brand_row
+                    return int(brand_id)
 
-                    can_rename = matched_by == "sku" and update_name and name
-                    if can_rename:
-                        name_exists = products_by_name.get(name.lower())
-                        if name_exists and int(name_exists.get("id")) != int(product["id"]):
-                            errors.append(f"Рядок {idx}: Назва '{name}' вже використовується")
+                def resolve_category(name: str, category_id: Optional[int], row_idx: int) -> Optional[int]:
+                    if category_id:
+                        if category_id in categories_by_id:
+                            return category_id
+                        errors.append(f"Рядок {row_idx}: Категорію з ID {category_id} не знайдено")
+                        return None
+                    clean = (name or "").strip()
+                    if not clean:
+                        return None
+                    existing = categories_by_name.get(clean.lower())
+                    if existing:
+                        return int(existing["id"])
+                    if not create_missing:
+                        errors.append(f"Рядок {row_idx}: Категорію '{clean}' не знайдено")
+                        return None
+                    sort_order = next_sort_order(None)
+                    cur = conn.execute(
+                        "INSERT INTO Categories (name, parent_id, sort_order, is_service, is_hidden) VALUES (?, NULL, ?, 0, 0)",
+                        (clean, sort_order),
+                    )
+                    cat_id = cur.lastrowid
+                    cat_row = {"id": cat_id, "name": clean}
+                    categories_by_id[int(cat_id)] = cat_row
+                    categories_by_name[clean.lower()] = cat_row
+                    return int(cat_id)
+
+                for idx, row in enumerate(rows, start=1):
+                    sku = (row.get("sku") or "").strip()
+                    name = (row.get("name") or "").strip()
+                    supplier_sku = (row.get("supplier_sku") or "").strip()
+                    unit = (row.get("unit") or "").strip()
+                    is_active = row.get("is_active")
+                    brand_val = (row.get("brand") or "").strip()
+                    category_val = (row.get("category") or "").strip()
+                    extra_categories = list(row.get("extra_categories") or [])
+
+                    matched_by = None
+                    product = None
+                    if sku:
+                        product = products_by_sku.get(sku.lower())
+                        matched_by = "sku" if product else None
+                    if not product and mode in {"update", "upsert"} and not sku and name:
+                        product = products_by_name.get(name.lower())
+                        matched_by = "name" if product else None
+
+                    if mode == "create" and product:
+                        errors.append(f"Рядок {idx}: SKU або назва вже існує")
+                        skipped += 1
+                        continue
+
+                    if mode == "update" and not product:
+                        skipped += 1
+                        continue
+
+                    brand_id = resolve_brand(brand_val, row.get("brand_id"), idx)
+                    category_id = resolve_category(category_val, row.get("category_id"), idx)
+
+                    if mode in {"create", "upsert"} and not product:
+                        final_sku = sku.strip()
+                        final_name = name.strip()
+                        if not final_sku or not final_name:
+                            errors.append(f"Рядок {idx}: Потрібні SKU і назва для створення")
                             skipped += 1
                             continue
-                        updates["name"] = name
+                        if final_sku.lower() in products_by_sku:
+                            errors.append(f"Рядок {idx}: SKU '{final_sku}' вже існує")
+                            skipped += 1
+                            continue
+                        if final_name.lower() in products_by_name:
+                            errors.append(f"Рядок {idx}: Назва '{final_name}' вже існує")
+                            skipped += 1
+                            continue
 
-                    if updates:
-                        set_clause = ", ".join(f"{k}=?" for k in updates.keys())
-                        conn.execute(
-                            f"UPDATE Products SET {set_clause} WHERE id=?",
-                            (*updates.values(), product["id"]),
-                        )
-                        product.update(updates)
-                        if updates.get("name"):
-                            if old_name:
-                                products_by_name.pop(old_name.lower(), None)
-                            products_by_name[name.lower()] = product
-                        updated += 1
+                        if not brand_id:
+                            brand_id = resolve_brand(default_brand, None, idx) or None
+                        if not category_id:
+                            category_id = resolve_category(default_category, None, idx)
+                        if not category_id or not brand_id:
+                            skipped += 1
+                            continue
 
-                if not product:
-                    continue
-
-                if extra_mode != "none":
-                    if extra_mode == "replace":
-                        conn.execute("DELETE FROM ProductCategoryLinks WHERE product_id=?", (product["id"],))
-                    if extra_categories:
-                        for cat_name in extra_categories:
-                            cat_id = resolve_category(cat_name, None, idx) if cat_name else None
-                            if not cat_id or cat_id == product.get("category_id"):
-                                continue
-                            conn.execute(
-                                "INSERT OR IGNORE INTO ProductCategoryLinks (product_id, category_id) VALUES (?, ?)",
-                                (product["id"], cat_id),
+                        try:
+                            cur = conn.execute(
+                                "INSERT INTO Products (sku, supplier_sku, name, brand_id, category_id, unit, is_active) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                (
+                                    final_sku,
+                                    supplier_sku or None,
+                                    final_name,
+                                    brand_id,
+                                    category_id,
+                                    unit or default_unit,
+                                    1 if (is_active is None or is_active) else 0,
+                                ),
                             )
-                if extra_mode != "none" and extra_mode == "replace" and not extra_categories:
-                    # Already cleared links above.
-                    pass
+                        except sqlite3.IntegrityError as exc:
+                            errors.append(f"Рядок {idx}: Конфлікт унікальності ({exc})")
+                            skipped += 1
+                            continue
 
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
+                        product_id = int(cur.lastrowid)
+                        product_row = {
+                            "id": product_id,
+                            "sku": final_sku,
+                            "name": final_name,
+                            "supplier_sku": supplier_sku,
+                            "brand_id": brand_id,
+                            "category_id": category_id,
+                            "unit": unit or default_unit,
+                            "is_active": 1 if (is_active is None or is_active) else 0,
+                        }
+                        products_by_sku[final_sku.lower()] = product_row
+                        products_by_name[final_name.lower()] = product_row
+                        product = product_row
+                        created += 1
+                    elif product:
+                        old_name = product.get("name")
+                        updates: dict[str, object] = {}
+                        if supplier_sku:
+                            updates["supplier_sku"] = supplier_sku
+                        if unit:
+                            updates["unit"] = unit
+                        if brand_id:
+                            updates["brand_id"] = brand_id
+                        if category_id:
+                            updates["category_id"] = category_id
+                        if is_active is not None:
+                            updates["is_active"] = 1 if is_active else 0
+
+                        can_rename = matched_by == "sku" and update_name and name
+                        if can_rename:
+                            name_exists = products_by_name.get(name.lower())
+                            if name_exists and int(name_exists.get("id")) != int(product["id"]):
+                                errors.append(f"Рядок {idx}: Назва '{name}' вже використовується")
+                                skipped += 1
+                                continue
+                            updates["name"] = name
+
+                        if updates:
+                            set_clause = ", ".join(f"{k}=?" for k in updates.keys())
+                            conn.execute(
+                                f"UPDATE Products SET {set_clause} WHERE id=?",
+                                (*updates.values(), product["id"]),
+                            )
+                            product.update(updates)
+                            if updates.get("name"):
+                                if old_name:
+                                    products_by_name.pop(old_name.lower(), None)
+                                products_by_name[name.lower()] = product
+                            updated += 1
+
+                    if not product:
+                        continue
+
+                    if extra_mode != "none":
+                        if extra_mode == "replace":
+                            conn.execute("DELETE FROM ProductCategoryLinks WHERE product_id=?", (product["id"],))
+                        if extra_categories:
+                            for cat_name in extra_categories:
+                                cat_id = resolve_category(cat_name, None, idx) if cat_name else None
+                                if not cat_id or cat_id == product.get("category_id"):
+                                    continue
+                                conn.execute(
+                                    "INSERT OR IGNORE INTO ProductCategoryLinks (product_id, category_id) VALUES (?, ?)",
+                                    (product["id"], cat_id),
+                                )
+                    if extra_mode != "none" and extra_mode == "replace" and not extra_categories:
+                        # Already cleared links above.
+                        pass
         finally:
             conn.close()
 

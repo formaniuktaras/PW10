@@ -14,6 +14,8 @@ import json
 import logging
 import math
 import sqlite3
+from contextlib import contextmanager
+from datetime import datetime
 from collections import deque
 from pathlib import Path
 from statistics import mean, pstdev
@@ -29,6 +31,18 @@ def get_connection() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+@contextmanager
+def transaction(conn: sqlite3.Connection) -> Iterable[None]:
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield
+    except Exception:
+        conn.rollback()
+        raise
+    else:
+        conn.commit()
 
 
 def init_db() -> None:
@@ -362,6 +376,7 @@ def init_db() -> None:
             """
         )
         _migrate_schema(conn)
+        _ensure_case_insensitive_uniques(conn)
         _ensure_label_templates(conn)
     logging.info("Database initialized at %s", db_path)
 
@@ -556,6 +571,64 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_ecca_doc ON ExtraCostCogsAllocations(extra_cost_id);
         CREATE INDEX IF NOT EXISTS idx_ecca_product ON ExtraCostCogsAllocations(product_id);
         """
+    )
+
+
+def _ensure_case_insensitive_uniques(conn: sqlite3.Connection) -> None:
+    conflicts: List[str] = []
+
+    sku_rows = conn.execute(
+        """
+        SELECT lower(sku) AS key, group_concat(id || ':' || sku, ', ') AS items, COUNT(*) AS cnt
+        FROM Products
+        GROUP BY lower(sku)
+        HAVING cnt > 1
+        """
+    ).fetchall()
+    if sku_rows:
+        conflicts.append("Дублікати SKU (без урахування регістру):")
+        conflicts.extend([f"  {row['key']}: {row['items']}" for row in sku_rows])
+
+    barcode_rows = conn.execute(
+        """
+        SELECT lower(code) AS key, group_concat(id || ':' || code, ', ') AS items, COUNT(*) AS cnt
+        FROM ProductBarcodes
+        GROUP BY lower(code)
+        HAVING cnt > 1
+        """
+    ).fetchall()
+    if barcode_rows:
+        conflicts.append("Дублікати штрихкодів (без урахування регістру):")
+        conflicts.extend([f"  {row['key']}: {row['items']}" for row in barcode_rows])
+
+    supplier_rows = conn.execute(
+        """
+        SELECT supplier_id, lower(supplier_sku) AS key, group_concat(id || ':' || supplier_sku, ', ') AS items, COUNT(*) AS cnt
+        FROM ProductSupplierCodes
+        GROUP BY supplier_id, lower(supplier_sku)
+        HAVING cnt > 1
+        """
+    ).fetchall()
+    if supplier_rows:
+        conflicts.append("Дублікати кодів постачальника (без урахування регістру):")
+        conflicts.extend(
+            [f"  supplier_id={row['supplier_id']} {row['key']}: {row['items']}" for row in supplier_rows]
+        )
+
+    if conflicts:
+        raise ValueError(
+            "Знайдено конфлікти для унікальності без урахування регістру. "
+            "Виправте дублікати вручну і перезапустіть програму.\n"
+            + "\n".join(conflicts)
+        )
+
+    conn.execute("DROP INDEX IF EXISTS idx_products_sku_lower")
+    conn.execute("DROP INDEX IF EXISTS idx_pb_code_lower")
+    conn.execute("DROP INDEX IF EXISTS idx_psc_supplier_sku_lower")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_products_sku_lower ON Products(lower(sku))")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_pb_code_lower ON ProductBarcodes(lower(code))")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_psc_supplier_sku_lower ON ProductSupplierCodes(supplier_id, lower(supplier_sku))"
     )
 
 
@@ -1964,6 +2037,13 @@ def _document_total(conn: sqlite3.Connection, table: str, fk_field: str, doc_id:
     )
 
 
+def _validate_iso_date(doc_date: str) -> None:
+    try:
+        datetime.strptime(doc_date, "%Y-%m-%d")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Невірний формат дати. Використовуйте YYYY-MM-DD") from exc
+
+
 def _remove_cash_links(conn: sqlite3.Connection, doc_type: str, doc_id: int) -> None:
     conn.execute(
         "DELETE FROM CashTransactions WHERE related_doc_type=? AND related_doc_id=?",
@@ -1982,6 +2062,7 @@ def create_purchase(
     currency_code: Optional[str] = None,
     exchange_rate: float = 1.0,
 ) -> int:
+    _validate_iso_date(doc_date)
     currency_value = (currency_code or utils.get_base_currency_code()).strip().upper()
     with get_connection() as conn:
         cur = conn.execute(
@@ -2003,6 +2084,7 @@ def update_purchase(
     currency_code: str,
     exchange_rate: float,
 ) -> None:
+    _validate_iso_date(doc_date)
     with get_connection() as conn:
         status = conn.execute("SELECT status FROM PurchaseDocuments WHERE id=?", (purchase_id,)).fetchone()
         if not status:
@@ -2102,6 +2184,7 @@ def create_extra_cost_document(
     partner_id: Optional[int] = None,
     comment: str = "",
 ) -> int:
+    _validate_iso_date(doc_date)
     currency_value = (currency_code or utils.get_base_currency_code()).strip().upper()
     with get_connection() as conn:
         cur = conn.execute(
@@ -2120,6 +2203,7 @@ def update_extra_cost_document(
     partner_id: Optional[int],
     comment: str,
 ) -> None:
+    _validate_iso_date(doc_date)
     with get_connection() as conn:
         status = conn.execute("SELECT status FROM ExtraCostDocuments WHERE id=?", (doc_id,)).fetchone()
         if not status:
@@ -2252,92 +2336,109 @@ def _revert_extra_cost_allocations(conn: sqlite3.Connection, doc_id: int) -> Non
     )
 
 
-def allocate_extra_costs(doc_id: int, purchase_ids: Sequence[int]) -> None:
+def _allocate_extra_costs(conn: sqlite3.Connection, doc_id: int, purchase_ids: Sequence[int]) -> None:
     if not purchase_ids:
         raise ValueError("Не вибрано жодної закупівлі для розподілу")
-    with get_connection() as conn:
-        doc = conn.execute("SELECT * FROM ExtraCostDocuments WHERE id=?", (doc_id,)).fetchone()
-        if not doc:
-            raise ValueError("Документ не знайдено")
-        if doc["status"] != "posted":
-            raise ValueError("Розподіл можливий лише для проведеного документа")
-        extra_total_base = conn.execute(
-            "SELECT IFNULL(SUM(amount_base),0) FROM ExtraCostLines WHERE extra_cost_id=?",
-            (doc_id,),
-        ).fetchone()[0]
-        if extra_total_base <= 0:
-            raise ValueError("Сума витрат повинна бути більшою за 0")
-        placeholders = ",".join("?" for _ in purchase_ids)
-        purchase_lines = list(
-            conn.execute(
-                f"SELECT pl.id, pl.amount as amount_base, pl.product_id, pl.quantity, pd.warehouse_id FROM PurchaseLines pl JOIN PurchaseDocuments pd ON pd.id = pl.purchase_id WHERE pl.purchase_id IN ({placeholders}) AND pd.status='posted'",
-                purchase_ids,
-            )
+    doc = conn.execute("SELECT * FROM ExtraCostDocuments WHERE id=?", (doc_id,)).fetchone()
+    if not doc:
+        raise ValueError("Документ не знайдено")
+    if doc["status"] != "posted":
+        raise ValueError("Розподіл можливий лише для проведеного документа")
+    extra_total_base = conn.execute(
+        "SELECT IFNULL(SUM(amount_base),0) FROM ExtraCostLines WHERE extra_cost_id=?",
+        (doc_id,),
+    ).fetchone()[0]
+    if extra_total_base <= 0:
+        raise ValueError("Сума витрат повинна бути більшою за 0")
+    placeholders = ",".join("?" for _ in purchase_ids)
+    purchase_lines = list(
+        conn.execute(
+            f"SELECT pl.id, pl.amount as amount_base, pl.product_id, pl.quantity, pd.warehouse_id FROM PurchaseLines pl JOIN PurchaseDocuments pd ON pd.id = pl.purchase_id WHERE pl.purchase_id IN ({placeholders}) AND pd.status='posted'",
+            purchase_ids,
         )
-        if not purchase_lines:
-            raise ValueError("Немає рядків закупівель для розподілу")
-        total_base = sum(float(ln["amount_base"]) for ln in purchase_lines)
-        if total_base <= 0:
-            raise ValueError("Немає бази для розподілу")
-        _revert_extra_cost_allocations(conn, doc_id)
-        for ln in purchase_lines:
-            share = float(ln["amount_base"]) / total_base
-            allocated = extra_total_base * share
-            conn.execute(
-                "INSERT INTO ExtraCostAllocations (extra_cost_id, purchase_line_id, amount_allocated_base) VALUES (?,?,?)",
-                (doc_id, ln["id"], allocated),
-            )
-            conn.execute(
-                "UPDATE PurchaseLines SET extra_cost_allocated_base = extra_cost_allocated_base + ? WHERE id=?",
-                (allocated, ln["id"]),
-            )
-        conn.commit()
+    )
+    if not purchase_lines:
+        raise ValueError("Немає рядків закупівель для розподілу")
+    total_base = sum(float(ln["amount_base"]) for ln in purchase_lines)
+    if total_base <= 0:
+        raise ValueError("Немає бази для розподілу")
+    _revert_extra_cost_allocations(conn, doc_id)
+    for ln in purchase_lines:
+        share = float(ln["amount_base"]) / total_base
+        allocated = extra_total_base * share
+        conn.execute(
+            "INSERT INTO ExtraCostAllocations (extra_cost_id, purchase_line_id, amount_allocated_base) VALUES (?,?,?)",
+            (doc_id, ln["id"], allocated),
+        )
+        conn.execute(
+            "UPDATE PurchaseLines SET extra_cost_allocated_base = extra_cost_allocated_base + ? WHERE id=?",
+            (allocated, ln["id"]),
+        )
+
+
+def allocate_extra_costs(
+    doc_id: int, purchase_ids: Sequence[int], conn: sqlite3.Connection | None = None
+) -> None:
+    owns_conn = conn is None
+    if owns_conn:
+        conn = get_connection()
+    try:
+        if owns_conn:
+            with transaction(conn):
+                _allocate_extra_costs(conn, doc_id, purchase_ids)
+        else:
+            _allocate_extra_costs(conn, doc_id, purchase_ids)
+    finally:
+        if owns_conn:
+            conn.close()
 
 
 def post_extra_cost(doc_id: int, purchase_ids: Sequence[int]) -> None:
     if not purchase_ids:
         raise ValueError("Не вибрано жодної закупівлі")
     with get_connection() as conn:
-        doc = conn.execute("SELECT * FROM ExtraCostDocuments WHERE id=?", (doc_id,)).fetchone()
-        if not doc:
-            raise ValueError("Документ не знайдено")
-        status = (doc["status"] or "draft").strip()
-        if status != "draft":
-            raise ValueError("Документ вже проведено")
-        has_lines = conn.execute("SELECT COUNT(*) FROM ExtraCostLines WHERE extra_cost_id=?", (doc_id,)).fetchone()[0]
-        if not has_lines:
-            raise ValueError("Немає рядків витрат")
-        placeholders = ",".join("?" for _ in purchase_ids)
-        max_purchase_date = conn.execute(
-            f"SELECT MAX(doc_date) FROM PurchaseDocuments WHERE id IN ({placeholders}) AND status='posted'",
-            purchase_ids,
-        ).fetchone()[0]
-        if max_purchase_date and doc["doc_date"] < max_purchase_date:
-            raise ValueError(
-                "Дата витрат не може бути раніше дати закупівлі (Variant B). Змініть дату документа витрат або дату закупівлі."
-            )
-        _recalc_extra_cost_totals(conn, doc_id)
-        totals = conn.execute("SELECT total_amount_base FROM ExtraCostDocuments WHERE id=?", (doc_id,)).fetchone()["total_amount_base"]
-        if totals <= 0:
-            raise ValueError("Сума витрат повинна бути більшою за 0")
-        conn.execute("UPDATE ExtraCostDocuments SET status='posted' WHERE id=?", (doc_id,))
-        conn.commit()
-    allocate_extra_costs(doc_id, purchase_ids)
-    recalc_stock()
+        with transaction(conn):
+            doc = conn.execute("SELECT * FROM ExtraCostDocuments WHERE id=?", (doc_id,)).fetchone()
+            if not doc:
+                raise ValueError("Документ не знайдено")
+            status = (doc["status"] or "draft").strip()
+            if status != "draft":
+                raise ValueError("Документ вже проведено")
+            has_lines = conn.execute("SELECT COUNT(*) FROM ExtraCostLines WHERE extra_cost_id=?", (doc_id,)).fetchone()[0]
+            if not has_lines:
+                raise ValueError("Немає рядків витрат")
+            placeholders = ",".join("?" for _ in purchase_ids)
+            max_purchase_date = conn.execute(
+                f"SELECT MAX(doc_date) FROM PurchaseDocuments WHERE id IN ({placeholders}) AND status='posted'",
+                purchase_ids,
+            ).fetchone()[0]
+            if max_purchase_date and doc["doc_date"] < max_purchase_date:
+                raise ValueError(
+                    "Дата витрат не може бути раніше дати закупівлі (Variant B). Змініть дату документа витрат або дату закупівлі."
+                )
+            _recalc_extra_cost_totals(conn, doc_id)
+            totals = conn.execute(
+                "SELECT total_amount_base FROM ExtraCostDocuments WHERE id=?", (doc_id,)
+            ).fetchone()["total_amount_base"]
+            if totals <= 0:
+                raise ValueError("Сума витрат повинна бути більшою за 0")
+            conn.execute("UPDATE ExtraCostDocuments SET status='posted' WHERE id=?", (doc_id,))
+            _allocate_extra_costs(conn, doc_id, purchase_ids)
+            recalc_stock(conn=conn)
 
 
 def unpost_extra_cost(doc_id: int) -> None:
     with get_connection() as conn:
-        doc = conn.execute("SELECT status FROM ExtraCostDocuments WHERE id=?", (doc_id,)).fetchone()
-        if not doc:
-            raise ValueError("Документ не знайдено")
-        status = (doc["status"] or "draft").strip()
-        if status != "posted":
-            raise ValueError("Документ не проведено")
-        _revert_extra_cost_allocations(conn, doc_id)
-        conn.execute("UPDATE ExtraCostDocuments SET status='draft' WHERE id=?", (doc_id,))
-        conn.commit()
-    recalc_stock()
+        with transaction(conn):
+            doc = conn.execute("SELECT status FROM ExtraCostDocuments WHERE id=?", (doc_id,)).fetchone()
+            if not doc:
+                raise ValueError("Документ не знайдено")
+            status = (doc["status"] or "draft").strip()
+            if status != "posted":
+                raise ValueError("Документ не проведено")
+            _revert_extra_cost_allocations(conn, doc_id)
+            conn.execute("UPDATE ExtraCostDocuments SET status='draft' WHERE id=?", (doc_id,))
+            recalc_stock(conn=conn)
 
 
 # Sales
@@ -2352,6 +2453,7 @@ def create_sale(
     exchange_rate: float = 1.0,
     order_expense_doc: float = 0.0,
 ) -> int:
+    _validate_iso_date(doc_date)
     currency_value = (currency_code or utils.get_base_currency_code()).strip().upper()
     with get_connection() as conn:
         order_expense_base = order_expense_doc * exchange_rate
@@ -2385,6 +2487,7 @@ def update_sale(
     exchange_rate: float,
     order_expense_doc: float = 0.0,
 ) -> None:
+    _validate_iso_date(doc_date)
     with get_connection() as conn:
         status = conn.execute("SELECT status FROM SalesDocuments WHERE id=?", (sale_id,)).fetchone()
         if not status:
@@ -2512,13 +2615,22 @@ def _apply_purchase_line(conn: sqlite3.Connection, move_date: str, purchase_id: 
     )
 
 
+def _stock_shortage_message(conn: sqlite3.Connection, product_id: int, warehouse_id: int) -> str:
+    product = conn.execute("SELECT sku, name FROM Products WHERE id=?", (product_id,)).fetchone()
+    warehouse = conn.execute("SELECT name FROM Warehouses WHERE id=?", (warehouse_id,)).fetchone()
+    sku = product["sku"] if product else str(product_id)
+    name = product["name"] if product else str(product_id)
+    warehouse_name = warehouse["name"] if warehouse else str(warehouse_id)
+    return f"Недостатньо залишку: SKU={sku}, Товар={name}, Склад={warehouse_name}"
+
+
 def _apply_sale_line(conn: sqlite3.Connection, move_date: str, sale_id: int, line: sqlite3.Row, allow_negative: bool) -> None:
     qty = float(line["quantity"])
     product_id = int(line["product_id"])
     warehouse_id = int(line["warehouse_id"])
     current_qty, avg_cost = _get_balance(conn, product_id, warehouse_id)
     if qty > current_qty and not allow_negative:
-        raise ValueError("Недостатньо залишку для товару")
+        raise ValueError(_stock_shortage_message(conn, product_id, warehouse_id))
     new_qty = current_qty - qty
     _set_balance(conn, product_id, warehouse_id, new_qty, avg_cost)
     amount = -qty * avg_cost
@@ -2529,232 +2641,264 @@ def _apply_sale_line(conn: sqlite3.Connection, move_date: str, sale_id: int, lin
     )
 
 
-def recalc_stock(allow_negative: bool = False) -> None:
+def _recalc_stock(conn: sqlite3.Connection, allow_negative: bool) -> None:
+    conn.execute("DELETE FROM StockBalances")
+    conn.execute("DELETE FROM StockMoves")
+    conn.execute("DELETE FROM ExtraCostCogsAllocations")
+    conn.execute("UPDATE PurchaseLines SET extra_cost_allocated_base=0")
+
+    eps = 1e-9
+    lot_queues: Dict[Tuple[int, int], deque[Tuple[int, float]]] = {}
+    initial_qty: Dict[int, float] = {}
+    remaining_qty: Dict[int, float] = {}
+
+    def _clamp(value: float, min_value: float, max_value: float) -> float:
+        return max(min_value, min(max_value, value))
+
+    def fifo_consume(pair: Tuple[int, int], qty: float, allow_negative: bool) -> None:
+        queue = lot_queues.get(pair)
+        remaining_to_consume = qty
+        while remaining_to_consume > eps:
+            if not queue:
+                if allow_negative:
+                    return
+                raise ValueError(_stock_shortage_message(conn, pair[0], pair[1]))
+            purchase_line_id, lot_qty = queue[0]
+            take_qty = min(lot_qty, remaining_to_consume)
+            lot_qty -= take_qty
+            remaining_to_consume -= take_qty
+            lot_qty = 0.0 if lot_qty < eps else lot_qty
+            remaining_qty[purchase_line_id] = lot_qty
+            if lot_qty <= eps:
+                queue.popleft()
+            else:
+                queue[0] = (purchase_line_id, lot_qty)
+
+    purchase_docs = conn.execute(
+        "SELECT p.id, p.doc_date, p.supplier_id, p.warehouse_id, p.channel FROM PurchaseDocuments p WHERE p.status='posted'",
+    ).fetchall()
+    extra_docs = conn.execute(
+        "SELECT id, doc_date, partner_id FROM ExtraCostDocuments WHERE status='posted'",
+    ).fetchall()
+    sales_docs = conn.execute(
+        "SELECT s.id, s.doc_date, s.customer_id, s.warehouse_id, s.channel FROM SalesDocuments s WHERE s.status='posted'",
+    ).fetchall()
+
+    order_rank = {"purchase": 0, "extra": 1, "sale": 2}
+    events: List[Tuple[str, sqlite3.Row]] = [
+        ("purchase", doc) for doc in purchase_docs
+    ] + [
+        ("extra", doc) for doc in extra_docs
+    ] + [
+        ("sale", doc) for doc in sales_docs
+    ]
+    events.sort(key=lambda item: (item[1]["doc_date"], order_rank[item[0]], item[1]["id"]))
+
+    for etype, doc in events:
+        if etype == "purchase":
+            lines = conn.execute(
+                "SELECT pl.id as purchase_line_id, pl.product_id, pl.quantity, pl.purchase_price, pl.purchase_price_base, ? as warehouse_id, ? as channel, ? as supplier_id FROM PurchaseLines pl WHERE pl.purchase_id=?",
+                (doc["warehouse_id"], doc["channel"], doc["supplier_id"], doc["id"]),
+            ).fetchall()
+            for ln in lines:
+                _apply_purchase_line(conn, doc["doc_date"], doc["id"], ln)
+                qty = float(ln["quantity"])
+                purchase_line_id = int(ln["purchase_line_id"])
+                pair = (int(ln["product_id"]), int(ln["warehouse_id"]))
+                lot_queues.setdefault(pair, deque()).append((purchase_line_id, qty))
+                initial_qty[purchase_line_id] = qty
+                remaining_qty[purchase_line_id] = qty
+        elif etype == "extra":
+            allocations = conn.execute(
+                "SELECT eca.amount_allocated_base, pl.id as purchase_line_id, pl.product_id, pl.quantity as purchase_qty, pd.warehouse_id "
+                "FROM ExtraCostAllocations eca "
+                "JOIN PurchaseLines pl ON pl.id = eca.purchase_line_id "
+                "JOIN PurchaseDocuments pd ON pd.id = pl.purchase_id "
+                "WHERE eca.extra_cost_id=?",
+                (doc["id"],),
+            ).fetchall()
+            per_pair: Dict[Tuple[int, int], float] = {}
+            for alloc in allocations:
+                conn.execute(
+                    "UPDATE PurchaseLines SET extra_cost_allocated_base = extra_cost_allocated_base + ? WHERE id=?",
+                    (alloc["amount_allocated_base"], alloc["purchase_line_id"]),
+                )
+                purchase_line_id = int(alloc["purchase_line_id"])
+                init_qty = initial_qty.get(purchase_line_id, float(alloc["purchase_qty"] or 0.0))
+                if purchase_line_id not in initial_qty:
+                    initial_qty[purchase_line_id] = init_qty
+                rem_qty = remaining_qty.get(purchase_line_id, init_qty)
+                rem_qty = _clamp(rem_qty, 0.0, init_qty)
+                sold_qty = max(0.0, init_qty - rem_qty)
+                allocation_amount = float(alloc["amount_allocated_base"])
+                to_cogs = allocation_amount * (sold_qty / init_qty) if init_qty > eps else 0.0
+                to_stock = allocation_amount - to_cogs
+                if to_cogs > eps and sold_qty > eps:
+                    conn.execute(
+                        "INSERT INTO ExtraCostCogsAllocations (extra_cost_id, purchase_line_id, product_id, warehouse_id, qty_sold, amount_cogs_base) "
+                        "VALUES (?,?,?,?,?,?)",
+                        (
+                            doc["id"],
+                            purchase_line_id,
+                            alloc["product_id"],
+                            alloc["warehouse_id"],
+                            sold_qty,
+                            to_cogs,
+                        ),
+                    )
+                if to_stock > eps:
+                    key = (alloc["product_id"], alloc["warehouse_id"])
+                    per_pair[key] = per_pair.get(key, 0.0) + to_stock
+            for (product_id, warehouse_id), extra_amount in per_pair.items():
+                current_qty, current_avg = _get_balance(conn, product_id, warehouse_id)
+                if current_qty <= eps:
+                    continue
+                new_avg = (current_qty * current_avg + extra_amount) / current_qty
+                _set_balance(conn, product_id, warehouse_id, current_qty, new_avg)
+                conn.execute(
+                    "INSERT INTO StockMoves (move_date, product_id, warehouse_id, qty_in, qty_out, cost_per_unit, amount, reference_type, reference_id, channel, counterparty_id) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (doc["doc_date"], product_id, warehouse_id, 0, 0, new_avg, extra_amount, "extra_cost", doc["id"], "", doc["partner_id"]),
+                )
+        elif etype == "sale":
+            lines = conn.execute(
+                "SELECT sl.product_id, sl.quantity, sl.sale_price, sl.sale_price_base, ? as warehouse_id, ? as channel, ? as customer_id FROM SalesLines sl WHERE sl.sale_id=?",
+                (doc["warehouse_id"], doc["channel"], doc["customer_id"], doc["id"]),
+            ).fetchall()
+            for ln in lines:
+                pair = (int(ln["product_id"]), int(ln["warehouse_id"]))
+                fifo_consume(pair, float(ln["quantity"]), allow_negative)
+                _apply_sale_line(conn, doc["doc_date"], doc["id"], ln, allow_negative)
+
+
+def recalc_stock(allow_negative: bool = False, conn: sqlite3.Connection | None = None) -> None:
     """Rebuild stock balances and stock moves from posted documents."""
-    with get_connection() as conn:
-        conn.execute("DELETE FROM StockBalances")
-        conn.execute("DELETE FROM StockMoves")
-        conn.execute("DELETE FROM ExtraCostCogsAllocations")
-        conn.execute("UPDATE PurchaseLines SET extra_cost_allocated_base=0")
-
-        eps = 1e-9
-        lot_queues: Dict[Tuple[int, int], deque[Tuple[int, float]]] = {}
-        initial_qty: Dict[int, float] = {}
-        remaining_qty: Dict[int, float] = {}
-
-        def _clamp(value: float, min_value: float, max_value: float) -> float:
-            return max(min_value, min(max_value, value))
-
-        def fifo_consume(pair: Tuple[int, int], qty: float, allow_negative: bool) -> None:
-            queue = lot_queues.get(pair)
-            remaining_to_consume = qty
-            while remaining_to_consume > eps:
-                if not queue:
-                    if allow_negative:
-                        return
-                    raise ValueError("Недостатньо залишку для товару")
-                purchase_line_id, lot_qty = queue[0]
-                take_qty = min(lot_qty, remaining_to_consume)
-                lot_qty -= take_qty
-                remaining_to_consume -= take_qty
-                lot_qty = 0.0 if lot_qty < eps else lot_qty
-                remaining_qty[purchase_line_id] = lot_qty
-                if lot_qty <= eps:
-                    queue.popleft()
-                else:
-                    queue[0] = (purchase_line_id, lot_qty)
-
-        purchase_docs = conn.execute(
-            "SELECT p.id, p.doc_date, p.supplier_id, p.warehouse_id, p.channel FROM PurchaseDocuments p WHERE p.status='posted'",
-        ).fetchall()
-        extra_docs = conn.execute(
-            "SELECT id, doc_date, partner_id FROM ExtraCostDocuments WHERE status='posted'",
-        ).fetchall()
-        sales_docs = conn.execute(
-            "SELECT s.id, s.doc_date, s.customer_id, s.warehouse_id, s.channel FROM SalesDocuments s WHERE s.status='posted'",
-        ).fetchall()
-
-        order_rank = {"purchase": 0, "extra": 1, "sale": 2}
-        events: List[Tuple[str, sqlite3.Row]] = [
-            ("purchase", doc) for doc in purchase_docs
-        ] + [
-            ("extra", doc) for doc in extra_docs
-        ] + [
-            ("sale", doc) for doc in sales_docs
-        ]
-        events.sort(key=lambda item: (item[1]["doc_date"], order_rank[item[0]], item[1]["id"]))
-
-        for etype, doc in events:
-            if etype == "purchase":
-                lines = conn.execute(
-                    "SELECT pl.id as purchase_line_id, pl.product_id, pl.quantity, pl.purchase_price, pl.purchase_price_base, ? as warehouse_id, ? as channel, ? as supplier_id FROM PurchaseLines pl WHERE pl.purchase_id=?",
-                    (doc["warehouse_id"], doc["channel"], doc["supplier_id"], doc["id"]),
-                ).fetchall()
-                for ln in lines:
-                    _apply_purchase_line(conn, doc["doc_date"], doc["id"], ln)
-                    qty = float(ln["quantity"])
-                    purchase_line_id = int(ln["purchase_line_id"])
-                    pair = (int(ln["product_id"]), int(ln["warehouse_id"]))
-                    lot_queues.setdefault(pair, deque()).append((purchase_line_id, qty))
-                    initial_qty[purchase_line_id] = qty
-                    remaining_qty[purchase_line_id] = qty
-            elif etype == "extra":
-                allocations = conn.execute(
-                    "SELECT eca.amount_allocated_base, pl.id as purchase_line_id, pl.product_id, pl.quantity as purchase_qty, pd.warehouse_id "
-                    "FROM ExtraCostAllocations eca "
-                    "JOIN PurchaseLines pl ON pl.id = eca.purchase_line_id "
-                    "JOIN PurchaseDocuments pd ON pd.id = pl.purchase_id "
-                    "WHERE eca.extra_cost_id=?",
-                    (doc["id"],),
-                ).fetchall()
-                per_pair: Dict[Tuple[int, int], float] = {}
-                for alloc in allocations:
-                    conn.execute(
-                        "UPDATE PurchaseLines SET extra_cost_allocated_base = extra_cost_allocated_base + ? WHERE id=?",
-                        (alloc["amount_allocated_base"], alloc["purchase_line_id"]),
-                    )
-                    purchase_line_id = int(alloc["purchase_line_id"])
-                    init_qty = initial_qty.get(purchase_line_id, float(alloc["purchase_qty"] or 0.0))
-                    if purchase_line_id not in initial_qty:
-                        initial_qty[purchase_line_id] = init_qty
-                    rem_qty = remaining_qty.get(purchase_line_id, init_qty)
-                    rem_qty = _clamp(rem_qty, 0.0, init_qty)
-                    sold_qty = max(0.0, init_qty - rem_qty)
-                    allocation_amount = float(alloc["amount_allocated_base"])
-                    to_cogs = allocation_amount * (sold_qty / init_qty) if init_qty > eps else 0.0
-                    to_stock = allocation_amount - to_cogs
-                    if to_cogs > eps and sold_qty > eps:
-                        conn.execute(
-                            "INSERT INTO ExtraCostCogsAllocations (extra_cost_id, purchase_line_id, product_id, warehouse_id, qty_sold, amount_cogs_base) "
-                            "VALUES (?,?,?,?,?,?)",
-                            (
-                                doc["id"],
-                                purchase_line_id,
-                                alloc["product_id"],
-                                alloc["warehouse_id"],
-                                sold_qty,
-                                to_cogs,
-                            ),
-                        )
-                    if to_stock > eps:
-                        key = (alloc["product_id"], alloc["warehouse_id"])
-                        per_pair[key] = per_pair.get(key, 0.0) + to_stock
-                for (product_id, warehouse_id), extra_amount in per_pair.items():
-                    current_qty, current_avg = _get_balance(conn, product_id, warehouse_id)
-                    if current_qty <= eps:
-                        continue
-                    new_avg = (current_qty * current_avg + extra_amount) / current_qty
-                    _set_balance(conn, product_id, warehouse_id, current_qty, new_avg)
-                    conn.execute(
-                        "INSERT INTO StockMoves (move_date, product_id, warehouse_id, qty_in, qty_out, cost_per_unit, amount, reference_type, reference_id, channel, counterparty_id) "
-                        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                        (doc["doc_date"], product_id, warehouse_id, 0, 0, new_avg, extra_amount, "extra_cost", doc["id"], "", doc["partner_id"]),
-                    )
-            elif etype == "sale":
-                lines = conn.execute(
-                    "SELECT sl.product_id, sl.quantity, sl.sale_price, sl.sale_price_base, ? as warehouse_id, ? as channel, ? as customer_id FROM SalesLines sl WHERE sl.sale_id=?",
-                    (doc["warehouse_id"], doc["channel"], doc["customer_id"], doc["id"]),
-                ).fetchall()
-                for ln in lines:
-                    pair = (int(ln["product_id"]), int(ln["warehouse_id"]))
-                    fifo_consume(pair, float(ln["quantity"]), allow_negative)
-                    _apply_sale_line(conn, doc["doc_date"], doc["id"], ln, allow_negative)
-        conn.commit()
+    owns_conn = conn is None
+    if owns_conn:
+        conn = get_connection()
+    try:
+        if owns_conn:
+            with transaction(conn):
+                _recalc_stock(conn, allow_negative)
+        else:
+            _recalc_stock(conn, allow_negative)
+    finally:
+        if owns_conn:
+            conn.close()
 
 def post_purchase(purchase_id: int) -> None:
     with get_connection() as conn:
-        doc_row = conn.execute(
-            "SELECT status, supplier_id, doc_date, warehouse_id, channel FROM PurchaseDocuments WHERE id=?",
-            (purchase_id,),
-        ).fetchone()
-        if not doc_row:
-            raise ValueError("Документ не знайдено")
-        if doc_row["status"] != "draft":
-            raise ValueError("Документ вже проведено")
-        has_lines = conn.execute("SELECT COUNT(*) FROM PurchaseLines WHERE purchase_id=?", (purchase_id,)).fetchone()[0]
-        if not has_lines:
-            raise ValueError("Немає рядків для проведення")
-        conn.execute("UPDATE PurchaseDocuments SET status='posted' WHERE id=?", (purchase_id,))
-        total = _document_total(conn, "PurchaseLines", "purchase_id", purchase_id)
-        _remove_cash_links(conn, "purchase", purchase_id)
-        if total:
-            conn.execute(
-                "INSERT INTO CashTransactions (date, amount, type, counterparty_id, related_doc_type, related_doc_id, channel, comment) "
-                "VALUES (?,?,?,?,?,?,?,?)",
-                (
-                    doc_row["doc_date"],
-                    -abs(total),
-                    "purchase_payment",
-                    doc_row["supplier_id"],
-                    "purchase",
-                    purchase_id,
-                    "",
-                    "Оплата за закупівлю",
-                ),
-            )
-        conn.commit()
-    recalc_stock()
+        with transaction(conn):
+            doc_row = conn.execute(
+                "SELECT status, supplier_id, doc_date, warehouse_id, channel FROM PurchaseDocuments WHERE id=?",
+                (purchase_id,),
+            ).fetchone()
+            if not doc_row:
+                raise ValueError("Документ не знайдено")
+            if doc_row["status"] != "draft":
+                raise ValueError("Документ вже проведено")
+            has_lines = conn.execute("SELECT COUNT(*) FROM PurchaseLines WHERE purchase_id=?", (purchase_id,)).fetchone()[0]
+            if not has_lines:
+                raise ValueError("Немає рядків для проведення")
+            conn.execute("UPDATE PurchaseDocuments SET status='posted' WHERE id=?", (purchase_id,))
+            total = _document_total(conn, "PurchaseLines", "purchase_id", purchase_id)
+            _remove_cash_links(conn, "purchase", purchase_id)
+            if total:
+                conn.execute(
+                    "INSERT INTO CashTransactions (date, amount, type, counterparty_id, related_doc_type, related_doc_id, channel, comment) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        doc_row["doc_date"],
+                        -abs(total),
+                        "purchase_payment",
+                        doc_row["supplier_id"],
+                        "purchase",
+                        purchase_id,
+                        "",
+                        "Оплата за закупівлю",
+                    ),
+                )
+            recalc_stock(conn=conn)
 
 
 def unpost_purchase(purchase_id: int) -> None:
     with get_connection() as conn:
-        status = conn.execute("SELECT status FROM PurchaseDocuments WHERE id=?", (purchase_id,)).fetchone()
-        if not status:
-            raise ValueError("Документ не знайдено")
-        if status[0] != "posted":
-            raise ValueError("Документ не проведено")
-        conn.execute("UPDATE PurchaseDocuments SET status='draft' WHERE id=?", (purchase_id,))
-        _remove_cash_links(conn, "purchase", purchase_id)
-        conn.commit()
-    recalc_stock()
+        with transaction(conn):
+            status = conn.execute("SELECT status FROM PurchaseDocuments WHERE id=?", (purchase_id,)).fetchone()
+            if not status:
+                raise ValueError("Документ не знайдено")
+            if status[0] != "posted":
+                raise ValueError("Документ не проведено")
+            blocking = conn.execute(
+                """
+                SELECT ecd.id, ecd.doc_date, ecd.total_amount_base
+                FROM ExtraCostAllocations eca
+                JOIN PurchaseLines pl ON pl.id = eca.purchase_line_id
+                JOIN ExtraCostDocuments ecd ON ecd.id = eca.extra_cost_id
+                WHERE pl.purchase_id=? AND ecd.status='posted'
+                GROUP BY ecd.id, ecd.doc_date, ecd.total_amount_base
+                ORDER BY ecd.doc_date, ecd.id
+                """,
+                (purchase_id,),
+            ).fetchall()
+            if blocking:
+                details = ", ".join(
+                    [f"#{row['id']} від {row['doc_date']} (сума {row['total_amount_base']})" for row in blocking]
+                )
+                raise ValueError(
+                    "Не можна розпровести закупівлю, бо є проведені супутні витрати: " + details
+                )
+            conn.execute("UPDATE PurchaseDocuments SET status='draft' WHERE id=?", (purchase_id,))
+            _remove_cash_links(conn, "purchase", purchase_id)
+            recalc_stock(conn=conn)
 
 
 def post_sale(sale_id: int, allow_negative: bool = False) -> None:
     with get_connection() as conn:
-        doc_row = conn.execute(
-            "SELECT status, customer_id, doc_date, channel FROM SalesDocuments WHERE id=?",
-            (sale_id,),
-        ).fetchone()
-        if not doc_row:
-            raise ValueError("Документ не знайдено")
-        if doc_row["status"] != "draft":
-            raise ValueError("Документ вже проведено")
-        has_lines = conn.execute("SELECT COUNT(*) FROM SalesLines WHERE sale_id=?", (sale_id,)).fetchone()[0]
-        if not has_lines:
-            raise ValueError("Немає рядків для проведення")
-        conn.execute("UPDATE SalesDocuments SET status='posted' WHERE id=?", (sale_id,))
-        total = _document_total(conn, "SalesLines", "sale_id", sale_id)
-        _remove_cash_links(conn, "sale", sale_id)
-        if total:
-            conn.execute(
-                "INSERT INTO CashTransactions (date, amount, type, counterparty_id, related_doc_type, related_doc_id, channel, comment) "
-                "VALUES (?,?,?,?,?,?,?,?)",
-                (
-                    doc_row["doc_date"],
-                    abs(total),
-                    "sale_payment",
-                    doc_row["customer_id"],
-                    "sale",
-                    sale_id,
-                    doc_row["channel"] or "",
-                    "Оплата від клієнта",
-                ),
-            )
-        conn.commit()
-    recalc_stock(allow_negative=allow_negative)
+        with transaction(conn):
+            doc_row = conn.execute(
+                "SELECT status, customer_id, doc_date, channel FROM SalesDocuments WHERE id=?",
+                (sale_id,),
+            ).fetchone()
+            if not doc_row:
+                raise ValueError("Документ не знайдено")
+            if doc_row["status"] != "draft":
+                raise ValueError("Документ вже проведено")
+            has_lines = conn.execute("SELECT COUNT(*) FROM SalesLines WHERE sale_id=?", (sale_id,)).fetchone()[0]
+            if not has_lines:
+                raise ValueError("Немає рядків для проведення")
+            conn.execute("UPDATE SalesDocuments SET status='posted' WHERE id=?", (sale_id,))
+            total = _document_total(conn, "SalesLines", "sale_id", sale_id)
+            _remove_cash_links(conn, "sale", sale_id)
+            if total:
+                conn.execute(
+                    "INSERT INTO CashTransactions (date, amount, type, counterparty_id, related_doc_type, related_doc_id, channel, comment) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        doc_row["doc_date"],
+                        abs(total),
+                        "sale_payment",
+                        doc_row["customer_id"],
+                        "sale",
+                        sale_id,
+                        doc_row["channel"] or "",
+                        "Оплата від клієнта",
+                    ),
+                )
+            recalc_stock(allow_negative=allow_negative, conn=conn)
 
 
 def unpost_sale(sale_id: int) -> None:
     with get_connection() as conn:
-        status = conn.execute("SELECT status FROM SalesDocuments WHERE id=?", (sale_id,)).fetchone()
-        if not status:
-            raise ValueError("Документ не знайдено")
-        if status[0] != "posted":
-            raise ValueError("Документ не проведено")
-        conn.execute("UPDATE SalesDocuments SET status='draft' WHERE id=?", (sale_id,))
-        _remove_cash_links(conn, "sale", sale_id)
-        conn.commit()
-    recalc_stock()
+        with transaction(conn):
+            status = conn.execute("SELECT status FROM SalesDocuments WHERE id=?", (sale_id,)).fetchone()
+            if not status:
+                raise ValueError("Документ не знайдено")
+            if status[0] != "posted":
+                raise ValueError("Документ не проведено")
+            conn.execute("UPDATE SalesDocuments SET status='draft' WHERE id=?", (sale_id,))
+            _remove_cash_links(conn, "sale", sale_id)
+            recalc_stock(conn=conn)
 
 
 # Stock listing

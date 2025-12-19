@@ -14,6 +14,7 @@ import json
 import logging
 import math
 import sqlite3
+from collections import deque
 from pathlib import Path
 from statistics import mean, pstdev
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -293,6 +294,20 @@ def init_db() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_extra_cost_allocations_doc ON ExtraCostAllocations(extra_cost_id);
 
+            CREATE TABLE IF NOT EXISTS ExtraCostCogsAllocations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                extra_cost_id INTEGER NOT NULL,
+                purchase_line_id INTEGER NOT NULL,
+                product_id INTEGER NOT NULL,
+                warehouse_id INTEGER NOT NULL,
+                qty_sold REAL NOT NULL,
+                amount_cogs_base REAL NOT NULL,
+                FOREIGN KEY (extra_cost_id) REFERENCES ExtraCostDocuments(id) ON DELETE CASCADE,
+                FOREIGN KEY (purchase_line_id) REFERENCES PurchaseLines(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_ecca_doc ON ExtraCostCogsAllocations(extra_cost_id);
+            CREATE INDEX IF NOT EXISTS idx_ecca_product ON ExtraCostCogsAllocations(product_id);
+
             CREATE TABLE IF NOT EXISTS LabelTemplates (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 code TEXT UNIQUE NOT NULL,
@@ -524,6 +539,24 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
 
     _ensure_column(conn, "CashTransactions", "type", "TEXT NOT NULL DEFAULT 'other_income'")
     _ensure_column(conn, "CashTransactions", "counterparty_id", "INTEGER")
+
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS ExtraCostCogsAllocations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            extra_cost_id INTEGER NOT NULL,
+            purchase_line_id INTEGER NOT NULL,
+            product_id INTEGER NOT NULL,
+            warehouse_id INTEGER NOT NULL,
+            qty_sold REAL NOT NULL,
+            amount_cogs_base REAL NOT NULL,
+            FOREIGN KEY (extra_cost_id) REFERENCES ExtraCostDocuments(id) ON DELETE CASCADE,
+            FOREIGN KEY (purchase_line_id) REFERENCES PurchaseLines(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_ecca_doc ON ExtraCostCogsAllocations(extra_cost_id);
+        CREATE INDEX IF NOT EXISTS idx_ecca_product ON ExtraCostCogsAllocations(product_id);
+        """
+    )
 
 
 def _ensure_label_templates(conn: sqlite3.Connection) -> None:
@@ -2246,13 +2279,6 @@ def allocate_extra_costs(doc_id: int, purchase_ids: Sequence[int]) -> None:
         if total_base <= 0:
             raise ValueError("Немає бази для розподілу")
         _revert_extra_cost_allocations(conn, doc_id)
-        # Validate balances
-        involved_pairs = {(ln["product_id"], ln["warehouse_id"]) for ln in purchase_lines}
-        for product_id, warehouse_id in involved_pairs:
-            current_qty, _ = _get_balance(conn, product_id, warehouse_id)
-            if current_qty <= 0:
-                raise ValueError("Немає залишку для розподілу супутніх витрат")
-
         per_pair_extra: Dict[Tuple[int, int], float] = {}
         for ln in purchase_lines:
             share = float(ln["amount_base"]) / total_base
@@ -2270,7 +2296,7 @@ def allocate_extra_costs(doc_id: int, purchase_ids: Sequence[int]) -> None:
         for (product_id, warehouse_id), extra_amount in per_pair_extra.items():
             current_qty, current_avg = _get_balance(conn, product_id, warehouse_id)
             if current_qty <= 0:
-                raise ValueError("Немає залишку для розподілу супутніх витрат")
+                continue
             new_avg = (current_qty * current_avg + extra_amount) / current_qty
             _set_balance(conn, product_id, warehouse_id, current_qty, new_avg)
             conn.execute(
@@ -2512,7 +2538,35 @@ def recalc_stock(allow_negative: bool = False) -> None:
     with get_connection() as conn:
         conn.execute("DELETE FROM StockBalances")
         conn.execute("DELETE FROM StockMoves")
+        conn.execute("DELETE FROM ExtraCostCogsAllocations")
         conn.execute("UPDATE PurchaseLines SET extra_cost_allocated_base=0")
+
+        eps = 1e-9
+        lot_queues: Dict[Tuple[int, int], deque[Tuple[int, float]]] = {}
+        initial_qty: Dict[int, float] = {}
+        remaining_qty: Dict[int, float] = {}
+
+        def _clamp(value: float, min_value: float, max_value: float) -> float:
+            return max(min_value, min(max_value, value))
+
+        def fifo_consume(pair: Tuple[int, int], qty: float, allow_negative: bool) -> None:
+            queue = lot_queues.get(pair)
+            remaining_to_consume = qty
+            while remaining_to_consume > eps:
+                if not queue:
+                    if allow_negative:
+                        return
+                    raise ValueError("Недостатньо залишку для товару")
+                purchase_line_id, lot_qty = queue[0]
+                take_qty = min(lot_qty, remaining_to_consume)
+                lot_qty -= take_qty
+                remaining_to_consume -= take_qty
+                lot_qty = 0.0 if lot_qty < eps else lot_qty
+                remaining_qty[purchase_line_id] = lot_qty
+                if lot_qty <= eps:
+                    queue.popleft()
+                else:
+                    queue[0] = (purchase_line_id, lot_qty)
 
         purchase_docs = conn.execute(
             "SELECT p.id, p.doc_date, p.supplier_id, p.warehouse_id, p.channel FROM PurchaseDocuments p WHERE p.status='posted'",
@@ -2537,14 +2591,20 @@ def recalc_stock(allow_negative: bool = False) -> None:
         for etype, doc in events:
             if etype == "purchase":
                 lines = conn.execute(
-                    "SELECT pl.product_id, pl.quantity, pl.purchase_price, pl.purchase_price_base, ? as warehouse_id, ? as channel, ? as supplier_id FROM PurchaseLines pl WHERE pl.purchase_id=?",
+                    "SELECT pl.id as purchase_line_id, pl.product_id, pl.quantity, pl.purchase_price, pl.purchase_price_base, ? as warehouse_id, ? as channel, ? as supplier_id FROM PurchaseLines pl WHERE pl.purchase_id=?",
                     (doc["warehouse_id"], doc["channel"], doc["supplier_id"], doc["id"]),
                 ).fetchall()
                 for ln in lines:
                     _apply_purchase_line(conn, doc["doc_date"], doc["id"], ln)
+                    qty = float(ln["quantity"])
+                    purchase_line_id = int(ln["purchase_line_id"])
+                    pair = (int(ln["product_id"]), int(ln["warehouse_id"]))
+                    lot_queues.setdefault(pair, deque()).append((purchase_line_id, qty))
+                    initial_qty[purchase_line_id] = qty
+                    remaining_qty[purchase_line_id] = qty
             elif etype == "extra":
                 allocations = conn.execute(
-                    "SELECT eca.amount_allocated_base, pl.id as purchase_line_id, pl.product_id, pd.warehouse_id "
+                    "SELECT eca.amount_allocated_base, pl.id as purchase_line_id, pl.product_id, pl.quantity as purchase_qty, pd.warehouse_id "
                     "FROM ExtraCostAllocations eca "
                     "JOIN PurchaseLines pl ON pl.id = eca.purchase_line_id "
                     "JOIN PurchaseDocuments pd ON pd.id = pl.purchase_id "
@@ -2557,12 +2617,36 @@ def recalc_stock(allow_negative: bool = False) -> None:
                         "UPDATE PurchaseLines SET extra_cost_allocated_base = extra_cost_allocated_base + ? WHERE id=?",
                         (alloc["amount_allocated_base"], alloc["purchase_line_id"]),
                     )
-                    key = (alloc["product_id"], alloc["warehouse_id"])
-                    per_pair[key] = per_pair.get(key, 0) + alloc["amount_allocated_base"]
+                    purchase_line_id = int(alloc["purchase_line_id"])
+                    init_qty = initial_qty.get(purchase_line_id, float(alloc["purchase_qty"] or 0.0))
+                    if purchase_line_id not in initial_qty:
+                        initial_qty[purchase_line_id] = init_qty
+                    rem_qty = remaining_qty.get(purchase_line_id, init_qty)
+                    rem_qty = _clamp(rem_qty, 0.0, init_qty)
+                    sold_qty = max(0.0, init_qty - rem_qty)
+                    allocation_amount = float(alloc["amount_allocated_base"])
+                    to_cogs = allocation_amount * (sold_qty / init_qty) if init_qty > eps else 0.0
+                    to_stock = allocation_amount - to_cogs
+                    if to_cogs > eps and sold_qty > eps:
+                        conn.execute(
+                            "INSERT INTO ExtraCostCogsAllocations (extra_cost_id, purchase_line_id, product_id, warehouse_id, qty_sold, amount_cogs_base) "
+                            "VALUES (?,?,?,?,?,?)",
+                            (
+                                doc["id"],
+                                purchase_line_id,
+                                alloc["product_id"],
+                                alloc["warehouse_id"],
+                                sold_qty,
+                                to_cogs,
+                            ),
+                        )
+                    if to_stock > eps:
+                        key = (alloc["product_id"], alloc["warehouse_id"])
+                        per_pair[key] = per_pair.get(key, 0.0) + to_stock
                 for (product_id, warehouse_id), extra_amount in per_pair.items():
                     current_qty, current_avg = _get_balance(conn, product_id, warehouse_id)
-                    if current_qty <= 0:
-                        raise ValueError("Немає залишку для розподілу супутніх витрат")
+                    if current_qty <= eps:
+                        continue
                     new_avg = (current_qty * current_avg + extra_amount) / current_qty
                     _set_balance(conn, product_id, warehouse_id, current_qty, new_avg)
                     conn.execute(
@@ -2576,6 +2660,8 @@ def recalc_stock(allow_negative: bool = False) -> None:
                     (doc["warehouse_id"], doc["channel"], doc["customer_id"], doc["id"]),
                 ).fetchall()
                 for ln in lines:
+                    pair = (int(ln["product_id"]), int(ln["warehouse_id"]))
+                    fifo_consume(pair, float(ln["quantity"]), allow_negative)
                     _apply_sale_line(conn, doc["doc_date"], doc["id"], ln, allow_negative)
         conn.commit()
 
@@ -2794,13 +2880,31 @@ def profit_by_product(date_from: Optional[str] = None, date_to: Optional[str] = 
             params.append(date_to)
         query += " GROUP BY product_id"
         cogs_rows = conn.execute(query, params).fetchall()
+        extra_params: List[object] = []
+        extra_query = (
+            "SELECT ecca.product_id, SUM(ecca.amount_cogs_base) as cogs "
+            "FROM ExtraCostCogsAllocations ecca "
+            "JOIN ExtraCostDocuments e ON e.id = ecca.extra_cost_id "
+            "WHERE e.status='posted'"
+        )
+        if date_from:
+            extra_query += " AND e.doc_date >= ?"
+            extra_params.append(date_from)
+        if date_to:
+            extra_query += " AND e.doc_date <= ?"
+            extra_params.append(date_to)
+        extra_query += " GROUP BY ecca.product_id"
+        extra_cogs_rows = conn.execute(extra_query, extra_params).fetchall()
         product_names = {row["id"]: row["name"] for row in conn.execute("SELECT id, name FROM Products")}
-    results: List[dict] = []
-    for row in cogs_rows:
+    cogs_map = {row["product_id"]: abs(float(row["cogs"])) for row in cogs_rows}
+    for row in extra_cogs_rows:
         pid = row["product_id"]
-        cogs = abs(float(row["cogs"]))
+        cogs_map[pid] = cogs_map.get(pid, 0.0) + float(row["cogs"] or 0.0)
+    results: List[dict] = []
+    for pid in sorted(set(cogs_map.keys()) | set(income_map.keys())):
         income = income_map.get(pid, 0.0)
         expenses = expense_map.get(pid, 0.0)
+        cogs = cogs_map.get(pid, 0.0)
         results.append(
             {
                 "product_id": pid,
@@ -2811,20 +2915,6 @@ def profit_by_product(date_from: Optional[str] = None, date_to: Optional[str] = 
                 "gross_profit": income - cogs - expenses,
             }
         )
-    # include products with income but no cogs (services?)
-    for pid, income in income_map.items():
-        if not any(r["product_id"] == pid for r in results):
-            expenses = expense_map.get(pid, 0.0)
-            results.append(
-                {
-                    "product_id": pid,
-                    "product": product_names.get(pid, ""),
-                    "income": income,
-                    "cogs": 0.0,
-                    "expenses": expenses,
-                    "gross_profit": income - expenses,
-                }
-            )
     return sorted(results, key=lambda r: r["product"])
 
 
@@ -2861,6 +2951,9 @@ def dashboard_trends(date_from: Optional[str] = None, date_to: Optional[str] = N
     sale_clause, sale_params = _date_clause("s.doc_date")
     cash_clause, cash_params = _date_clause("date")
     move_clause, move_params = _date_clause("s.doc_date")
+    extra_clause, extra_params = _date_clause("e.doc_date")
+    if extra_clause:
+        extra_clause = extra_clause.replace(" WHERE ", " AND ", 1)
 
     with get_connection() as conn:
         turnover_rows = conn.execute(
@@ -2882,15 +2975,30 @@ def dashboard_trends(date_from: Optional[str] = None, date_to: Optional[str] = N
             "WHERE sm.reference_type='sale'" + move_clause + " GROUP BY strftime('%Y-%m', s.doc_date) ORDER BY period",
             move_params,
         ).fetchall()
+        extra_cogs_rows = conn.execute(
+            "SELECT strftime('%Y-%m', e.doc_date) as period, IFNULL(SUM(ecca.amount_cogs_base),0) as cogs "
+            "FROM ExtraCostCogsAllocations ecca "
+            "JOIN ExtraCostDocuments e ON e.id = ecca.extra_cost_id "
+            "WHERE e.status='posted'" + extra_clause + " GROUP BY strftime('%Y-%m', e.doc_date) ORDER BY period",
+            extra_params,
+        ).fetchall()
 
     revenue_map = {row["period"]: float(row["revenue"]) for row in revenue_rows}
     expense_map = {row["period"]: float(row["expenses"]) for row in revenue_rows}
     cogs_map = {row["period"]: -float(row["cogs"]) for row in cogs_rows}
-    periods = sorted({row["period"] for row in turnover_rows} | set(revenue_map.keys()) | set(cogs_map.keys()))
+    extra_cogs_map = {row["period"]: float(row["cogs"]) for row in extra_cogs_rows}
+    periods = sorted(
+        {row["period"] for row in turnover_rows} | set(revenue_map.keys()) | set(cogs_map.keys()) | set(extra_cogs_map.keys())
+    )
     results: List[dict] = []
     for period in periods:
         turnover_val = next((float(r["total"]) for r in turnover_rows if r["period"] == period), 0.0)
-        gross_profit_val = revenue_map.get(period, 0.0) - cogs_map.get(period, 0.0) - expense_map.get(period, 0.0)
+        gross_profit_val = (
+            revenue_map.get(period, 0.0)
+            - cogs_map.get(period, 0.0)
+            - extra_cogs_map.get(period, 0.0)
+            - expense_map.get(period, 0.0)
+        )
         results.append({"period": period, "turnover": turnover_val, "gross_profit": gross_profit_val})
     return results
 
@@ -2944,6 +3052,9 @@ def sales_analysis(
     with get_connection() as conn:
         sale_clause, sale_params = _date_clause("s.doc_date")
         move_clause, move_params = _date_clause("move_date")
+        extra_clause, extra_params = _date_clause("e.doc_date")
+        if extra_clause:
+            extra_clause = extra_clause.replace(" WHERE ", " AND ", 1)
 
         channel_rows = conn.execute(
             "SELECT COALESCE(s.channel,'') as channel, IFNULL(SUM(sl.amount),0) as revenue, "
@@ -2958,6 +3069,14 @@ def sales_analysis(
             move_params,
         ).fetchall()
         cogs_map = {row["channel"]: -float(row["cogs"]) for row in channel_cogs}
+        extra_cogs_total = conn.execute(
+            "SELECT IFNULL(SUM(ecca.amount_cogs_base),0) as cogs "
+            "FROM ExtraCostCogsAllocations ecca "
+            "JOIN ExtraCostDocuments e ON e.id = ecca.extra_cost_id "
+            "WHERE e.status='posted'" + extra_clause,
+            extra_params,
+        ).fetchone()["cogs"]
+        cogs_map[""] = cogs_map.get("", 0.0) + float(extra_cogs_total or 0.0)
 
         channel_expenses = conn.execute(
             "SELECT COALESCE(s.channel,'') as channel, IFNULL(SUM(sl.quantity * sl.unit_expense_base + sl.order_expense_allocated_base),0) as expenses "
@@ -2985,6 +3104,14 @@ def sales_analysis(
             "WHERE sm.reference_type='sale'" + move_clause + " GROUP BY p.category_id",
             move_params,
         ).fetchall()
+        extra_category_cogs = conn.execute(
+            "SELECT p.category_id, IFNULL(SUM(ecca.amount_cogs_base),0) as cogs "
+            "FROM ExtraCostCogsAllocations ecca "
+            "JOIN ExtraCostDocuments e ON e.id = ecca.extra_cost_id "
+            "JOIN Products p ON p.id = ecca.product_id "
+            "WHERE e.status='posted'" + extra_clause + " GROUP BY p.category_id",
+            extra_params,
+        ).fetchall()
         category_expenses_rows = conn.execute(
             "SELECT p.category_id, IFNULL(SUM(sl.quantity * sl.unit_expense_base + sl.order_expense_allocated_base),0) as expenses "
             "FROM SalesLines sl "
@@ -2998,6 +3125,9 @@ def sales_analysis(
         for row in category_cogs_rows:
             name = category_names.get(row["category_id"], "Без категорії")
             cogs_by_category[name] = cogs_by_category.get(name, 0.0) - float(row["cogs"])
+        for row in extra_category_cogs:
+            name = category_names.get(row["category_id"], "Без категорії")
+            cogs_by_category[name] = cogs_by_category.get(name, 0.0) + float(row["cogs"])
         expenses_by_category: Dict[str, float] = {}
         for row in category_expenses_rows:
             name = category_names.get(row["category_id"], "Без категорії")
@@ -3345,5 +3475,3 @@ def duplicate_label_template(template_id: int, new_code: str, new_title: str) ->
     tpl = data["template"].copy()
     tpl.update({"code": new_code, "title": new_title, "is_default": 0})
     return create_label_template({"template": tpl, "elements": data["elements"]})
-
-

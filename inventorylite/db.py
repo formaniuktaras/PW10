@@ -289,6 +289,33 @@ def init_db() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_sales_lines_sale ON SalesLines(sale_id);
 
+            CREATE TABLE IF NOT EXISTS InventoryDocuments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                doc_date TEXT NOT NULL,
+                warehouse_id INTEGER NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('draft','posted')) DEFAULT 'draft',
+                comment TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (warehouse_id) REFERENCES Warehouses(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_inventory_docs_date ON InventoryDocuments(doc_date);
+            CREATE INDEX IF NOT EXISTS idx_inventory_docs_wh ON InventoryDocuments(warehouse_id);
+
+            CREATE TABLE IF NOT EXISTS InventoryLines (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                inventory_id INTEGER NOT NULL,
+                product_id INTEGER NOT NULL,
+                expected_qty REAL NOT NULL DEFAULT 0,
+                counted_qty REAL NOT NULL DEFAULT 0,
+                cost_override REAL,
+                note TEXT,
+                UNIQUE(inventory_id, product_id),
+                FOREIGN KEY (inventory_id) REFERENCES InventoryDocuments(id) ON DELETE CASCADE,
+                FOREIGN KEY (product_id) REFERENCES Products(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_inventory_lines_inv ON InventoryLines(inventory_id);
+
             CREATE TABLE IF NOT EXISTS StockBalances (
                 product_id INTEGER NOT NULL,
                 warehouse_id INTEGER NOT NULL,
@@ -492,6 +519,33 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_pb_product_id ON ProductBarcodes(product_id);
         CREATE INDEX IF NOT EXISTS idx_pb_code_lower ON ProductBarcodes(lower(trim(code)));
+
+        CREATE TABLE IF NOT EXISTS InventoryDocuments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            doc_date TEXT NOT NULL,
+            warehouse_id INTEGER NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('draft','posted')) DEFAULT 'draft',
+            comment TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (warehouse_id) REFERENCES Warehouses(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_inventory_docs_date ON InventoryDocuments(doc_date);
+        CREATE INDEX IF NOT EXISTS idx_inventory_docs_wh ON InventoryDocuments(warehouse_id);
+
+        CREATE TABLE IF NOT EXISTS InventoryLines (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            inventory_id INTEGER NOT NULL,
+            product_id INTEGER NOT NULL,
+            expected_qty REAL NOT NULL DEFAULT 0,
+            counted_qty REAL NOT NULL DEFAULT 0,
+            cost_override REAL,
+            note TEXT,
+            UNIQUE(inventory_id, product_id),
+            FOREIGN KEY (inventory_id) REFERENCES InventoryDocuments(id) ON DELETE CASCADE,
+            FOREIGN KEY (product_id) REFERENCES Products(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_inventory_lines_inv ON InventoryLines(inventory_id);
         """
     )
 
@@ -2172,6 +2226,13 @@ def get_stock_quantity(product_id: int, warehouse_id: int) -> float:
     return float(row[0]) if row else 0.0
 
 
+def get_stock_balance(product_id: int, warehouse_id: int) -> Tuple[float, float]:
+    """Return current quantity and average cost for a product in a warehouse."""
+
+    with get_connection() as conn:
+        return _get_balance(conn, product_id, warehouse_id)
+
+
 def find_counterparty_by_name(name: str, allowed_types: Optional[Sequence[str]] = None) -> Optional[sqlite3.Row]:
     """Find counterparty by name (case-insensitive) limited to types if provided."""
 
@@ -2202,6 +2263,33 @@ def _set_balance(conn: sqlite3.Connection, product_id: int, warehouse_id: int, q
         "ON CONFLICT(product_id, warehouse_id) DO UPDATE SET quantity=excluded.quantity, average_cost=excluded.average_cost, updated_at=CURRENT_TIMESTAMP",
         (product_id, warehouse_id, quantity, average_cost),
     )
+
+
+def _get_last_purchase_price(
+    conn: sqlite3.Connection, product_id: int, warehouse_id: int, doc_date: str
+) -> float:
+    row = conn.execute(
+        """
+        SELECT COALESCE(NULLIF(pl.purchase_price_base, 0), pl.purchase_price) AS price
+        FROM PurchaseLines pl
+        JOIN PurchaseDocuments pd ON pd.id = pl.purchase_id
+        WHERE pd.status='posted' AND pl.product_id=? AND pd.warehouse_id=? AND pd.doc_date <= ?
+        ORDER BY pd.doc_date DESC, pd.id DESC, pl.id DESC
+        LIMIT 1
+        """,
+        (product_id, warehouse_id, doc_date),
+    ).fetchone()
+    if not row:
+        return 0.0
+    try:
+        return float(row[0] or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def get_last_purchase_price(product_id: int, warehouse_id: int, doc_date: str) -> float:
+    with get_connection() as conn:
+        return _get_last_purchase_price(conn, product_id, warehouse_id, doc_date)
 
 
 def _document_total(conn: sqlite3.Connection, table: str, fk_field: str, doc_id: int) -> float:
@@ -2856,14 +2944,19 @@ def _recalc_stock(conn: sqlite3.Connection, allow_negative: bool) -> None:
     sales_docs = conn.execute(
         "SELECT s.id, s.doc_date, s.customer_id, s.warehouse_id, s.channel FROM SalesDocuments s WHERE s.status='posted'",
     ).fetchall()
+    inventory_docs = conn.execute(
+        "SELECT id, doc_date, warehouse_id, comment FROM InventoryDocuments WHERE status='posted'",
+    ).fetchall()
 
-    order_rank = {"purchase": 0, "extra": 1, "sale": 2}
+    order_rank = {"purchase": 0, "extra": 1, "sale": 2, "inventory": 99}
     events: List[Tuple[str, sqlite3.Row]] = [
         ("purchase", doc) for doc in purchase_docs
     ] + [
         ("extra", doc) for doc in extra_docs
     ] + [
         ("sale", doc) for doc in sales_docs
+    ] + [
+        ("inventory", doc) for doc in inventory_docs
     ]
     events.sort(key=lambda item: (item[1]["doc_date"], order_rank[item[0]], item[1]["id"]))
 
@@ -2942,6 +3035,71 @@ def _recalc_stock(conn: sqlite3.Connection, allow_negative: bool) -> None:
                 pair = (int(ln["product_id"]), int(ln["warehouse_id"]))
                 fifo_consume(pair, float(ln["quantity"]), allow_negative)
                 _apply_sale_line(conn, doc["doc_date"], doc["id"], ln, allow_negative)
+        elif etype == "inventory":
+            lines = conn.execute(
+                "SELECT product_id, counted_qty, cost_override FROM InventoryLines WHERE inventory_id=?",
+                (doc["id"],),
+            ).fetchall()
+            for ln in lines:
+                product_id = int(ln["product_id"])
+                current_qty, avg_cost = _get_balance(conn, product_id, doc["warehouse_id"])
+                target = float(ln["counted_qty"] or 0.0)
+                diff = target - current_qty
+                if abs(diff) < eps:
+                    _set_balance(conn, product_id, doc["warehouse_id"], target, avg_cost)
+                    continue
+                if diff < 0:
+                    qty_out = -diff
+                    amount = -qty_out * avg_cost
+                    _set_balance(conn, product_id, doc["warehouse_id"], target, avg_cost)
+                    conn.execute(
+                        "INSERT INTO StockMoves (move_date, product_id, warehouse_id, qty_in, qty_out, cost_per_unit, amount, reference_type, reference_id, channel, counterparty_id) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            doc["doc_date"],
+                            product_id,
+                            doc["warehouse_id"],
+                            0,
+                            qty_out,
+                            avg_cost,
+                            amount,
+                            "inventory",
+                            doc["id"],
+                            "",
+                            None,
+                        ),
+                    )
+                else:
+                    qty_in = diff
+                    cost = _inventory_in_cost(
+                        conn,
+                        product_id,
+                        doc["warehouse_id"],
+                        doc["doc_date"],
+                        current_qty,
+                        avg_cost,
+                        ln["cost_override"],
+                    )
+                    amount = qty_in * cost
+                    new_avg = (current_qty * avg_cost + qty_in * cost) / target if target > eps else 0.0
+                    _set_balance(conn, product_id, doc["warehouse_id"], target, new_avg)
+                    conn.execute(
+                        "INSERT INTO StockMoves (move_date, product_id, warehouse_id, qty_in, qty_out, cost_per_unit, amount, reference_type, reference_id, channel, counterparty_id) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            doc["doc_date"],
+                            product_id,
+                            doc["warehouse_id"],
+                            qty_in,
+                            0,
+                            cost,
+                            amount,
+                            "inventory",
+                            doc["id"],
+                            "",
+                            None,
+                        ),
+                    )
 
 
 def recalc_stock(allow_negative: bool = False, conn: sqlite3.Connection | None = None) -> None:
@@ -3071,6 +3229,196 @@ def unpost_sale(sale_id: int) -> None:
                 raise ValueError("Документ не проведено")
             conn.execute("UPDATE SalesDocuments SET status='draft' WHERE id=?", (sale_id,))
             _remove_cash_links(conn, "sale", sale_id)
+            recalc_stock(conn=conn)
+
+
+# Inventory documents
+
+def list_inventory_documents(
+    status: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    warehouse_id: Optional[int] = None,
+) -> List[sqlite3.Row]:
+    query = (
+        "SELECT i.id, i.doc_date, w.name as warehouse_name, i.status, "
+        "COUNT(il.id) as lines_count, IFNULL(SUM(ABS(il.counted_qty - il.expected_qty)),0) as diff_total, "
+        "i.comment "
+        "FROM InventoryDocuments i "
+        "LEFT JOIN Warehouses w ON w.id = i.warehouse_id "
+        "LEFT JOIN InventoryLines il ON il.inventory_id = i.id"
+    )
+    clauses: List[str] = []
+    params: List[object] = []
+    if status:
+        clauses.append("i.status=?")
+        params.append(status)
+    if date_from:
+        clauses.append("i.doc_date >= ?")
+        params.append(date_from)
+    if date_to:
+        clauses.append("i.doc_date <= ?")
+        params.append(date_to)
+    if warehouse_id:
+        clauses.append("i.warehouse_id = ?")
+        params.append(warehouse_id)
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    query += " GROUP BY i.id ORDER BY i.doc_date, i.id"
+    with get_connection() as conn:
+        return list(conn.execute(query, params))
+
+
+def get_inventory_document(doc_id: int) -> Optional[sqlite3.Row]:
+    with get_connection() as conn:
+        return conn.execute("SELECT * FROM InventoryDocuments WHERE id=?", (doc_id,)).fetchone()
+
+
+def list_inventory_lines(doc_id: int) -> List[sqlite3.Row]:
+    with get_connection() as conn:
+        return list(
+            conn.execute(
+                "SELECT il.product_id, p.sku, p.name, il.expected_qty, il.counted_qty, "
+                "(il.counted_qty - il.expected_qty) as diff, il.cost_override, il.note "
+                "FROM InventoryLines il "
+                "JOIN Products p ON p.id = il.product_id "
+                "WHERE il.inventory_id=? "
+                "ORDER BY p.name",
+                (doc_id,),
+            )
+        )
+
+
+def create_inventory_document(doc_date: str, warehouse_id: int, comment: str = "") -> int:
+    _validate_iso_date(doc_date)
+    with get_connection() as conn:
+        with transaction(conn):
+            cur = conn.execute(
+                "INSERT INTO InventoryDocuments (doc_date, warehouse_id, status, comment) VALUES (?, ?, 'draft', ?)",
+                (doc_date, warehouse_id, comment.strip()),
+            )
+            return cur.lastrowid
+
+
+def update_inventory_document(doc_id: int, doc_date: str, warehouse_id: int, comment: str) -> None:
+    _validate_iso_date(doc_date)
+    with get_connection() as conn:
+        with transaction(conn):
+            status = conn.execute("SELECT status FROM InventoryDocuments WHERE id=?", (doc_id,)).fetchone()
+            if not status:
+                raise ValueError("Документ не знайдено")
+            if status[0] != "draft":
+                raise ValueError("Редагування можливе лише у чернетці")
+            conn.execute(
+                "UPDATE InventoryDocuments SET doc_date=?, warehouse_id=?, comment=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (doc_date, warehouse_id, comment.strip(), doc_id),
+            )
+
+
+def replace_inventory_lines(doc_id: int, lines: list[dict]) -> None:
+    with get_connection() as conn:
+        with transaction(conn):
+            status = conn.execute("SELECT status FROM InventoryDocuments WHERE id=?", (doc_id,)).fetchone()
+            if not status:
+                raise ValueError("Документ не знайдено")
+            if status[0] != "draft":
+                raise ValueError("Рядки можна змінювати лише у чернетці")
+            conn.execute("DELETE FROM InventoryLines WHERE inventory_id=?", (doc_id,))
+            for line in lines:
+                product_id = int(line["product_id"])
+                expected_qty = float(line.get("expected_qty", 0) or 0)
+                counted_qty = float(line.get("counted_qty", 0) or 0)
+                cost_override = line.get("cost_override")
+                cost_value = None if cost_override in (None, "") else float(cost_override)
+                note = (line.get("note") or "").strip()
+                conn.execute(
+                    "INSERT INTO InventoryLines (inventory_id, product_id, expected_qty, counted_qty, cost_override, note) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (doc_id, product_id, expected_qty, counted_qty, cost_value, note),
+                )
+
+
+def delete_inventory_document(doc_id: int) -> None:
+    with get_connection() as conn:
+        with transaction(conn):
+            status = conn.execute("SELECT status FROM InventoryDocuments WHERE id=?", (doc_id,)).fetchone()
+            if not status:
+                raise ValueError("Документ не знайдено")
+            if status[0] != "draft":
+                raise ValueError("Видаляти можна лише чернетки")
+            conn.execute("DELETE FROM InventoryDocuments WHERE id=?", (doc_id,))
+
+
+def _inventory_in_cost(
+    conn: sqlite3.Connection,
+    product_id: int,
+    warehouse_id: int,
+    doc_date: str,
+    current_qty: float,
+    avg_cost: float,
+    cost_override: Optional[float],
+) -> float:
+    eps = 1e-9
+    if cost_override is not None and cost_override > eps:
+        return float(cost_override)
+    if current_qty > eps and avg_cost > eps:
+        return float(avg_cost)
+    last_price = _get_last_purchase_price(conn, product_id, warehouse_id, doc_date)
+    if last_price > eps:
+        return float(last_price)
+    return 0.0
+
+
+def post_inventory(doc_id: int) -> None:
+    with get_connection() as conn:
+        with transaction(conn):
+            doc = conn.execute(
+                "SELECT status, doc_date, warehouse_id FROM InventoryDocuments WHERE id=?",
+                (doc_id,),
+            ).fetchone()
+            if not doc:
+                raise ValueError("Документ не знайдено")
+            if doc["status"] != "draft":
+                raise ValueError("Документ вже проведено")
+            lines = conn.execute(
+                "SELECT product_id, counted_qty, cost_override FROM InventoryLines WHERE inventory_id=?",
+                (doc_id,),
+            ).fetchall()
+            if not lines:
+                raise ValueError("Немає рядків для проведення")
+            for line in lines:
+                counted_qty = float(line["counted_qty"] or 0.0)
+                cost_override = line["cost_override"]
+                if counted_qty < 0:
+                    raise ValueError("Фактична кількість не може бути від'ємною")
+                if cost_override is not None and float(cost_override) < 0:
+                    raise ValueError("Собівартість не може бути від'ємною")
+                current_qty, avg_cost = _get_balance(conn, line["product_id"], doc["warehouse_id"])
+                if counted_qty - current_qty > 1e-9:
+                    cost = _inventory_in_cost(
+                        conn,
+                        line["product_id"],
+                        doc["warehouse_id"],
+                        doc["doc_date"],
+                        current_qty,
+                        avg_cost,
+                        cost_override,
+                    )
+                    if cost <= 0:
+                        raise ValueError("Для надлишку потрібна собівартість")
+            conn.execute("UPDATE InventoryDocuments SET status='posted', updated_at=CURRENT_TIMESTAMP WHERE id=?", (doc_id,))
+            recalc_stock(conn=conn)
+
+
+def unpost_inventory(doc_id: int) -> None:
+    with get_connection() as conn:
+        with transaction(conn):
+            status = conn.execute("SELECT status FROM InventoryDocuments WHERE id=?", (doc_id,)).fetchone()
+            if not status:
+                raise ValueError("Документ не знайдено")
+            if status[0] != "posted":
+                raise ValueError("Документ не проведено")
+            conn.execute("UPDATE InventoryDocuments SET status='draft', updated_at=CURRENT_TIMESTAMP WHERE id=?", (doc_id,))
             recalc_stock(conn=conn)
 
 

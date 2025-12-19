@@ -18,6 +18,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 from collections import deque
+from itertools import count
 from pathlib import Path
 from statistics import mean, pstdev
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -74,6 +75,34 @@ def transaction(conn: sqlite3.Connection) -> Iterable[None]:
         raise
     else:
         conn.commit()
+
+
+_SAVEPOINT_COUNTER = count(1)
+
+
+@contextmanager
+def safe_transaction(conn: sqlite3.Connection) -> Iterable[None]:
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+        except Exception:
+            conn.rollback()
+            raise
+        else:
+            conn.commit()
+        return
+
+    savepoint = f"sp_{next(_SAVEPOINT_COUNTER)}"
+    conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        yield
+    except Exception:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
+    else:
+        conn.execute(f"RELEASE SAVEPOINT {savepoint}")
 
 
 def init_db() -> None:
@@ -407,8 +436,9 @@ def init_db() -> None:
             """
         )
         _migrate_schema(conn)
-        _normalize_existing_codes(conn)
-        _ensure_case_insensitive_uniques(conn)
+        with safe_transaction(conn):
+            _normalize_existing_codes(conn)
+            _ensure_case_insensitive_uniques(conn)
         _ensure_label_templates(conn)
     logging.info("Database initialized at %s", db_path)
 
@@ -686,19 +716,18 @@ def _normalize_existing_codes(conn: sqlite3.Connection) -> None:
     if not (product_updates or barcode_updates or supplier_updates):
         return
 
-    conn.execute("BEGIN")
-    if product_updates:
-        conn.executemany(
-            "UPDATE Products SET sku=?, supplier_sku=? WHERE id=?",
-            product_updates,
-        )
-    if barcode_updates:
-        conn.executemany("UPDATE ProductBarcodes SET code=? WHERE id=?", barcode_updates)
-    if supplier_updates:
-        conn.executemany(
-            "UPDATE ProductSupplierCodes SET supplier_sku=? WHERE id=?", supplier_updates
-        )
-    conn.commit()
+    with safe_transaction(conn):
+        if product_updates:
+            conn.executemany(
+                "UPDATE Products SET sku=?, supplier_sku=? WHERE id=?",
+                product_updates,
+            )
+        if barcode_updates:
+            conn.executemany("UPDATE ProductBarcodes SET code=? WHERE id=?", barcode_updates)
+        if supplier_updates:
+            conn.executemany(
+                "UPDATE ProductSupplierCodes SET supplier_sku=? WHERE id=?", supplier_updates
+            )
 
 
 def _ensure_case_insensitive_uniques(conn: sqlite3.Connection) -> None:
@@ -750,14 +779,17 @@ def _ensure_case_insensitive_uniques(conn: sqlite3.Connection) -> None:
             + "\n".join(conflicts)
         )
 
-    conn.execute("DROP INDEX IF EXISTS idx_products_sku_lower")
-    conn.execute("DROP INDEX IF EXISTS idx_pb_code_lower")
-    conn.execute("DROP INDEX IF EXISTS idx_psc_supplier_sku_lower")
-    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_products_sku_lower ON Products(lower(trim(sku)))")
-    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_pb_code_lower ON ProductBarcodes(lower(trim(code)))")
-    conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_psc_supplier_sku_lower ON ProductSupplierCodes(supplier_id, lower(trim(supplier_sku)))"
-    )
+    with safe_transaction(conn):
+        conn.execute("DROP INDEX IF EXISTS idx_products_sku_lower")
+        conn.execute("DROP INDEX IF EXISTS idx_pb_code_lower")
+        conn.execute("DROP INDEX IF EXISTS idx_psc_supplier_sku_lower")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_products_sku_lower ON Products(lower(trim(sku)))"
+        )
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_pb_code_lower ON ProductBarcodes(lower(trim(code)))")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_psc_supplier_sku_lower ON ProductSupplierCodes(supplier_id, lower(trim(supplier_sku)))"
+        )
 
 
 def _ensure_label_templates(conn: sqlite3.Connection) -> None:
@@ -1507,14 +1539,13 @@ def replace_product_supplier_codes(product_id: int, codes: list[dict]) -> None:
         sanitized.append((product_id, supplier_id, supplier_sku, is_primary))
 
     with get_connection() as conn:
-        conn.execute("BEGIN")
-        conn.execute("DELETE FROM ProductSupplierCodes WHERE product_id=?", (product_id,))
-        if sanitized:
-            conn.executemany(
-                "INSERT INTO ProductSupplierCodes (product_id, supplier_id, supplier_sku, is_primary) VALUES (?,?,?,?)",
-                sanitized,
-            )
-        conn.commit()
+        with safe_transaction(conn):
+            conn.execute("DELETE FROM ProductSupplierCodes WHERE product_id=?", (product_id,))
+            if sanitized:
+                conn.executemany(
+                    "INSERT INTO ProductSupplierCodes (product_id, supplier_id, supplier_sku, is_primary) VALUES (?,?,?,?)",
+                    sanitized,
+                )
 
 
 def list_product_barcodes(product_id: int) -> list[sqlite3.Row]:
@@ -1538,14 +1569,13 @@ def replace_product_barcodes(product_id: int, codes: list[dict]) -> None:
         sanitized.append((product_id, normalized, note or None))
 
     with get_connection() as conn:
-        conn.execute("BEGIN")
-        conn.execute("DELETE FROM ProductBarcodes WHERE product_id=?", (product_id,))
-        if sanitized:
-            conn.executemany(
-                "INSERT INTO ProductBarcodes (product_id, code, note) VALUES (?,?,?)",
-                sanitized,
-            )
-        conn.commit()
+        with safe_transaction(conn):
+            conn.execute("DELETE FROM ProductBarcodes WHERE product_id=?", (product_id,))
+            if sanitized:
+                conn.executemany(
+                    "INSERT INTO ProductBarcodes (product_id, code, note) VALUES (?,?,?)",
+                    sanitized,
+                )
 
 
 def find_product_by_scan_code(code: str, barcode_prefix: str = "") -> Optional[sqlite3.Row]:
@@ -1663,48 +1693,44 @@ def bulk_update_products_is_active(conn: sqlite3.Connection, product_ids: list[i
     if not product_ids:
         return 0
     placeholders = ",".join("?" * len(product_ids))
-    conn.execute("BEGIN")
-    cur = conn.execute(
-        f"UPDATE Products SET is_active=? WHERE id IN ({placeholders})", (is_active, *product_ids)
-    )
-    conn.commit()
-    return cur.rowcount
+    with safe_transaction(conn):
+        cur = conn.execute(
+            f"UPDATE Products SET is_active=? WHERE id IN ({placeholders})", (is_active, *product_ids)
+        )
+        return cur.rowcount
 
 
 def bulk_update_products_brand(conn: sqlite3.Connection, product_ids: list[int], brand_id: int) -> int:
     if not product_ids:
         return 0
     placeholders = ",".join("?" * len(product_ids))
-    conn.execute("BEGIN")
-    cur = conn.execute(
-        f"UPDATE Products SET brand_id=? WHERE id IN ({placeholders})", (brand_id, *product_ids)
-    )
-    conn.commit()
-    return cur.rowcount
+    with safe_transaction(conn):
+        cur = conn.execute(
+            f"UPDATE Products SET brand_id=? WHERE id IN ({placeholders})", (brand_id, *product_ids)
+        )
+        return cur.rowcount
 
 
 def bulk_update_products_category(conn: sqlite3.Connection, product_ids: list[int], category_id: int) -> int:
     if not product_ids:
         return 0
     placeholders = ",".join("?" * len(product_ids))
-    conn.execute("BEGIN")
-    cur = conn.execute(
-        f"UPDATE Products SET category_id=? WHERE id IN ({placeholders})", (category_id, *product_ids)
-    )
-    conn.commit()
-    return cur.rowcount
+    with safe_transaction(conn):
+        cur = conn.execute(
+            f"UPDATE Products SET category_id=? WHERE id IN ({placeholders})", (category_id, *product_ids)
+        )
+        return cur.rowcount
 
 
 def bulk_update_products_unit(conn: sqlite3.Connection, product_ids: list[int], unit: str) -> int:
     if not product_ids:
         return 0
     placeholders = ",".join("?" * len(product_ids))
-    conn.execute("BEGIN")
-    cur = conn.execute(
-        f"UPDATE Products SET unit=? WHERE id IN ({placeholders})", (unit.strip() or "pcs", *product_ids)
-    )
-    conn.commit()
-    return cur.rowcount
+    with safe_transaction(conn):
+        cur = conn.execute(
+            f"UPDATE Products SET unit=? WHERE id IN ({placeholders})", (unit.strip() or "pcs", *product_ids)
+        )
+        return cur.rowcount
 
 
 def bulk_add_product_category_links(
@@ -1712,16 +1738,16 @@ def bulk_add_product_category_links(
 ) -> int:
     if not product_ids or not category_ids:
         return 0
-    conn.execute("BEGIN")
-    inserted = 0
-    for pid in product_ids:
-        for cid in category_ids:
-            cur = conn.execute(
-                "INSERT OR IGNORE INTO ProductCategoryLinks (product_id, category_id) VALUES (?,?)", (pid, cid)
-            )
-            inserted += cur.rowcount
-    conn.commit()
-    return inserted
+    with safe_transaction(conn):
+        inserted = 0
+        for pid in product_ids:
+            for cid in category_ids:
+                cur = conn.execute(
+                    "INSERT OR IGNORE INTO ProductCategoryLinks (product_id, category_id) VALUES (?,?)",
+                    (pid, cid),
+                )
+                inserted += cur.rowcount
+        return inserted
 
 
 def bulk_remove_product_category_links(
@@ -1729,17 +1755,16 @@ def bulk_remove_product_category_links(
 ) -> int:
     if not product_ids or not category_ids:
         return 0
-    conn.execute("BEGIN")
-    deleted = 0
-    for pid in product_ids:
-        placeholders = ",".join("?" * len(category_ids))
-        cur = conn.execute(
-            f"DELETE FROM ProductCategoryLinks WHERE product_id=? AND category_id IN ({placeholders})",
-            (pid, *category_ids),
-        )
-        deleted += cur.rowcount
-    conn.commit()
-    return deleted
+    with safe_transaction(conn):
+        deleted = 0
+        for pid in product_ids:
+            placeholders = ",".join("?" * len(category_ids))
+            cur = conn.execute(
+                f"DELETE FROM ProductCategoryLinks WHERE product_id=? AND category_id IN ({placeholders})",
+                (pid, *category_ids),
+            )
+            deleted += cur.rowcount
+        return deleted
 
 
 def get_product_additional_categories(product_id: int) -> List[int]:
@@ -3654,45 +3679,45 @@ def create_label_template(payload: dict) -> int:
     tpl = payload.get("template") or {}
     elements = payload.get("elements") or []
     with get_connection() as conn:
-        conn.execute("BEGIN")
-        cur = conn.execute(
-            """
-            INSERT INTO LabelTemplates (
-                code, title, kind, page_w_mm, page_h_mm, orientation, cols, rows, label_w_mm, label_h_mm,
-                gap_x_mm, gap_y_mm, margin_left_mm, margin_top_mm, margin_right_mm, margin_bottom_mm,
-                offset_x_mm, offset_y_mm, scale_x, scale_y, is_active, is_default
-            ) VALUES (
-                :code, :title, :kind, :page_w_mm, :page_h_mm, :orientation, :cols, :rows, :label_w_mm, :label_h_mm,
-                :gap_x_mm, :gap_y_mm, :margin_left_mm, :margin_top_mm, :margin_right_mm, :margin_bottom_mm,
-                :offset_x_mm, :offset_y_mm, :scale_x, :scale_y, :is_active, :is_default
-            )
-            """,
-            tpl,
-        )
-        tpl_id = cur.lastrowid
-        for order, element in enumerate(elements):
-            options_json = json.dumps(element.get("options", {}))
-            conn.execute(
+        with safe_transaction(conn):
+            cur = conn.execute(
                 """
-                INSERT INTO LabelTemplateElements (
-                    template_id, element_type, field_key, x_mm, y_mm, w_mm, h_mm, rotation_deg, align, font_name,
-                    font_size, max_chars, wrap, options_json, sort_order, is_active
+                INSERT INTO LabelTemplates (
+                    code, title, kind, page_w_mm, page_h_mm, orientation, cols, rows, label_w_mm, label_h_mm,
+                    gap_x_mm, gap_y_mm, margin_left_mm, margin_top_mm, margin_right_mm, margin_bottom_mm,
+                    offset_x_mm, offset_y_mm, scale_x, scale_y, is_active, is_default
                 ) VALUES (
-                    :template_id, :element_type, :field_key, :x_mm, :y_mm, :w_mm, :h_mm, :rotation_deg, :align, :font_name,
-                    :font_size, :max_chars, :wrap, :options_json, :sort_order, :is_active
+                    :code, :title, :kind, :page_w_mm, :page_h_mm, :orientation, :cols, :rows, :label_w_mm, :label_h_mm,
+                    :gap_x_mm, :gap_y_mm, :margin_left_mm, :margin_top_mm, :margin_right_mm, :margin_bottom_mm,
+                    :offset_x_mm, :offset_y_mm, :scale_x, :scale_y, :is_active, :is_default
                 )
                 """,
-                {
-                    **element,
-                    "template_id": tpl_id,
-                    "sort_order": element.get("sort_order", order),
-                    "options_json": options_json,
-                },
+                tpl,
             )
-        if int(tpl.get("is_default", 0)):
-            conn.execute("UPDATE LabelTemplates SET is_default = 0 WHERE id <> ?", (tpl_id,))
-            conn.execute("UPDATE LabelTemplates SET is_default = 1 WHERE id = ?", (tpl_id,))
-        return tpl_id
+            tpl_id = cur.lastrowid
+            for order, element in enumerate(elements):
+                options_json = json.dumps(element.get("options", {}))
+                conn.execute(
+                    """
+                    INSERT INTO LabelTemplateElements (
+                        template_id, element_type, field_key, x_mm, y_mm, w_mm, h_mm, rotation_deg, align, font_name,
+                        font_size, max_chars, wrap, options_json, sort_order, is_active
+                    ) VALUES (
+                        :template_id, :element_type, :field_key, :x_mm, :y_mm, :w_mm, :h_mm, :rotation_deg, :align, :font_name,
+                        :font_size, :max_chars, :wrap, :options_json, :sort_order, :is_active
+                    )
+                    """,
+                    {
+                        **element,
+                        "template_id": tpl_id,
+                        "sort_order": element.get("sort_order", order),
+                        "options_json": options_json,
+                    },
+                )
+            if int(tpl.get("is_default", 0)):
+                conn.execute("UPDATE LabelTemplates SET is_default = 0 WHERE id <> ?", (tpl_id,))
+                conn.execute("UPDATE LabelTemplates SET is_default = 1 WHERE id = ?", (tpl_id,))
+            return tpl_id
 
 
 def update_label_template(template_id: int, payload: dict) -> None:
@@ -3700,43 +3725,43 @@ def update_label_template(template_id: int, payload: dict) -> None:
     tpl = payload.get("template") or {}
     elements = payload.get("elements") or []
     with get_connection() as conn:
-        conn.execute("BEGIN")
-        conn.execute(
-            """
-            UPDATE LabelTemplates SET
-                code=:code, title=:title, kind=:kind, page_w_mm=:page_w_mm, page_h_mm=:page_h_mm,
-                orientation=:orientation, cols=:cols, rows=:rows, label_w_mm=:label_w_mm, label_h_mm=:label_h_mm,
-                gap_x_mm=:gap_x_mm, gap_y_mm=:gap_y_mm, margin_left_mm=:margin_left_mm, margin_top_mm=:margin_top_mm,
-                margin_right_mm=:margin_right_mm, margin_bottom_mm=:margin_bottom_mm, offset_x_mm=:offset_x_mm,
-                offset_y_mm=:offset_y_mm, scale_x=:scale_x, scale_y=:scale_y, is_active=:is_active,
-                updated_at=CURRENT_TIMESTAMP
-            WHERE id = :id
-            """,
-            {**tpl, "id": template_id},
-        )
-        conn.execute("DELETE FROM LabelTemplateElements WHERE template_id = ?", (template_id,))
-        for order, element in enumerate(elements):
-            options_json = json.dumps(element.get("options", {}))
+        with safe_transaction(conn):
             conn.execute(
                 """
-                INSERT INTO LabelTemplateElements (
-                    template_id, element_type, field_key, x_mm, y_mm, w_mm, h_mm, rotation_deg, align, font_name,
-                    font_size, max_chars, wrap, options_json, sort_order, is_active
-                ) VALUES (
-                    :template_id, :element_type, :field_key, :x_mm, :y_mm, :w_mm, :h_mm, :rotation_deg, :align, :font_name,
-                    :font_size, :max_chars, :wrap, :options_json, :sort_order, :is_active
-                )
+                UPDATE LabelTemplates SET
+                    code=:code, title=:title, kind=:kind, page_w_mm=:page_w_mm, page_h_mm=:page_h_mm,
+                    orientation=:orientation, cols=:cols, rows=:rows, label_w_mm=:label_w_mm, label_h_mm=:label_h_mm,
+                    gap_x_mm=:gap_x_mm, gap_y_mm=:gap_y_mm, margin_left_mm=:margin_left_mm, margin_top_mm=:margin_top_mm,
+                    margin_right_mm=:margin_right_mm, margin_bottom_mm=:margin_bottom_mm, offset_x_mm=:offset_x_mm,
+                    offset_y_mm=:offset_y_mm, scale_x=:scale_x, scale_y=:scale_y, is_active=:is_active,
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE id = :id
                 """,
-                {
-                    **element,
-                    "template_id": template_id,
-                    "sort_order": element.get("sort_order", order),
-                    "options_json": options_json,
-                },
+                {**tpl, "id": template_id},
             )
-        if int(tpl.get("is_default", 0)):
-            conn.execute("UPDATE LabelTemplates SET is_default = 0 WHERE id <> ?", (template_id,))
-            conn.execute("UPDATE LabelTemplates SET is_default = 1 WHERE id = ?", (template_id,))
+            conn.execute("DELETE FROM LabelTemplateElements WHERE template_id = ?", (template_id,))
+            for order, element in enumerate(elements):
+                options_json = json.dumps(element.get("options", {}))
+                conn.execute(
+                    """
+                    INSERT INTO LabelTemplateElements (
+                        template_id, element_type, field_key, x_mm, y_mm, w_mm, h_mm, rotation_deg, align, font_name,
+                        font_size, max_chars, wrap, options_json, sort_order, is_active
+                    ) VALUES (
+                        :template_id, :element_type, :field_key, :x_mm, :y_mm, :w_mm, :h_mm, :rotation_deg, :align, :font_name,
+                        :font_size, :max_chars, :wrap, :options_json, :sort_order, :is_active
+                    )
+                    """,
+                    {
+                        **element,
+                        "template_id": template_id,
+                        "sort_order": element.get("sort_order", order),
+                        "options_json": options_json,
+                    },
+                )
+            if int(tpl.get("is_default", 0)):
+                conn.execute("UPDATE LabelTemplates SET is_default = 0 WHERE id <> ?", (template_id,))
+                conn.execute("UPDATE LabelTemplates SET is_default = 1 WHERE id = ?", (template_id,))
 
 
 def delete_label_template(template_id: int) -> None:
@@ -3751,9 +3776,9 @@ def delete_label_template(template_id: int) -> None:
 
 def set_default_label_template(template_id: int) -> None:
     with get_connection() as conn:
-        conn.execute("BEGIN")
-        conn.execute("UPDATE LabelTemplates SET is_default = 0")
-        conn.execute("UPDATE LabelTemplates SET is_default = 1 WHERE id = ?", (template_id,))
+        with safe_transaction(conn):
+            conn.execute("UPDATE LabelTemplates SET is_default = 0")
+            conn.execute("UPDATE LabelTemplates SET is_default = 1 WHERE id = ?", (template_id,))
 
 
 def duplicate_label_template(template_id: int, new_code: str, new_title: str) -> int:

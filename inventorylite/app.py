@@ -2564,6 +2564,19 @@ class InventoryApp(tk.Tk):
         if not doc_id:
             return
         try:
+            doc = db.get_inventory_document(doc_id)
+            if not doc:
+                raise ValueError("Документ не знайдено")
+            latest = db.get_latest_posted_stock_doc_date()
+            if latest and doc["doc_date"] < latest:
+                proceed = messagebox.askyesno(
+                    "Підтвердження",
+                    "Документ інвентаризації датований "
+                    f"{doc['doc_date']}, але є проведені документи до {latest}.\n"
+                    f"Проведення змінить історію залишків після {doc['doc_date']}. Продовжити?",
+                )
+                if not proceed:
+                    return
             db.post_inventory(doc_id)
             self.refresh_inventory_documents()
         except Exception as exc:
@@ -6586,6 +6599,7 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
     tree.tag_configure("missing_cost", background="#ffe3e3")
 
     product_lookup = {f"{p['sku']} — {p['name']}": p for p in products}
+    products_by_id = {p["id"]: p for p in products}
     product_names = list(product_lookup.keys())
 
     line_data: list[dict] = []
@@ -6653,10 +6667,24 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
         last_price = db.get_last_purchase_price(line["product_id"], wh_id, _current_date())
         return last_price <= eps
 
+    summary_var = tk.StringVar()
+    summary_label = ttk.Label(line_frame, textvariable=summary_var)
+    summary_label.grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
     def refresh_lines() -> None:
         tree.delete(*tree.get_children())
+        diff_total_negative = 0.0
+        diff_total_positive = 0.0
+        diff_count = 0
+        eps = 1e-9
         for idx, ln in enumerate(line_data):
             diff = ln["counted_qty"] - ln["expected_qty"]
+            if diff < -eps:
+                diff_total_negative += -diff
+                diff_count += 1
+            elif diff > eps:
+                diff_total_positive += diff
+                diff_count += 1
             tags = ("missing_cost",) if _needs_cost(ln) else ()
             tree.insert(
                 "",
@@ -6673,6 +6701,14 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
                 ),
                 tags=tags,
             )
+        summary_var.set(
+            "Рядків: {lines} | Розбіжності: {diffs} | Недостача (шт): {missing:.2f} | Надлишок (шт): {extra:.2f}".format(
+                lines=len(line_data),
+                diffs=diff_count,
+                missing=diff_total_negative,
+                extra=diff_total_positive,
+            )
+        )
 
     def _select_line(event=None) -> None:
         selected_idx.clear()
@@ -6835,6 +6871,116 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
             ln["counted_qty"] = 0.0
         refresh_lines()
 
+    def _add_all_stock() -> None:
+        if not editable:
+            return
+        wh_id = _current_warehouse_id()
+        if not wh_id:
+            show_error("Інвентаризація", "Оберіть склад.")
+            return
+        stock = db.stock_on_hand(wh_id)
+        if not stock:
+            refresh_lines()
+            return
+        for product_id, qty in stock.items():
+            if qty <= 0:
+                continue
+            existing = next((ln for ln in line_data if ln["product_id"] == product_id), None)
+            if existing:
+                existing["expected_qty"] = qty
+                continue
+            product = products_by_id.get(product_id)
+            if not product:
+                continue
+            line_data.append(
+                {
+                    "product_id": product_id,
+                    "sku": product["sku"],
+                    "name": product["name"],
+                    "expected_qty": float(qty),
+                    "counted_qty": 0.0,
+                    "cost_override": None,
+                    "note": "",
+                }
+            )
+        refresh_lines()
+
+    def _import_lines_csv() -> None:
+        if not editable:
+            return
+        wh_id = _current_warehouse_id()
+        if not wh_id:
+            show_error("Інвентаризація", "Оберіть склад.")
+            return
+        file_path = filedialog.askopenfilename(
+            title="Імпорт CSV",
+            defaultextension=".csv",
+            initialdir=str(get_data_dir()),
+            filetypes=[("CSV", "*.csv"), ("Усі файли", "*.*")],
+        )
+        if not file_path:
+            return
+        errors: list[str] = []
+        updated_count = 0
+        prefix = _sanitize_barcode_prefix(settings.get("defaults", "product", "barcode_prefix") or "")
+        try:
+            with open(file_path, newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                if not reader.fieldnames:
+                    messagebox.showerror("Імпорт CSV", "Файл не містить заголовків.")
+                    return
+                field_map = {name.strip().lower(): name for name in reader.fieldnames if name}
+                code_field = field_map.get("code") or field_map.get("sku")
+                qty_field = field_map.get("qty") or field_map.get("counted_qty")
+                if not code_field or not qty_field:
+                    messagebox.showerror("Імпорт CSV", "Потрібні колонки code/sku та qty/counted_qty.")
+                    return
+                for row in reader:
+                    code = (row.get(code_field) or "").strip()
+                    if not code:
+                        errors.append("порожній код")
+                        continue
+                    qty_raw = row.get(qty_field)
+                    try:
+                        qty = float(qty_raw)
+                    except (TypeError, ValueError):
+                        errors.append(code)
+                        continue
+                    if qty < 0:
+                        errors.append(code)
+                        continue
+                    product = db.find_product_by_scan_code(code, barcode_prefix=prefix)
+                    if not product:
+                        errors.append(code)
+                        continue
+                    existing = next((ln for ln in line_data if ln["product_id"] == product["id"]), None)
+                    if existing:
+                        existing["counted_qty"] += qty
+                    else:
+                        expected_qty = db.get_stock_quantity(product["id"], wh_id)
+                        line_data.append(
+                            {
+                                "product_id": product["id"],
+                                "sku": product["sku"],
+                                "name": product["name"],
+                                "expected_qty": expected_qty,
+                                "counted_qty": qty,
+                                "cost_override": None,
+                                "note": "",
+                            }
+                        )
+                    updated_count += 1
+        except Exception:
+            logging.exception("Inventory CSV import error")
+            show_error("Імпорт CSV", "Не вдалося імпортувати дані.")
+            return
+        refresh_lines()
+        preview = ", ".join(errors[:20])
+        summary = f"Імпорт завершено: додано/оновлено {updated_count} рядків; не знайдено {len(errors)} кодів"
+        if preview:
+            summary += f"\nПроблемні коди: {preview}"
+        messagebox.showinfo("Імпорт CSV", summary)
+
     def _export_lines_csv() -> None:
         if not line_data:
             messagebox.showinfo("Експорт CSV", "Немає рядків для експорту.")
@@ -6867,12 +7013,21 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
         messagebox.showinfo("Експорт CSV", "Дані збережено.")
 
     btn_row = ttk.Frame(line_frame)
-    btn_row.grid(row=1, column=0, columnspan=2, pady=(4, 0), sticky="w")
+    btn_row.grid(row=2, column=0, columnspan=2, pady=(4, 0), sticky="w")
     ttk.Button(btn_row, text="Додати товар…", command=_add_product, state="normal" if editable else "disabled").pack(
         side=tk.LEFT, padx=4
     )
     ttk.Button(btn_row, text="Редагувати рядок…", command=_edit_line).pack(side=tk.LEFT, padx=4)
     ttk.Button(btn_row, text="Видалити рядок", command=_delete_line, state="normal" if editable else "disabled").pack(
+        side=tk.LEFT, padx=4
+    )
+    ttk.Button(
+        btn_row,
+        text="Додати всі залишки (qty>0)",
+        command=_add_all_stock,
+        state="normal" if editable else "disabled",
+    ).pack(side=tk.LEFT, padx=4)
+    ttk.Button(btn_row, text="Імпорт CSV…", command=_import_lines_csv, state="normal" if editable else "disabled").pack(
         side=tk.LEFT, padx=4
     )
     ttk.Button(

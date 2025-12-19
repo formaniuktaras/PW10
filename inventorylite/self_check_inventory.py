@@ -91,6 +91,53 @@ def main() -> None:
         _assert_close(balance["quantity"], 8.0)
         _assert_close(balance["average_cost"], 100.0)
 
+        warehouse_id_2 = db.add_warehouse("Second Warehouse")
+        product_a = db.add_product("SKU-A", "Product A", brand_id, category_id)
+        product_b = db.add_product("SKU-B", "Product B", brand_id, category_id)
+
+        purchase_id_2 = db.create_purchase("2024-02-01", supplier_id, warehouse_id_2, "")
+        db.replace_purchase_lines(
+            purchase_id_2,
+            [(product_a, 5, 50.0), (product_b, 3, 70.0)],
+            1.0,
+        )
+        db.post_purchase(purchase_id_2)
+
+        inv_id_3 = db.create_inventory_document("2024-02-02", warehouse_id_2, "")
+        db.replace_inventory_lines(
+            inv_id_3,
+            [
+                {
+                    "product_id": product_a,
+                    "expected_qty": 5.0,
+                    "counted_qty": 0.0,
+                    "cost_override": None,
+                    "note": "",
+                },
+                {
+                    "product_id": product_b,
+                    "expected_qty": 3.0,
+                    "counted_qty": 0.0,
+                    "cost_override": None,
+                    "note": "",
+                },
+            ],
+        )
+        db.post_inventory(inv_id_3)
+
+        with db.get_connection() as conn:
+            balance_a = conn.execute(
+                "SELECT quantity FROM StockBalances WHERE product_id=? AND warehouse_id=?",
+                (product_a, warehouse_id_2),
+            ).fetchone()
+            balance_b = conn.execute(
+                "SELECT quantity FROM StockBalances WHERE product_id=? AND warehouse_id=?",
+                (product_b, warehouse_id_2),
+            ).fetchone()
+
+        _assert_close(balance_a["quantity"], 0.0)
+        _assert_close(balance_b["quantity"], 0.0)
+
     print("Inventory self-check passed.")
 
 

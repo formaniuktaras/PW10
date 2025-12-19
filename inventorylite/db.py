@@ -3269,6 +3269,21 @@ def list_inventory_documents(
         return list(conn.execute(query, params))
 
 
+def get_latest_posted_stock_doc_date() -> Optional[str]:
+    query = (
+        "SELECT MAX(doc_date) as latest_date FROM ("
+        "SELECT doc_date FROM PurchaseDocuments WHERE status='posted' "
+        "UNION ALL "
+        "SELECT doc_date FROM SalesDocuments WHERE status='posted' "
+        "UNION ALL "
+        "SELECT doc_date FROM InventoryDocuments WHERE status='posted'"
+        ")"
+    )
+    with get_connection() as conn:
+        row = conn.execute(query).fetchone()
+    return row["latest_date"] if row and row["latest_date"] else None
+
+
 def get_inventory_document(doc_id: int) -> Optional[sqlite3.Row]:
     with get_connection() as conn:
         return conn.execute("SELECT * FROM InventoryDocuments WHERE id=?", (doc_id,)).fetchone()

@@ -6922,8 +6922,11 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
         )
         if not file_path:
             return
-        errors: list[str] = []
-        updated_count = 0
+        not_found_codes: list[str] = []
+        bad_rows: list[str] = []
+        updated_products: set[int] = set()
+        new_products: set[int] = set()
+        existing_product_ids = {ln["product_id"] for ln in line_data}
         prefix = _sanitize_barcode_prefix(settings.get("defaults", "product", "barcode_prefix") or "")
         try:
             def _read_csv_content(path: str) -> str:
@@ -6957,7 +6960,7 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
             for row in reader:
                 code = (row.get(code_field) or "").strip()
                 if not code:
-                    errors.append("порожній код")
+                    bad_rows.append("порожній код")
                     continue
                 qty_raw = (row.get(qty_field) or "").strip()
                 if "," in qty_raw and "." not in qty_raw:
@@ -6965,18 +6968,22 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
                 try:
                     qty = float(qty_raw)
                 except (TypeError, ValueError):
-                    errors.append(code)
+                    bad_rows.append(code)
                     continue
                 if qty < 0:
-                    errors.append(code)
+                    bad_rows.append(code)
                     continue
                 product = db.find_product_by_scan_code(code, barcode_prefix=prefix)
                 if not product:
-                    errors.append(code)
+                    not_found_codes.append(code)
                     continue
                 existing = next((ln for ln in line_data if ln["product_id"] == product["id"]), None)
                 if existing:
                     existing["counted_qty"] += qty
+                    if product["id"] in existing_product_ids:
+                        updated_products.add(product["id"])
+                    else:
+                        new_products.add(product["id"])
                 else:
                     expected_qty = db.get_stock_quantity(product["id"], wh_id)
                     line_data.append(
@@ -6990,14 +6997,20 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
                             "note": "",
                         }
                     )
-                updated_count += 1
+                    new_products.add(product["id"])
         except Exception:
             logging.exception("Inventory CSV import error")
             show_error("Імпорт CSV", "Не вдалося імпортувати дані.")
             return
         refresh_lines()
-        preview = ", ".join(errors[:20])
-        summary = f"Імпорт завершено: додано/оновлено {updated_count} рядків; не знайдено {len(errors)} кодів"
+        preview = ", ".join(not_found_codes[:20])
+        summary = (
+            "Імпорт завершено: "
+            f"нових позицій: {len(new_products)}; "
+            f"оновлено позицій: {len(updated_products)}; "
+            f"рядків з помилками: {len(bad_rows)}; "
+            f"не знайдено кодів: {len(not_found_codes)}."
+        )
         if preview:
             summary += f"\nПроблемні коди: {preview}"
         messagebox.showinfo("Імпорт CSV", summary)

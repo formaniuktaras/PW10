@@ -2244,6 +2244,7 @@ def _revert_extra_cost_allocations(conn: sqlite3.Connection, doc_id: int) -> Non
             "UPDATE PurchaseLines SET extra_cost_allocated_base = extra_cost_allocated_base - ? WHERE id=?",
             (alloc["amount_allocated_base"], alloc["purchase_line_id"]),
         )
+    conn.execute("DELETE FROM ExtraCostCogsAllocations WHERE extra_cost_id=?", (doc_id,))
     conn.execute("DELETE FROM ExtraCostAllocations WHERE extra_cost_id=?", (doc_id,))
     conn.execute(
         "DELETE FROM StockMoves WHERE reference_type='extra_cost' AND reference_id=?",
@@ -2279,11 +2280,9 @@ def allocate_extra_costs(doc_id: int, purchase_ids: Sequence[int]) -> None:
         if total_base <= 0:
             raise ValueError("Немає бази для розподілу")
         _revert_extra_cost_allocations(conn, doc_id)
-        per_pair_extra: Dict[Tuple[int, int], float] = {}
         for ln in purchase_lines:
             share = float(ln["amount_base"]) / total_base
             allocated = extra_total_base * share
-            per_pair_extra[(ln["product_id"], ln["warehouse_id"])] = per_pair_extra.get((ln["product_id"], ln["warehouse_id"]), 0) + allocated
             conn.execute(
                 "INSERT INTO ExtraCostAllocations (extra_cost_id, purchase_line_id, amount_allocated_base) VALUES (?,?,?)",
                 (doc_id, ln["id"], allocated),
@@ -2291,18 +2290,6 @@ def allocate_extra_costs(doc_id: int, purchase_ids: Sequence[int]) -> None:
             conn.execute(
                 "UPDATE PurchaseLines SET extra_cost_allocated_base = extra_cost_allocated_base + ? WHERE id=?",
                 (allocated, ln["id"]),
-            )
-        # Apply to stock balances
-        for (product_id, warehouse_id), extra_amount in per_pair_extra.items():
-            current_qty, current_avg = _get_balance(conn, product_id, warehouse_id)
-            if current_qty <= 0:
-                continue
-            new_avg = (current_qty * current_avg + extra_amount) / current_qty
-            _set_balance(conn, product_id, warehouse_id, current_qty, new_avg)
-            conn.execute(
-                "INSERT INTO StockMoves (move_date, product_id, warehouse_id, qty_in, qty_out, cost_per_unit, amount, reference_type, reference_id, channel, counterparty_id) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (doc["doc_date"], product_id, warehouse_id, 0, 0, new_avg, extra_amount, "extra_cost", doc_id, "", doc["partner_id"]),
             )
         conn.commit()
 
@@ -2320,6 +2307,15 @@ def post_extra_cost(doc_id: int, purchase_ids: Sequence[int]) -> None:
         has_lines = conn.execute("SELECT COUNT(*) FROM ExtraCostLines WHERE extra_cost_id=?", (doc_id,)).fetchone()[0]
         if not has_lines:
             raise ValueError("Немає рядків витрат")
+        placeholders = ",".join("?" for _ in purchase_ids)
+        max_purchase_date = conn.execute(
+            f"SELECT MAX(doc_date) FROM PurchaseDocuments WHERE id IN ({placeholders}) AND status='posted'",
+            purchase_ids,
+        ).fetchone()[0]
+        if max_purchase_date and doc["doc_date"] < max_purchase_date:
+            raise ValueError(
+                "Дата витрат не може бути раніше дати закупівлі (Variant B). Змініть дату документа витрат або дату закупівлі."
+            )
         _recalc_extra_cost_totals(conn, doc_id)
         totals = conn.execute("SELECT total_amount_base FROM ExtraCostDocuments WHERE id=?", (doc_id,)).fetchone()["total_amount_base"]
         if totals <= 0:
@@ -2964,7 +2960,7 @@ def dashboard_trends(date_from: Optional[str] = None, date_to: Optional[str] = N
         ).fetchall()
         revenue_rows = conn.execute(
             "SELECT strftime('%Y-%m', s.doc_date) as period, IFNULL(SUM(sl.amount),0) as revenue, "
-            "IFNULL(SUM(sl.quantity * (sl.unit_expense_base + sl.order_expense_allocated_base)),0) as expenses "
+            "IFNULL(SUM(sl.quantity * sl.unit_expense_base + sl.order_expense_allocated_base),0) as expenses "
             "FROM SalesLines sl JOIN SalesDocuments s ON s.id = sl.sale_id "
             "WHERE s.status='posted'" + sale_clause + " GROUP BY strftime('%Y-%m', s.doc_date) ORDER BY period",
             sale_params,

@@ -7192,6 +7192,8 @@ def main() -> None:
             app.mainloop()
     except RuntimeError:
         messagebox.showwarning(APP_NAME, "Програма вже запущена.")
+    except ValueError as exc:
+        messagebox.showerror(APP_NAME, str(exc))
     except Exception:
         logging.exception("Fatal error")
         try:
@@ -7203,4 +7205,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

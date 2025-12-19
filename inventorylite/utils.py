@@ -2,18 +2,30 @@
 from __future__ import annotations
 
 import datetime
+import json
 import logging
 import os
 import shutil
 import sys
 import tempfile
 import zipfile
-import json
 from copy import deepcopy
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-import tkinter as tk
-from tkinter import TclError, messagebox, ttk
+
+HEADLESS = os.environ.get("INVENTORYLITE_HEADLESS", "").strip().lower() in ("1", "true", "yes")
+
+tk = None
+TclError = Exception
+messagebox = None
+ttk = None
+
+if not HEADLESS:
+    try:
+        import tkinter as tk
+        from tkinter import TclError, messagebox, ttk
+    except Exception:
+        pass
 
 try:
     import fcntl  # type: ignore
@@ -201,6 +213,10 @@ def configure_logging() -> None:
 
 def show_error(title: str, message: str) -> None:
     logging.error("%s: %s", title, message)
+    if messagebox is None:
+        logging.error("Could not show error dialog (headless environment): %s - %s", title, message)
+        print(f"{title}: {message}", file=sys.stderr)
+        return
     try:
         messagebox.showerror(title, message)
     except TclError:
@@ -212,6 +228,8 @@ def show_error(title: str, message: str) -> None:
 def _is_text_input(widget: tk.Widget) -> bool:
     """Return True if widget supports text selection/copy/paste shortcuts."""
 
+    if tk is None or ttk is None:
+        return False
     return isinstance(
         widget,
         (
@@ -228,6 +246,8 @@ def _is_text_input(widget: tk.Widget) -> bool:
 def _enable_undo(widget: tk.Widget) -> None:
     """Enable undo stack for widgets that support it."""
 
+    if tk is None:
+        return
     try:
         if str(widget.cget("undo")) == "0":
             widget.configure(undo=True)
@@ -239,6 +259,8 @@ def _enable_undo(widget: tk.Widget) -> None:
 def _select_all_text(widget: tk.Widget) -> bool:
     """Select all content for entry-like and text widgets."""
 
+    if tk is None:
+        return False
     try:
         if isinstance(widget, tk.Text):
             widget.tag_add("sel", "1.0", "end-1c")
@@ -257,6 +279,8 @@ def _select_all_text(widget: tk.Widget) -> bool:
 def bind_common_shortcuts(root: tk.Tk) -> None:
     """Bind copy/paste/select-all/undo shortcuts application-wide."""
 
+    if tk is None:
+        return
     def handle_copy(event: tk.Event) -> str | None:
         widget = event.widget
         if _is_text_input(widget):
@@ -545,5 +569,3 @@ def open_file(path: Path) -> None:
             os.system(f"xdg-open '{path}' >/dev/null 2>&1 &")
     except Exception as exc:  # pragma: no cover - GUI feedback
         show_error("Відкриття файлу", str(exc))
-
-

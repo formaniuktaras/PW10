@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
@@ -23,6 +24,36 @@ from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import utils
 from utils import get_db_path
+
+
+def _strip_weird(value: str | None) -> str:
+    return (value or "").replace("\u200b", "").replace("\ufeff", "").replace("\u00a0", " ")
+
+
+def normalize_sku(raw: str) -> str:
+    cleaned = _strip_weird(raw).strip()
+    cleaned = re.sub(r"\s+", "", cleaned)
+    cleaned = cleaned.upper()
+    if not cleaned:
+        raise ValueError("SKU порожній/некоректний")
+    return cleaned
+
+
+def normalize_barcode(raw: str) -> str:
+    cleaned = _strip_weird(raw).strip()
+    cleaned = re.sub(r"\s+", "", cleaned)
+    cleaned = cleaned.upper()
+    if not cleaned:
+        raise ValueError("Штрихкод порожній/некоректний")
+    return cleaned
+
+
+def normalize_supplier_sku(raw: str | None) -> str | None:
+    cleaned = _strip_weird(raw).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    if not cleaned:
+        return None
+    return cleaned
 
 
 def get_connection() -> sqlite3.Connection:
@@ -123,7 +154,7 @@ def init_db() -> None:
                 UNIQUE (supplier_id, supplier_sku)
             );
             CREATE INDEX IF NOT EXISTS idx_psc_supplier_sku_lower
-                ON ProductSupplierCodes(supplier_id, lower(supplier_sku));
+                ON ProductSupplierCodes(supplier_id, lower(trim(supplier_sku)));
             CREATE INDEX IF NOT EXISTS idx_psc_product
                 ON ProductSupplierCodes(product_id);
 
@@ -137,7 +168,7 @@ def init_db() -> None:
                 UNIQUE(code)
             );
             CREATE INDEX IF NOT EXISTS idx_pb_product_id ON ProductBarcodes(product_id);
-            CREATE INDEX IF NOT EXISTS idx_pb_code_lower ON ProductBarcodes(lower(code));
+            CREATE INDEX IF NOT EXISTS idx_pb_code_lower ON ProductBarcodes(lower(trim(code)));
 
             CREATE TABLE IF NOT EXISTS AdditionalProductCategories (
                 product_id INTEGER NOT NULL,
@@ -147,9 +178,9 @@ def init_db() -> None:
                 FOREIGN KEY (category_id) REFERENCES Categories(id) ON DELETE CASCADE
             );
 
-            CREATE INDEX IF NOT EXISTS idx_products_sku_lower ON Products(lower(sku));
+            CREATE INDEX IF NOT EXISTS idx_products_sku_lower ON Products(lower(trim(sku)));
             CREATE INDEX IF NOT EXISTS idx_products_name_lower ON Products(lower(name));
-            CREATE INDEX IF NOT EXISTS idx_products_supplier_sku_lower ON Products(lower(supplier_sku));
+            CREATE INDEX IF NOT EXISTS idx_products_supplier_sku_lower ON Products(lower(trim(supplier_sku)));
 
             CREATE TABLE IF NOT EXISTS ProductCategoryLinks (
                 product_id INTEGER NOT NULL,
@@ -376,6 +407,7 @@ def init_db() -> None:
             """
         )
         _migrate_schema(conn)
+        _normalize_existing_codes(conn)
         _ensure_case_insensitive_uniques(conn)
         _ensure_label_templates(conn)
     logging.info("Database initialized at %s", db_path)
@@ -399,7 +431,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "Products", "is_active", "INTEGER NOT NULL DEFAULT 1")
     _ensure_column(conn, "Products", "supplier_sku", "TEXT")
     conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_products_supplier_sku_lower ON Products(lower(supplier_sku))"
+        "CREATE INDEX IF NOT EXISTS idx_products_supplier_sku_lower ON Products(lower(trim(supplier_sku)))"
     )
 
     conn.executescript(
@@ -415,7 +447,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             UNIQUE (supplier_id, supplier_sku)
         );
         CREATE INDEX IF NOT EXISTS idx_psc_supplier_sku_lower
-            ON ProductSupplierCodes(supplier_id, lower(supplier_sku));
+            ON ProductSupplierCodes(supplier_id, lower(trim(supplier_sku)));
         CREATE INDEX IF NOT EXISTS idx_psc_product
             ON ProductSupplierCodes(product_id);
 
@@ -429,7 +461,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             UNIQUE(code)
         );
         CREATE INDEX IF NOT EXISTS idx_pb_product_id ON ProductBarcodes(product_id);
-        CREATE INDEX IF NOT EXISTS idx_pb_code_lower ON ProductBarcodes(lower(code));
+        CREATE INDEX IF NOT EXISTS idx_pb_code_lower ON ProductBarcodes(lower(trim(code)));
         """
     )
 
@@ -574,14 +606,109 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     )
 
 
+def _normalize_existing_codes(conn: sqlite3.Connection) -> None:
+    product_rows = conn.execute("SELECT id, sku, supplier_sku FROM Products").fetchall()
+    barcode_rows = conn.execute("SELECT id, code FROM ProductBarcodes").fetchall()
+    supplier_rows = conn.execute(
+        "SELECT id, supplier_id, supplier_sku FROM ProductSupplierCodes"
+    ).fetchall()
+
+    conflicts: list[str] = []
+    sku_seen: dict[str, tuple[int, str]] = {}
+    barcode_seen: dict[str, tuple[int, str]] = {}
+    supplier_seen: dict[tuple[int, str], tuple[int, str]] = {}
+
+    product_updates: list[tuple[str, str | None, int]] = []
+    barcode_updates: list[tuple[str, int]] = []
+    supplier_updates: list[tuple[str, int]] = []
+
+    for row in product_rows:
+        try:
+            normalized_sku = normalize_sku(row["sku"])
+        except ValueError as exc:
+            conflicts.append(f"Products id={row['id']} sku='{row['sku']}' -> {exc}")
+            continue
+        if normalized_sku in sku_seen and sku_seen[normalized_sku][0] != row["id"]:
+            conflicts.append(
+                "Products SKU conflict: "
+                f"id={row['id']} sku='{row['sku']}' -> '{normalized_sku}' "
+                f"collides with id={sku_seen[normalized_sku][0]} sku='{sku_seen[normalized_sku][1]}'"
+            )
+        else:
+            sku_seen[normalized_sku] = (row["id"], row["sku"])
+        supplier_sku = normalize_supplier_sku(row["supplier_sku"])
+        if normalized_sku != row["sku"] or supplier_sku != row["supplier_sku"]:
+            product_updates.append((normalized_sku, supplier_sku, row["id"]))
+
+    for row in barcode_rows:
+        try:
+            normalized_code = normalize_barcode(row["code"])
+        except ValueError as exc:
+            conflicts.append(f"ProductBarcodes id={row['id']} code='{row['code']}' -> {exc}")
+            continue
+        if normalized_code in barcode_seen and barcode_seen[normalized_code][0] != row["id"]:
+            conflicts.append(
+                "ProductBarcodes conflict: "
+                f"id={row['id']} code='{row['code']}' -> '{normalized_code}' "
+                f"collides with id={barcode_seen[normalized_code][0]} code='{barcode_seen[normalized_code][1]}'"
+            )
+        else:
+            barcode_seen[normalized_code] = (row["id"], row["code"])
+        if normalized_code != row["code"]:
+            barcode_updates.append((normalized_code, row["id"]))
+
+    for row in supplier_rows:
+        normalized_supplier = normalize_supplier_sku(row["supplier_sku"])
+        if not normalized_supplier:
+            conflicts.append(
+                f"ProductSupplierCodes id={row['id']} supplier_id={row['supplier_id']} "
+                f"supplier_sku='{row['supplier_sku']}' -> порожній/некоректний"
+            )
+            continue
+        key = (row["supplier_id"], normalized_supplier.lower())
+        if key in supplier_seen and supplier_seen[key][0] != row["id"]:
+            conflicts.append(
+                "ProductSupplierCodes conflict: "
+                f"id={row['id']} supplier_id={row['supplier_id']} supplier_sku='{row['supplier_sku']}' "
+                f"-> '{normalized_supplier}' collides with "
+                f"id={supplier_seen[key][0]} supplier_sku='{supplier_seen[key][1]}'"
+            )
+        else:
+            supplier_seen[key] = (row["id"], row["supplier_sku"])
+        if normalized_supplier != row["supplier_sku"]:
+            supplier_updates.append((normalized_supplier, row["id"]))
+
+    if conflicts:
+        raise ValueError(
+            "Виявлено конфлікти під час нормалізації існуючих кодів:\n" + "\n".join(conflicts)
+        )
+
+    if not (product_updates or barcode_updates or supplier_updates):
+        return
+
+    conn.execute("BEGIN")
+    if product_updates:
+        conn.executemany(
+            "UPDATE Products SET sku=?, supplier_sku=? WHERE id=?",
+            product_updates,
+        )
+    if barcode_updates:
+        conn.executemany("UPDATE ProductBarcodes SET code=? WHERE id=?", barcode_updates)
+    if supplier_updates:
+        conn.executemany(
+            "UPDATE ProductSupplierCodes SET supplier_sku=? WHERE id=?", supplier_updates
+        )
+    conn.commit()
+
+
 def _ensure_case_insensitive_uniques(conn: sqlite3.Connection) -> None:
     conflicts: List[str] = []
 
     sku_rows = conn.execute(
         """
-        SELECT lower(sku) AS key, group_concat(id || ':' || sku, ', ') AS items, COUNT(*) AS cnt
+        SELECT lower(trim(sku)) AS key, group_concat(id || ':' || sku, ', ') AS items, COUNT(*) AS cnt
         FROM Products
-        GROUP BY lower(sku)
+        GROUP BY lower(trim(sku))
         HAVING cnt > 1
         """
     ).fetchall()
@@ -591,9 +718,9 @@ def _ensure_case_insensitive_uniques(conn: sqlite3.Connection) -> None:
 
     barcode_rows = conn.execute(
         """
-        SELECT lower(code) AS key, group_concat(id || ':' || code, ', ') AS items, COUNT(*) AS cnt
+        SELECT lower(trim(code)) AS key, group_concat(id || ':' || code, ', ') AS items, COUNT(*) AS cnt
         FROM ProductBarcodes
-        GROUP BY lower(code)
+        GROUP BY lower(trim(code))
         HAVING cnt > 1
         """
     ).fetchall()
@@ -603,9 +730,10 @@ def _ensure_case_insensitive_uniques(conn: sqlite3.Connection) -> None:
 
     supplier_rows = conn.execute(
         """
-        SELECT supplier_id, lower(supplier_sku) AS key, group_concat(id || ':' || supplier_sku, ', ') AS items, COUNT(*) AS cnt
+        SELECT supplier_id, lower(trim(supplier_sku)) AS key,
+               group_concat(id || ':' || supplier_sku, ', ') AS items, COUNT(*) AS cnt
         FROM ProductSupplierCodes
-        GROUP BY supplier_id, lower(supplier_sku)
+        GROUP BY supplier_id, lower(trim(supplier_sku))
         HAVING cnt > 1
         """
     ).fetchall()
@@ -625,10 +753,10 @@ def _ensure_case_insensitive_uniques(conn: sqlite3.Connection) -> None:
     conn.execute("DROP INDEX IF EXISTS idx_products_sku_lower")
     conn.execute("DROP INDEX IF EXISTS idx_pb_code_lower")
     conn.execute("DROP INDEX IF EXISTS idx_psc_supplier_sku_lower")
-    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_products_sku_lower ON Products(lower(sku))")
-    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_pb_code_lower ON ProductBarcodes(lower(code))")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_products_sku_lower ON Products(lower(trim(sku)))")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_pb_code_lower ON ProductBarcodes(lower(trim(code)))")
     conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_psc_supplier_sku_lower ON ProductSupplierCodes(supplier_id, lower(supplier_sku))"
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_psc_supplier_sku_lower ON ProductSupplierCodes(supplier_id, lower(trim(supplier_sku)))"
     )
 
 
@@ -1273,12 +1401,14 @@ def add_product(
     is_active: bool = True,
     supplier_sku: str | None = None,
 ) -> int:
+    normalized_sku = normalize_sku(sku)
+    normalized_supplier = normalize_supplier_sku(supplier_sku)
     with get_connection() as conn:
         cur = conn.execute(
             "INSERT INTO Products (sku, supplier_sku, name, brand_id, category_id, unit, is_active) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
-                sku.strip(),
-                (supplier_sku or "").strip() or None,
+                normalized_sku,
+                normalized_supplier,
                 name.strip(),
                 brand_id,
                 category_id,
@@ -1301,11 +1431,18 @@ def find_product_by_sku_or_name(
     clauses: List[str] = []
     params: List[str] = []
     if sku:
-        clauses.append("lower(sku)=?")
-        params.append(sku.lower())
+        try:
+            normalized_sku = normalize_sku(sku)
+        except ValueError:
+            normalized_sku = ""
+        if normalized_sku:
+            clauses.append("lower(sku)=?")
+            params.append(normalized_sku.lower())
     if supplier_sku:
-        clauses.append("lower(supplier_sku)=?")
-        params.append(supplier_sku.lower())
+        normalized_supplier = normalize_supplier_sku(supplier_sku)
+        if normalized_supplier:
+            clauses.append("lower(supplier_sku)=?")
+            params.append(normalized_supplier.lower())
     if name:
         clauses.append("lower(name)=?")
         params.append(name.lower())
@@ -1354,7 +1491,7 @@ def replace_product_supplier_codes(product_id: int, codes: list[dict]) -> None:
             supplier_id = int(code.get("supplier_id"))  # type: ignore[arg-type]
         except (TypeError, ValueError):
             continue
-        supplier_sku = (code.get("supplier_sku") or "").strip()
+        supplier_sku = normalize_supplier_sku(code.get("supplier_sku"))
         if not supplier_id or not supplier_sku:
             continue
         key = (supplier_id, supplier_sku.lower())
@@ -1390,15 +1527,15 @@ def replace_product_barcodes(product_id: int, codes: list[dict]) -> None:
     unique_codes = set()
     sanitized: list[tuple[int, str, str | None]] = []
     for code in codes or []:
-        raw_code = (code.get("code") or "").strip()
-        if not raw_code:
+        try:
+            normalized = normalize_barcode(code.get("code") or "")
+        except ValueError:
             continue
-        normalized = raw_code.lower()
         if normalized in unique_codes:
             continue
         unique_codes.add(normalized)
         note = (code.get("note") or "").strip()
-        sanitized.append((product_id, raw_code, note or None))
+        sanitized.append((product_id, normalized, note or None))
 
     with get_connection() as conn:
         conn.execute("BEGIN")
@@ -1412,11 +1549,15 @@ def replace_product_barcodes(product_id: int, codes: list[dict]) -> None:
 
 
 def find_product_by_scan_code(code: str, barcode_prefix: str = "") -> Optional[sqlite3.Row]:
-    clean_code = (code or "").strip()
+    clean_code = _strip_weird(code).strip()
     if not clean_code:
         return None
     prefix = (barcode_prefix or "").strip()
-    lower_code = clean_code.lower()
+    try:
+        normalized_code = normalize_barcode(clean_code)
+    except ValueError:
+        return None
+    lower_code = normalized_code.lower()
 
     product_query = (
         "SELECT id, sku, supplier_sku, name, brand_id, category_id, unit, is_active FROM Products WHERE lower(sku)=? LIMIT 1"
@@ -1430,9 +1571,14 @@ def find_product_by_scan_code(code: str, barcode_prefix: str = "") -> Optional[s
         if prefix and lower_code.startswith(prefix.lower()):
             stripped = clean_code[len(prefix) :]
             if stripped:
-                row = conn.execute(product_query, (stripped.lower(),)).fetchone()
-                if row:
-                    return row
+                try:
+                    normalized_stripped = normalize_sku(stripped)
+                except ValueError:
+                    normalized_stripped = ""
+                if normalized_stripped:
+                    row = conn.execute(product_query, (normalized_stripped.lower(),)).fetchone()
+                    if row:
+                        return row
 
         alias_row = conn.execute(
             """
@@ -1453,7 +1599,7 @@ def get_product_by_supplier_code(supplier_id: int, supplier_sku: str) -> sqlite3
     Returns product row (at least id, sku, name, brand_id, category_id, unit, is_active).
     """
 
-    supplier_sku = (supplier_sku or "").strip()
+    supplier_sku = normalize_supplier_sku(supplier_sku)
     if not supplier_sku:
         return None
     with get_connection() as conn:
@@ -1479,12 +1625,14 @@ def update_product(
     is_active: bool = True,
     supplier_sku: str | None = None,
 ) -> None:
+    normalized_sku = normalize_sku(sku)
+    normalized_supplier = normalize_supplier_sku(supplier_sku)
     with get_connection() as conn:
         conn.execute(
             "UPDATE Products SET sku=?, supplier_sku=?, name=?, brand_id=?, category_id=?, unit=?, is_active=? WHERE id=?",
             (
-                sku.strip(),
-                (supplier_sku or "").strip() or None,
+                normalized_sku,
+                normalized_supplier,
                 name.strip(),
                 brand_id,
                 category_id,

@@ -9,6 +9,7 @@ The app focuses on a lightweight workflow for a trading business:
 from __future__ import annotations
 
 import csv
+import io
 import logging
 import math
 import traceback
@@ -6880,6 +6881,7 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
             return
         stock = db.stock_on_hand(wh_id)
         if not stock:
+            messagebox.showinfo("Інвентаризація", "На складі немає залишків (qty>0).")
             refresh_lines()
             return
         for product_id, qty in stock.items():
@@ -6924,52 +6926,71 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
         updated_count = 0
         prefix = _sanitize_barcode_prefix(settings.get("defaults", "product", "barcode_prefix") or "")
         try:
-            with open(file_path, newline="", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                if not reader.fieldnames:
-                    messagebox.showerror("Імпорт CSV", "Файл не містить заголовків.")
-                    return
-                field_map = {name.strip().lower(): name for name in reader.fieldnames if name}
-                code_field = field_map.get("code") or field_map.get("sku")
-                qty_field = field_map.get("qty") or field_map.get("counted_qty")
-                if not code_field or not qty_field:
-                    messagebox.showerror("Імпорт CSV", "Потрібні колонки code/sku та qty/counted_qty.")
-                    return
-                for row in reader:
-                    code = (row.get(code_field) or "").strip()
-                    if not code:
-                        errors.append("порожній код")
-                        continue
-                    qty_raw = row.get(qty_field)
+            def _read_csv_content(path: str) -> str:
+                last_error = None
+                for encoding in ("utf-8-sig", "cp1251"):
                     try:
-                        qty = float(qty_raw)
-                    except (TypeError, ValueError):
-                        errors.append(code)
-                        continue
-                    if qty < 0:
-                        errors.append(code)
-                        continue
-                    product = db.find_product_by_scan_code(code, barcode_prefix=prefix)
-                    if not product:
-                        errors.append(code)
-                        continue
-                    existing = next((ln for ln in line_data if ln["product_id"] == product["id"]), None)
-                    if existing:
-                        existing["counted_qty"] += qty
-                    else:
-                        expected_qty = db.get_stock_quantity(product["id"], wh_id)
-                        line_data.append(
-                            {
-                                "product_id": product["id"],
-                                "sku": product["sku"],
-                                "name": product["name"],
-                                "expected_qty": expected_qty,
-                                "counted_qty": qty,
-                                "cost_override": None,
-                                "note": "",
-                            }
-                        )
-                    updated_count += 1
+                        with open(path, newline="", encoding=encoding) as f:
+                            return f.read()
+                    except UnicodeDecodeError as exc:
+                        last_error = exc
+                if last_error:
+                    raise last_error
+                raise OSError("CSV read failed")
+
+            content = _read_csv_content(file_path)
+            sample = content[:4096]
+            try:
+                dialect = csv.Sniffer().sniff(sample, delimiters=";,\t|")
+                reader = csv.DictReader(io.StringIO(content), dialect=dialect)
+            except csv.Error:
+                reader = csv.DictReader(io.StringIO(content), delimiter=",")
+            if not reader.fieldnames:
+                messagebox.showerror("Імпорт CSV", "Файл не містить заголовків.")
+                return
+            field_map = {name.strip().lower(): name for name in reader.fieldnames if name}
+            code_field = field_map.get("code") or field_map.get("sku")
+            qty_field = field_map.get("qty") or field_map.get("counted_qty")
+            if not code_field or not qty_field:
+                messagebox.showerror("Імпорт CSV", "Потрібні колонки code/sku та qty/counted_qty.")
+                return
+            for row in reader:
+                code = (row.get(code_field) or "").strip()
+                if not code:
+                    errors.append("порожній код")
+                    continue
+                qty_raw = (row.get(qty_field) or "").strip()
+                if "," in qty_raw and "." not in qty_raw:
+                    qty_raw = qty_raw.replace(",", ".")
+                try:
+                    qty = float(qty_raw)
+                except (TypeError, ValueError):
+                    errors.append(code)
+                    continue
+                if qty < 0:
+                    errors.append(code)
+                    continue
+                product = db.find_product_by_scan_code(code, barcode_prefix=prefix)
+                if not product:
+                    errors.append(code)
+                    continue
+                existing = next((ln for ln in line_data if ln["product_id"] == product["id"]), None)
+                if existing:
+                    existing["counted_qty"] += qty
+                else:
+                    expected_qty = db.get_stock_quantity(product["id"], wh_id)
+                    line_data.append(
+                        {
+                            "product_id": product["id"],
+                            "sku": product["sku"],
+                            "name": product["name"],
+                            "expected_qty": expected_qty,
+                            "counted_qty": qty,
+                            "cost_override": None,
+                            "note": "",
+                        }
+                    )
+                updated_count += 1
         except Exception:
             logging.exception("Inventory CSV import error")
             show_error("Імпорт CSV", "Не вдалося імпортувати дані.")
@@ -7017,7 +7038,12 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
     ttk.Button(btn_row, text="Додати товар…", command=_add_product, state="normal" if editable else "disabled").pack(
         side=tk.LEFT, padx=4
     )
-    ttk.Button(btn_row, text="Редагувати рядок…", command=_edit_line).pack(side=tk.LEFT, padx=4)
+    ttk.Button(
+        btn_row,
+        text="Редагувати рядок…",
+        command=_edit_line,
+        state="normal" if editable else "disabled",
+    ).pack(side=tk.LEFT, padx=4)
     ttk.Button(btn_row, text="Видалити рядок", command=_delete_line, state="normal" if editable else "disabled").pack(
         side=tk.LEFT, padx=4
     )

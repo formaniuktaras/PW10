@@ -1871,11 +1871,11 @@ class InventoryApp(tk.Tk):
             return
         try:
             with db.get_connection() as conn:
-                status = conn.execute("SELECT status FROM PurchaseDocuments WHERE id=?", (doc_id,)).fetchone()
-                if status and status[0] == "posted":
-                    raise ValueError("Видаляти можна лише чернетки")
-                conn.execute("DELETE FROM PurchaseDocuments WHERE id=?", (doc_id,))
-                conn.commit()
+                with db.safe_transaction(conn):
+                    status = conn.execute("SELECT status FROM PurchaseDocuments WHERE id=?", (doc_id,)).fetchone()
+                    if status and status[0] == "posted":
+                        raise ValueError("Видаляти можна лише чернетки")
+                    conn.execute("DELETE FROM PurchaseDocuments WHERE id=?", (doc_id,))
             self.refresh_purchases()
         except Exception as exc:
             logging.exception("Delete purchase error")
@@ -2517,8 +2517,8 @@ class InventoryApp(tk.Tk):
                 db.unpost_sale(doc_id)
 
             with db.get_connection() as conn:
-                conn.execute("DELETE FROM SalesDocuments WHERE id=?", (doc_id,))
-                conn.commit()
+                with db.safe_transaction(conn):
+                    conn.execute("DELETE FROM SalesDocuments WHERE id=?", (doc_id,))
 
             self.refresh_sales()
             if was_posted:

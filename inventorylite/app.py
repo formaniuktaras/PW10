@@ -115,6 +115,7 @@ class InventoryApp(tk.Tk):
         self.purchases_frame = ttk.Frame(notebook)
         self.extra_costs_frame = ttk.Frame(notebook)
         self.sales_frame = ttk.Frame(notebook)
+        self.inventory_frame = ttk.Frame(notebook)
         self.cash_frame = ttk.Frame(notebook)
         self.stock_frame = ttk.Frame(notebook)
         self.reports_frame = ttk.Frame(notebook)
@@ -130,6 +131,7 @@ class InventoryApp(tk.Tk):
         notebook.add(self.purchases_frame, text="Закупівлі")
         notebook.add(self.extra_costs_frame, text="Супутні витрати")
         notebook.add(self.sales_frame, text="Продажі")
+        notebook.add(self.inventory_frame, text="Інвентаризація")
         notebook.add(self.cash_frame, text="Каса")
         notebook.add(self.stock_frame, text="Залишки")
         notebook.add(self.reports_frame, text="Звіти")
@@ -145,6 +147,7 @@ class InventoryApp(tk.Tk):
         self.create_purchases_tab()
         self.create_extra_costs_tab()
         self.create_sales_tab()
+        self.create_inventory_tab()
         self.create_cash_tab()
         self.create_stock_tab()
         self.create_reports_tab()
@@ -2391,6 +2394,256 @@ class InventoryApp(tk.Tk):
         ttk.Button(btns, text="Відмінити проведення", command=self.unpost_sale_action).pack(side=tk.LEFT, padx=4)
         ttk.Button(btns, text="Імпорт із файлу", command=self.import_sales_from_file).pack(side=tk.LEFT, padx=4)
 
+    def create_inventory_tab(self) -> None:
+        filters = ttk.Frame(self.inventory_frame)
+        filters.pack(fill=tk.X, padx=8, pady=4)
+
+        ttk.Label(filters, text="Статус:").pack(side=tk.LEFT)
+        self.inventory_status_var = tk.StringVar(value="Усі")
+        ttk.Combobox(
+            filters,
+            textvariable=self.inventory_status_var,
+            values=["Усі", "Чернетка", "Проведений"],
+            state="readonly",
+            width=14,
+        ).pack(side=tk.LEFT, padx=4)
+
+        ttk.Label(filters, text="Склад:").pack(side=tk.LEFT)
+        self.inventory_warehouse_var = tk.StringVar(value="Усі")
+        self.inventory_warehouse_combo = ttk.Combobox(
+            filters,
+            textvariable=self.inventory_warehouse_var,
+            values=["Усі"],
+            state="readonly",
+            width=18,
+        )
+        self.inventory_warehouse_combo.pack(side=tk.LEFT, padx=4)
+
+        ttk.Label(filters, text="Дата з:").pack(side=tk.LEFT)
+        self.inventory_date_from_var = tk.StringVar()
+        ttk.Entry(filters, textvariable=self.inventory_date_from_var, width=10).pack(side=tk.LEFT, padx=2)
+        ttk.Label(filters, text="по:").pack(side=tk.LEFT)
+        self.inventory_date_to_var = tk.StringVar()
+        ttk.Entry(filters, textvariable=self.inventory_date_to_var, width=10).pack(side=tk.LEFT, padx=2)
+        ttk.Button(filters, text="Фільтр/Оновити", command=self.refresh_inventory_documents).pack(
+            side=tk.LEFT, padx=6
+        )
+
+        columns = [
+            ("id", "ID", 60),
+            ("doc_date", "Дата", 90),
+            ("warehouse", "Склад", 160),
+            ("status", "Статус", 90),
+            ("lines_count", "Рядків", 80),
+            ("diff_total", "Розбіжність", 120),
+            ("comment", "Коментар", 240),
+        ]
+        self.inventory_table = TableFrame(self.inventory_frame, columns)
+        self.inventory_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        self.inventory_table.on_double_click(self.edit_inventory)
+        self.inventory_table.register_context_menu_actions(
+            [
+                ("Редагувати/Переглянути", self.edit_inventory),
+                ("Видалити", self.delete_inventory),
+            ]
+        )
+
+        btns = ttk.Frame(self.inventory_frame)
+        btns.pack(pady=4)
+        ttk.Button(btns, text="Створити…", command=self.new_inventory).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Редагувати…", command=self.edit_inventory).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Провести", command=self.post_inventory_action).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Розпровести", command=self.unpost_inventory_action).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Видалити", command=self.delete_inventory).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Експорт CSV", command=self.export_inventory_csv).pack(side=tk.LEFT, padx=4)
+
+    def _selected_inventory(self) -> Optional[int]:
+        doc_id = self.inventory_table.selected_id()
+        if not doc_id:
+            show_error("Інвентаризація", "Оберіть документ")
+            return None
+        return int(doc_id)
+
+    def _refresh_inventory_warehouse_filter(self) -> None:
+        warehouses = db.list_warehouses(active_only=False)
+        self.inventory_warehouse_options = warehouses
+        names = ["Усі"] + [w["name"] for w in warehouses]
+        self.inventory_warehouse_combo.configure(values=names)
+        if self.inventory_warehouse_var.get() not in names:
+            self.inventory_warehouse_var.set("Усі")
+
+    def refresh_inventory_documents(self) -> None:
+        self._refresh_inventory_warehouse_filter()
+        status_filter = self.inventory_status_var.get()
+        status_value = "draft" if status_filter == "Чернетка" else "posted" if status_filter == "Проведений" else None
+        warehouse_name = self.inventory_warehouse_var.get()
+        warehouse_id = None
+        if warehouse_name and warehouse_name != "Усі":
+            match = next((w["id"] for w in self.inventory_warehouse_options if w["name"] == warehouse_name), None)
+            warehouse_id = match
+        rows = db.list_inventory_documents(
+            status_value,
+            self.inventory_date_from_var.get().strip() or None,
+            self.inventory_date_to_var.get().strip() or None,
+            warehouse_id,
+        )
+        self.inventory_table.set_rows(
+            [
+                {
+                    "id": r["id"],
+                    "doc_date": r["doc_date"],
+                    "warehouse": r["warehouse_name"] or "-",
+                    "status": "Чернетка" if r["status"] == "draft" else "Проведений",
+                    "lines_count": r["lines_count"],
+                    "diff_total": f"{float(r['diff_total'] or 0.0):.2f}",
+                    "comment": r["comment"] or "",
+                }
+                for r in rows
+            ]
+        )
+
+    def new_inventory(self) -> None:
+        warehouses = db.list_warehouses(active_only=True)
+        products = db.list_products()
+        result = inventory_prompt(warehouses, products, self.settings)
+        if not result:
+            return
+        info, lines, post_now = result
+        try:
+            doc_id = db.create_inventory_document(info["doc_date"], info["warehouse_id"], info["comment"])
+            db.replace_inventory_lines(doc_id, lines)
+            if post_now:
+                db.post_inventory(doc_id)
+            self.refresh_inventory_documents()
+        except Exception as exc:
+            logging.exception("Create inventory error")
+            show_error("Інвентаризація", str(exc))
+
+    def edit_inventory(self) -> None:
+        doc_id = self._selected_inventory()
+        if not doc_id:
+            return
+        doc = db.get_inventory_document(doc_id)
+        if not doc:
+            return
+        lines = db.list_inventory_lines(doc_id)
+        warehouses = db.list_warehouses(active_only=False)
+        products = db.list_products()
+        result = inventory_prompt(warehouses, products, self.settings, doc=doc, lines=lines)
+        if not result:
+            return
+        info, new_lines, post_now = result
+        try:
+            if doc["status"] == "draft":
+                db.update_inventory_document(doc_id, info["doc_date"], info["warehouse_id"], info["comment"])
+                db.replace_inventory_lines(doc_id, new_lines)
+                if post_now:
+                    db.post_inventory(doc_id)
+            else:
+                db.update_inventory_document(doc_id, doc["doc_date"], doc["warehouse_id"], info["comment"])
+            self.refresh_inventory_documents()
+        except Exception as exc:
+            logging.exception("Edit inventory error")
+            show_error("Інвентаризація", str(exc))
+
+    def delete_inventory(self) -> None:
+        doc_id = self._selected_inventory()
+        if not doc_id:
+            return
+        if not messagebox.askyesno("Підтвердження", "Видалити документ?"):
+            return
+        try:
+            db.delete_inventory_document(doc_id)
+            self.refresh_inventory_documents()
+        except Exception as exc:
+            logging.exception("Delete inventory error")
+            show_error("Інвентаризація", str(exc))
+
+    def post_inventory_action(self) -> None:
+        doc_id = self._selected_inventory()
+        if not doc_id:
+            return
+        try:
+            db.post_inventory(doc_id)
+            self.refresh_inventory_documents()
+        except Exception as exc:
+            logging.exception("Post inventory error")
+            show_error("Інвентаризація", str(exc))
+
+    def unpost_inventory_action(self) -> None:
+        doc_id = self._selected_inventory()
+        if not doc_id:
+            return
+        try:
+            db.unpost_inventory(doc_id)
+            self.refresh_inventory_documents()
+        except Exception as exc:
+            logging.exception("Unpost inventory error")
+            show_error("Інвентаризація", str(exc))
+
+    def export_inventory_csv(self) -> None:
+        doc_id = self.inventory_table.selected_id()
+        default_name = "inventory_lines.csv" if doc_id else "inventory_documents.csv"
+        file_path = filedialog.asksaveasfilename(
+            title="Експорт CSV",
+            defaultextension=".csv",
+            initialfile=default_name,
+            initialdir=str(self.default_workdir()),
+            filetypes=[("CSV", "*.csv"), ("Усі файли", "*.*")],
+        )
+        if not file_path:
+            return
+        try:
+            if doc_id:
+                doc = db.get_inventory_document(int(doc_id))
+                if not doc:
+                    raise ValueError("Документ не знайдено")
+                lines = db.list_inventory_lines(int(doc_id))
+                warehouse_name = next(
+                    (w["name"] for w in db.list_warehouses(active_only=False) if w["id"] == doc["warehouse_id"]),
+                    "",
+                )
+                with open(file_path, "w", newline="", encoding="utf-8") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(
+                        ["date", "warehouse", "sku", "name", "expected_qty", "counted_qty", "diff", "cost_override", "note"]
+                    )
+                    for ln in lines:
+                        writer.writerow(
+                            [
+                                doc["doc_date"],
+                                warehouse_name,
+                                ln["sku"],
+                                ln["name"],
+                                ln["expected_qty"],
+                                ln["counted_qty"],
+                                ln["diff"],
+                                ln["cost_override"] if ln["cost_override"] is not None else "",
+                                ln["note"] or "",
+                            ]
+                        )
+            else:
+                rows = db.list_inventory_documents()
+                with open(file_path, "w", newline="", encoding="utf-8") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["id", "date", "warehouse", "status", "lines_count", "diff_total", "comment"])
+                    for row in rows:
+                        writer.writerow(
+                            [
+                                row["id"],
+                                row["doc_date"],
+                                row["warehouse_name"] or "",
+                                row["status"],
+                                row["lines_count"],
+                                row["diff_total"],
+                                row["comment"] or "",
+                            ]
+                        )
+            messagebox.showinfo("Експорт CSV", "Дані збережено.")
+        except Exception:
+            logging.exception("Inventory export error")
+            show_error("Інвентаризація", "Не вдалося експортувати дані.")
+
     def _selected_sale(self):
         doc_id = self.sales_table.selected_id()
         if not doc_id:
@@ -3675,6 +3928,7 @@ class InventoryApp(tk.Tk):
         self.refresh_purchases()
         self.refresh_extra_costs()
         self.refresh_sales()
+        self.refresh_inventory_documents()
         self.refresh_cash()
         self.refresh_stock()
         self.refresh_cash_counterparties()
@@ -6227,6 +6481,508 @@ def extra_cost_prompt(counterparties, currencies, purchases, doc=None, lines=Non
     refresh_lines()
     dlg.wait_window()
     return result[0] if result else None
+
+
+def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=None):
+    dlg = tk.Toplevel()
+    dlg.title("Інвентаризація")
+    dlg.grab_set()
+    editable = not doc or doc["status"] == "draft"
+
+    if doc and isinstance(doc, sqlite3.Row):
+        doc = dict(doc)
+
+    dlg.columnconfigure(0, weight=1)
+    dlg.rowconfigure(0, weight=1)
+    content = ttk.Frame(dlg, padding=10)
+    content.grid(row=0, column=0, sticky="nsew")
+    content.columnconfigure(1, weight=1)
+
+    row_idx = 0
+    ttk.Label(content, text="Дата (YYYY-MM-DD)").grid(row=row_idx, column=0, padx=6, pady=4, sticky="e")
+    if editable:
+        date_picker = DatePicker(
+            content,
+            initial=datetime.strptime(doc["doc_date"], "%Y-%m-%d").date() if doc else date.today(),
+        )
+        date_picker.grid(row=row_idx, column=1, padx=6, pady=4, sticky="w")
+        date_entry = None
+    else:
+        date_var = tk.StringVar(value=doc["doc_date"] if doc else datetime.now().strftime("%Y-%m-%d"))
+        date_entry = ttk.Entry(content, textvariable=date_var, width=15, state="disabled")
+        date_entry.grid(row=row_idx, column=1, padx=6, pady=4, sticky="w")
+        date_picker = None
+
+    row_idx += 1
+    ttk.Label(content, text="Склад").grid(row=row_idx, column=0, padx=6, pady=4, sticky="e")
+    wh_var = tk.StringVar()
+    wh_names = [w["name"] for w in warehouses]
+    wh_combo = ttk.Combobox(content, textvariable=wh_var, values=wh_names, state="readonly")
+    if not editable:
+        wh_combo.state(["disabled"])
+    wh_combo.grid(row=row_idx, column=1, padx=6, pady=4, sticky="w")
+
+    row_idx += 1
+    ttk.Label(content, text="Коментар").grid(row=row_idx, column=0, padx=6, pady=4, sticky="e")
+    comment_var = tk.StringVar(value=doc["comment"] if doc else "")
+    comment_entry = ttk.Entry(content, textvariable=comment_var, width=40, state="normal" if editable else "disabled")
+    comment_entry.grid(row=row_idx, column=1, padx=6, pady=4, sticky="ew")
+
+    post_now_var = tk.BooleanVar(value=False)
+    if editable:
+        row_idx += 1
+        ttk.Checkbutton(content, text="Провести одразу", variable=post_now_var).grid(
+            row=row_idx, column=1, padx=6, pady=2, sticky="w"
+        )
+
+    row_idx += 1
+    scan_frame = ttk.LabelFrame(content, text="Сканування")
+    scan_frame.grid(row=row_idx, column=0, columnspan=2, padx=6, pady=6, sticky="ew")
+    scan_frame.columnconfigure(1, weight=1)
+
+    ttk.Label(scan_frame, text="Скан-код").grid(row=0, column=0, padx=6, pady=4, sticky="e")
+    scan_var = tk.StringVar()
+    scan_entry = ttk.Entry(scan_frame, textvariable=scan_var, width=30, state="normal" if editable else "disabled")
+    scan_entry.grid(row=0, column=1, padx=6, pady=4, sticky="w")
+    ttk.Label(scan_frame, text="К-сть при скані").grid(row=0, column=2, padx=6, pady=4, sticky="e")
+    scan_qty_var = tk.IntVar(value=1)
+    scan_qty = ttk.Spinbox(
+        scan_frame,
+        from_=1,
+        to=999,
+        textvariable=scan_qty_var,
+        width=6,
+        state="normal" if editable else "disabled",
+    )
+    scan_qty.grid(row=0, column=3, padx=6, pady=4, sticky="w")
+    scan_status = ttk.Label(scan_frame, text="")
+    scan_status.grid(row=1, column=0, columnspan=4, padx=6, pady=(0, 4), sticky="w")
+
+    row_idx += 1
+    ttk.Label(content, text="Рядки").grid(row=row_idx, column=0, padx=6, pady=4, sticky="ne")
+    line_frame = ttk.Frame(content)
+    line_frame.grid(row=row_idx, column=1, padx=6, pady=4, sticky="nsew")
+    line_frame.grid_columnconfigure(0, weight=1)
+    content.rowconfigure(row_idx, weight=1)
+
+    columns = ["sku", "name", "expected", "counted", "diff", "cost_override", "note"]
+    tree = ttk.Treeview(line_frame, columns=columns, show="headings", height=10, selectmode="browse")
+    headings = {
+        "sku": ("SKU", 100),
+        "name": ("Назва", 220),
+        "expected": ("Очікувано", 90),
+        "counted": ("Факт", 90),
+        "diff": ("Різниця", 90),
+        "cost_override": ("Собівартість надлишку", 150),
+        "note": ("Примітка", 160),
+    }
+    for col, (title, width) in headings.items():
+        tree.heading(col, text=title)
+        tree.column(col, width=width, anchor="w")
+    tree.grid(row=0, column=0, sticky="nsew")
+    yscroll = ttk.Scrollbar(line_frame, orient="vertical", command=tree.yview)
+    tree.configure(yscrollcommand=yscroll.set)
+    yscroll.grid(row=0, column=1, sticky="ns")
+    tree.tag_configure("missing_cost", background="#ffe3e3")
+
+    product_lookup = {f"{p['sku']} — {p['name']}": p for p in products}
+    product_names = list(product_lookup.keys())
+
+    line_data: list[dict] = []
+    if lines:
+        for ln in lines:
+            line_data.append(
+                {
+                    "product_id": ln["product_id"],
+                    "sku": ln["sku"],
+                    "name": ln["name"],
+                    "expected_qty": float(ln["expected_qty"] or 0.0),
+                    "counted_qty": float(ln["counted_qty"] or 0.0),
+                    "cost_override": float(ln["cost_override"]) if ln["cost_override"] is not None else None,
+                    "note": ln["note"] or "",
+                }
+            )
+
+    if doc:
+        if doc["warehouse_id"]:
+            try:
+                wh_combo.current(next(i for i, w in enumerate(warehouses) if w["id"] == doc["warehouse_id"]))
+            except StopIteration:
+                wh_combo.set(warehouses[0]["name"] if warehouses else "")
+    elif warehouses:
+        wh_combo.current(0)
+
+    selected_idx: list[int] = []
+    balance_cache: dict[int, tuple[float, float]] = {}
+
+    def _current_date() -> str:
+        if date_picker:
+            return date_picker.get()
+        if date_entry:
+            return date_entry.get().strip()
+        return datetime.now().strftime("%Y-%m-%d")
+
+    def _current_warehouse_id() -> Optional[int]:
+        name = wh_var.get()
+        if not name:
+            return None
+        match = next((w for w in warehouses if w["name"] == name), None)
+        return match["id"] if match else None
+
+    def _get_balance_cached(product_id: int) -> tuple[float, float]:
+        if product_id not in balance_cache:
+            wh_id = _current_warehouse_id()
+            if not wh_id:
+                balance_cache[product_id] = (0.0, 0.0)
+            else:
+                balance_cache[product_id] = db.get_stock_balance(product_id, wh_id)
+        return balance_cache[product_id]
+
+    def _needs_cost(line: dict) -> bool:
+        eps = 1e-9
+        if line["counted_qty"] <= line["expected_qty"] + eps:
+            return False
+        if line.get("cost_override") and line["cost_override"] > eps:
+            return False
+        current_qty, avg_cost = _get_balance_cached(line["product_id"])
+        if current_qty > eps and avg_cost > eps:
+            return False
+        wh_id = _current_warehouse_id()
+        if not wh_id:
+            return True
+        last_price = db.get_last_purchase_price(line["product_id"], wh_id, _current_date())
+        return last_price <= eps
+
+    def refresh_lines() -> None:
+        tree.delete(*tree.get_children())
+        for idx, ln in enumerate(line_data):
+            diff = ln["counted_qty"] - ln["expected_qty"]
+            tags = ("missing_cost",) if _needs_cost(ln) else ()
+            tree.insert(
+                "",
+                "end",
+                iid=str(idx),
+                values=(
+                    ln["sku"],
+                    ln["name"],
+                    f"{ln['expected_qty']:.2f}",
+                    f"{ln['counted_qty']:.2f}",
+                    f"{diff:.2f}",
+                    f"{ln['cost_override']:.2f}" if ln.get("cost_override") is not None else "",
+                    ln.get("note", ""),
+                ),
+                tags=tags,
+            )
+
+    def _select_line(event=None) -> None:
+        selected_idx.clear()
+        sel = tree.selection()
+        if not sel:
+            return
+        selected_idx.append(int(sel[0]))
+
+    tree.bind("<<TreeviewSelect>>", _select_line)
+
+    def _pick_product() -> Optional[dict]:
+        if not product_names:
+            messagebox.showinfo("Товари", "Список товарів порожній.")
+            return None
+        picker = tk.Toplevel(dlg)
+        picker.title("Оберіть товар")
+        picker.grab_set()
+        picker.columnconfigure(0, weight=1)
+        picker.rowconfigure(1, weight=1)
+        search_var = tk.StringVar()
+        ttk.Entry(picker, textvariable=search_var).grid(row=0, column=0, padx=8, pady=6, sticky="ew")
+        listbox = tk.Listbox(picker, height=12)
+        listbox.grid(row=1, column=0, padx=8, pady=6, sticky="nsew")
+        for name in product_names:
+            listbox.insert(tk.END, name)
+
+        result: dict[str, object] = {}
+
+        def _filter(*_args) -> None:
+            text = search_var.get().lower().strip()
+            listbox.delete(0, tk.END)
+            for name in product_names:
+                if text in name.lower():
+                    listbox.insert(tk.END, name)
+
+        def _confirm(_event=None) -> None:
+            selection = listbox.curselection()
+            if not selection:
+                return
+            chosen = listbox.get(selection[0])
+            result["product"] = product_lookup.get(chosen)
+            picker.destroy()
+
+        search_var.trace_add("write", _filter)
+        listbox.bind("<Double-1>", _confirm)
+        ttk.Button(picker, text="OK", command=_confirm).grid(row=2, column=0, padx=8, pady=(0, 8))
+        picker.wait_window()
+        return result.get("product")
+
+    def _add_line(product: dict, counted_delta: float = 0.0) -> None:
+        for ln in line_data:
+            if ln["product_id"] == product["id"]:
+                ln["counted_qty"] += counted_delta
+                refresh_lines()
+                return
+        wh_id = _current_warehouse_id()
+        expected_qty = db.get_stock_quantity(product["id"], wh_id) if wh_id else 0.0
+        line_data.append(
+            {
+                "product_id": product["id"],
+                "sku": product["sku"],
+                "name": product["name"],
+                "expected_qty": expected_qty,
+                "counted_qty": max(0.0, counted_delta),
+                "cost_override": None,
+                "note": "",
+            }
+        )
+        refresh_lines()
+
+    def _add_product() -> None:
+        if not editable:
+            return
+        product = _pick_product()
+        if not product:
+            return
+        _add_line(product, counted_delta=0.0)
+
+    def _edit_line() -> None:
+        if not selected_idx:
+            show_error("Інвентаризація", "Оберіть рядок")
+            return
+        idx = selected_idx[0]
+        ln = line_data[idx]
+        editor = tk.Toplevel(dlg)
+        editor.title("Рядок інвентаризації")
+        editor.grab_set()
+        ttk.Label(editor, text=f"{ln['sku']} — {ln['name']}").grid(
+            row=0, column=0, columnspan=2, padx=8, pady=(8, 4), sticky="w"
+        )
+        ttk.Label(editor, text="Очікувано").grid(row=1, column=0, padx=8, pady=4, sticky="e")
+        ttk.Label(editor, text=f"{ln['expected_qty']:.2f}").grid(row=1, column=1, padx=8, pady=4, sticky="w")
+        ttk.Label(editor, text="Факт").grid(row=2, column=0, padx=8, pady=4, sticky="e")
+        counted_var = tk.StringVar(value=f"{ln['counted_qty']:.2f}")
+        ttk.Entry(editor, textvariable=counted_var, width=12, state="normal" if editable else "disabled").grid(
+            row=2, column=1, padx=8, pady=4, sticky="w"
+        )
+        ttk.Label(editor, text="Собівартість надлишку").grid(row=3, column=0, padx=8, pady=4, sticky="e")
+        cost_var = tk.StringVar(value=f"{ln['cost_override']:.2f}" if ln.get("cost_override") is not None else "")
+        ttk.Entry(editor, textvariable=cost_var, width=12, state="normal" if editable else "disabled").grid(
+            row=3, column=1, padx=8, pady=4, sticky="w"
+        )
+        ttk.Label(editor, text="Примітка").grid(row=4, column=0, padx=8, pady=4, sticky="e")
+        note_var = tk.StringVar(value=ln.get("note", ""))
+        ttk.Entry(editor, textvariable=note_var, width=30, state="normal" if editable else "disabled").grid(
+            row=4, column=1, padx=8, pady=4, sticky="w"
+        )
+
+        def _save_line() -> None:
+            if not editable:
+                editor.destroy()
+                return
+            try:
+                counted_val = float(counted_var.get() or 0)
+                cost_val = cost_var.get().strip()
+                cost_val_num = float(cost_val) if cost_val else None
+            except ValueError:
+                messagebox.showerror("Валідація", "Невірні числові значення")
+                return
+            if counted_val < 0:
+                messagebox.showerror("Валідація", "Фактична кількість не може бути від'ємною")
+                return
+            if cost_val_num is not None and cost_val_num < 0:
+                messagebox.showerror("Валідація", "Собівартість не може бути від'ємною")
+                return
+            ln["counted_qty"] = counted_val
+            ln["cost_override"] = cost_val_num
+            ln["note"] = note_var.get().strip()
+            refresh_lines()
+            editor.destroy()
+
+        btn_frame = ttk.Frame(editor)
+        btn_frame.grid(row=5, column=0, columnspan=2, pady=8)
+        if editable:
+            ttk.Button(btn_frame, text="Зберегти", command=_save_line).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_frame, text="Закрити", command=editor.destroy).pack(side=tk.LEFT, padx=4)
+
+    def _delete_line() -> None:
+        if not editable:
+            return
+        if not selected_idx:
+            show_error("Інвентаризація", "Оберіть рядок")
+            return
+        idx = selected_idx[0]
+        del line_data[idx]
+        selected_idx.clear()
+        refresh_lines()
+
+    def _fill_counted() -> None:
+        if not editable:
+            return
+        for ln in line_data:
+            ln["counted_qty"] = ln["expected_qty"]
+        refresh_lines()
+
+    def _clear_counted() -> None:
+        if not editable:
+            return
+        for ln in line_data:
+            ln["counted_qty"] = 0.0
+        refresh_lines()
+
+    def _export_lines_csv() -> None:
+        if not line_data:
+            messagebox.showinfo("Експорт CSV", "Немає рядків для експорту.")
+            return
+        file_path = filedialog.asksaveasfilename(
+            title="Експорт CSV",
+            defaultextension=".csv",
+            initialfile="inventory_lines.csv",
+            initialdir=str(get_data_dir()),
+            filetypes=[("CSV", "*.csv"), ("Усі файли", "*.*")],
+        )
+        if not file_path:
+            return
+        with open(file_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["sku", "name", "expected_qty", "counted_qty", "diff", "cost_override", "note"])
+            for ln in line_data:
+                diff = ln["counted_qty"] - ln["expected_qty"]
+                writer.writerow(
+                    [
+                        ln["sku"],
+                        ln["name"],
+                        ln["expected_qty"],
+                        ln["counted_qty"],
+                        diff,
+                        ln["cost_override"] if ln.get("cost_override") is not None else "",
+                        ln.get("note", ""),
+                    ]
+                )
+        messagebox.showinfo("Експорт CSV", "Дані збережено.")
+
+    btn_row = ttk.Frame(line_frame)
+    btn_row.grid(row=1, column=0, columnspan=2, pady=(4, 0), sticky="w")
+    ttk.Button(btn_row, text="Додати товар…", command=_add_product, state="normal" if editable else "disabled").pack(
+        side=tk.LEFT, padx=4
+    )
+    ttk.Button(btn_row, text="Редагувати рядок…", command=_edit_line).pack(side=tk.LEFT, padx=4)
+    ttk.Button(btn_row, text="Видалити рядок", command=_delete_line, state="normal" if editable else "disabled").pack(
+        side=tk.LEFT, padx=4
+    )
+    ttk.Button(
+        btn_row,
+        text="Заповнити факт = очікувано",
+        command=_fill_counted,
+        state="normal" if editable else "disabled",
+    ).pack(side=tk.LEFT, padx=4)
+    ttk.Button(btn_row, text="Очистити факт", command=_clear_counted, state="normal" if editable else "disabled").pack(
+        side=tk.LEFT, padx=4
+    )
+    ttk.Button(btn_row, text="Експорт CSV…", command=_export_lines_csv).pack(side=tk.LEFT, padx=4)
+
+    def _on_scan(event=None) -> None:
+        if not editable:
+            return
+        code = scan_var.get().strip()
+        if not code:
+            return
+        prefix = _sanitize_barcode_prefix(settings.get("defaults", "product", "barcode_prefix") or "")
+        product = db.find_product_by_scan_code(code, barcode_prefix=prefix)
+        if not product:
+            scan_status.config(text="Товар не знайдено", foreground="#b91c1c")
+            scan_entry.bell()
+            return
+        qty = float(scan_qty_var.get() or 1)
+        _add_line(product, counted_delta=qty)
+        scan_var.set("")
+        scan_status.config(text=f"OK: {product['sku']} — {product['name']}", foreground="#15803d")
+        scan_entry.focus_set()
+
+    scan_entry.bind("<Return>", _on_scan)
+
+    def _on_warehouse_change(event=None) -> None:
+        balance_cache.clear()
+        if not editable:
+            return
+        wh_id = _current_warehouse_id()
+        if wh_id is None:
+            return
+        for ln in line_data:
+            ln["expected_qty"] = db.get_stock_quantity(ln["product_id"], wh_id)
+        refresh_lines()
+
+    wh_combo.bind("<<ComboboxSelected>>", _on_warehouse_change)
+
+    refresh_lines()
+    if editable:
+        scan_entry.focus_set()
+
+    result: dict[str, object] = {}
+
+    def _validate_lines() -> bool:
+        missing = [ln for ln in line_data if _needs_cost(ln)]
+        if missing:
+            messagebox.showerror("Валідація", "Для надлишку потрібна собівартість.")
+            return False
+        for ln in line_data:
+            if ln["counted_qty"] < 0:
+                messagebox.showerror("Валідація", "Фактична кількість не може бути від'ємною.")
+                return False
+            if ln.get("cost_override") is not None and ln["cost_override"] < 0:
+                messagebox.showerror("Валідація", "Собівартість не може бути від'ємною.")
+                return False
+        return True
+
+    def _on_ok() -> None:
+        if not editable:
+            dlg.destroy()
+            return
+        wh_id = _current_warehouse_id()
+        if not wh_id:
+            messagebox.showerror("Валідація", "Оберіть склад.")
+            return
+        if not _validate_lines():
+            return
+        info = {
+            "doc_date": _parse_date_value(_current_date()),
+            "warehouse_id": wh_id,
+            "comment": comment_var.get().strip(),
+        }
+        result["info"] = info
+        result["lines"] = [
+            {
+                "product_id": ln["product_id"],
+                "expected_qty": ln["expected_qty"],
+                "counted_qty": ln["counted_qty"],
+                "cost_override": ln.get("cost_override"),
+                "note": ln.get("note", ""),
+            }
+            for ln in line_data
+        ]
+        result["post_now"] = bool(post_now_var.get())
+        dlg.destroy()
+
+    def _on_cancel() -> None:
+        dlg.destroy()
+
+    btns = ttk.Frame(content)
+    btns.grid(row=row_idx + 1, column=0, columnspan=2, pady=8)
+    if editable:
+        ttk.Button(btns, text="OK", command=_on_ok).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btns, text="Скасувати", command=_on_cancel).pack(side=tk.LEFT, padx=6)
+    else:
+        ttk.Button(btns, text="Закрити", command=_on_cancel).pack(side=tk.LEFT, padx=6)
+
+    dlg.wait_window()
+    if "info" not in result:
+        return None
+    return result["info"], result["lines"], result["post_now"]
 
 
 def document_prompt(doc_type: str, products, counterparties, warehouses, channels, currencies, doc=None, lines=None):

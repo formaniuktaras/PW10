@@ -7338,8 +7338,14 @@ def document_prompt(
         state="normal" if editable else "disabled",
     )
     scan_plus_one.grid(row=0, column=4, padx=6, pady=4, sticky="w")
+    scan_use_avg_cost_var = tk.BooleanVar(value=True)
+    ttk.Checkbutton(
+        scan_frame,
+        text="Ціна зі середньої собівартості",
+        variable=scan_use_avg_cost_var,
+    ).grid(row=1, column=1, padx=6, pady=(0, 4), sticky="w")
     scan_status = ttk.Label(scan_frame, text="")
-    scan_status.grid(row=1, column=0, columnspan=5, padx=6, pady=(0, 4), sticky="w")
+    scan_status.grid(row=2, column=0, columnspan=5, padx=6, pady=(0, 4), sticky="w")
 
     def _apply_scan_mode() -> None:
         if scan_plus_one_var.get():
@@ -7519,6 +7525,11 @@ def document_prompt(
         match = next((c for c in filtered_counterparties if c["name"] == cp_name), None)
         return match["id"] if match else None
 
+    def _current_warehouse_id() -> int | None:
+        name = (wh_var.get() or "").strip()
+        w = next((x for x in warehouses if x["name"] == name), None)
+        return int(w["id"]) if w else None
+
     def _scan_resolve_product(code: str) -> Optional[sqlite3.Row]:
         if settings is None:
             prefix = ""
@@ -7554,10 +7565,26 @@ def document_prompt(
                 tree.focus(str(idx))
                 tree.see(str(idx))
                 return
-        try:
-            price0 = float(price_var.get() or 0)
-        except ValueError:
-            price0 = 0.0
+        price0 = 0.0
+        if scan_use_avg_cost_var.get():
+            wh_id = _current_warehouse_id()
+            if wh_id:
+                _, avg_cost = db.get_stock_balance(int(product_row["id"]), int(wh_id))
+                if doc_type == "sale":
+                    try:
+                        rate = float(rate_var.get() or 1)
+                    except ValueError:
+                        rate = 1.0
+                    if rate <= 0:
+                        rate = 1.0
+                    price0 = avg_cost / rate
+                else:
+                    price0 = avg_cost
+        if price0 <= 0:
+            try:
+                price0 = float(price_var.get() or 0)
+            except ValueError:
+                price0 = 0.0
         try:
             exp0 = float(expense_var.get() or 0)
         except ValueError:

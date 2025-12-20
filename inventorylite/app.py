@@ -7520,7 +7520,13 @@ def document_prompt(
         return match["id"] if match else None
 
     def _scan_resolve_product(code: str) -> Optional[sqlite3.Row]:
-        prefix = _sanitize_barcode_prefix((settings.get("defaults", "product", "barcode_prefix") if settings else "") or "")
+        if settings is None:
+            prefix = ""
+        elif isinstance(settings, Settings):
+            prefix = settings.get("defaults", "product", "barcode_prefix") or ""
+        else:
+            prefix = (settings.get("defaults", {}).get("product", {}).get("barcode_prefix") or "")
+        prefix = prefix.strip()
         if doc_type == "purchase":
             counterparty_id = _scan_get_counterparty_id()
             if counterparty_id:
@@ -7530,7 +7536,13 @@ def document_prompt(
         product = db.find_product_by_scan_code(code, barcode_prefix=prefix)
         if product:
             return product
-        return db.find_product_by_sku_or_name(None, None, supplier_sku=code)
+        product = db.find_product_by_sku_or_name(None, None, supplier_sku=code)
+        if product:
+            return product
+        supplier_lookup = getattr(db, "get_product_by_supplier_sku", None)
+        if callable(supplier_lookup):
+            return supplier_lookup(code)
+        return None
 
     def _scan_add_line(product_row: sqlite3.Row, qty_delta: float) -> None:
         for idx, ln in enumerate(line_data):
@@ -7573,22 +7585,20 @@ def document_prompt(
         code = scan_var.get().strip()
         if not code:
             return "break"
-        if scan_plus_one_var.get():
-            qty = 1.0
-        else:
-            try:
-                qty = float(scan_qty_var.get() or 1)
-            except (TypeError, ValueError):
-                qty = 1.0
+        try:
+            qty = 1 if scan_plus_one_var.get() else int(scan_qty_var.get() or 1)
+        except (TypeError, ValueError):
+            qty = 1
         product = _scan_resolve_product(code)
         if not product:
-            scan_status.config(text="Товар не знайдено", foreground="#b91c1c")
-            scan_entry.bell()
+            scan_status.config(text=f"Не знайдено: {code}", foreground="#b91c1c")
+            dlg.bell()
             scan_entry.focus_set()
+            scan_var.set("")
             return "break"
         _scan_add_line(product, qty)
         scan_var.set("")
-        scan_status.config(text=f"OK: {product['sku']} — {product['name']} (+{qty:g})", foreground="#15803d")
+        scan_status.config(text=f"OK: {product['sku']} — {product['name']} (+{qty})", foreground="#15803d")
         scan_entry.focus_set()
         return "break"
 

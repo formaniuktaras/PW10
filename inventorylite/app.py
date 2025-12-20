@@ -7854,11 +7854,28 @@ def document_prompt(
     def on_cancel():
         dlg.destroy()
 
+    def _focus_scan(event=None):
+        if editable:
+            scan_entry.focus_set()
+            scan_entry.selection_range(0, tk.END)
+        return "break"
+
+    def _toggle_plus_one(event=None):
+        if editable:
+            scan_plus_one_var.set(not scan_plus_one_var.get())
+            _apply_scan_mode()
+            scan_entry.focus_set()
+        return "break"
+
     btns = ttk.Frame(content)
     btns.grid(row=row_idx, column=0, columnspan=2, pady=8, sticky="e")
     ttk.Button(btns, text="OK", command=on_ok).pack(side=tk.LEFT, padx=4)
     ttk.Button(btns, text="Скасувати", command=on_cancel).pack(side=tk.LEFT, padx=4)
     dlg.bind("<Return>", lambda e: on_ok())
+    dlg.bind("<Control-Return>", lambda e: on_ok())
+    dlg.bind("<Control-KP_Enter>", lambda e: on_ok())
+    dlg.bind("<F8>", _focus_scan)
+    dlg.bind("<F9>", _toggle_plus_one)
     dlg.bind("<Escape>", lambda e: on_cancel())
     if editable:
         dlg.after_idle(

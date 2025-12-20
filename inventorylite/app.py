@@ -7013,6 +7013,52 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
             messagebox.showinfo("Інвентаризація", "У вибраній категорії немає залишків (qty>0).")
         refresh_lines()
 
+    def _add_all_category_products() -> None:
+        if not editable:
+            return
+        wh_id = _current_warehouse_id()
+        if not wh_id:
+            show_error("Інвентаризація", "Оберіть склад.")
+            return
+        display = (cat_var.get() or "Усі").strip()
+        if display == "Усі":
+            products_in_scope = products or db.list_products()
+        else:
+            cat_id = cat_display_to_id.get(display)
+            if not cat_id:
+                products_in_scope = []
+            else:
+                products_in_scope = db.list_products(
+                    category_id=cat_id,
+                    include_subcategories=include_children_var.get(),
+                )
+        stock = db.stock_on_hand(wh_id)
+        added_any = False
+        for product in products_in_scope:
+            pid = int(product["id"])
+            if not _is_allowed_product(pid):
+                continue
+            added_any = True
+            expected = float(stock.get(pid, 0.0))
+            existing = next((ln for ln in line_data if ln["product_id"] == pid), None)
+            if existing:
+                existing["expected_qty"] = expected
+                continue
+            line_data.append(
+                {
+                    "product_id": pid,
+                    "sku": product["sku"],
+                    "name": product["name"],
+                    "expected_qty": expected,
+                    "counted_qty": 0.0,
+                    "cost_override": None,
+                    "note": "",
+                }
+            )
+        refresh_lines()
+        if not added_any:
+            messagebox.showinfo("Інвентаризація", "У вибраній категорії немає товарів.")
+
     def _import_lines_csv() -> None:
         if not editable:
             return
@@ -7180,6 +7226,12 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
         btn_row,
         text="Додати всі залишки (qty>0)",
         command=_add_all_stock,
+        state="normal" if editable else "disabled",
+    ).pack(side=tk.LEFT, padx=4)
+    ttk.Button(
+        btn_row,
+        text="Додати всі товари категорії (вкл. qty=0)",
+        command=_add_all_category_products,
         state="normal" if editable else "disabled",
     ).pack(side=tk.LEFT, padx=4)
     ttk.Button(btn_row, text="Імпорт CSV…", command=_import_lines_csv, state="normal" if editable else "disabled").pack(

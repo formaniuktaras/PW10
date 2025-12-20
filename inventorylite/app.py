@@ -28,17 +28,16 @@ from openpyxl import load_workbook
 
 import db
 import labels
+from inventorylite.error_handling import install_tk_exception_handler, setup_logging
 from label_templates_ui import TemplateManagerDialog
 from utils import (
     APP_NAME,
     VERSION,
     SingleInstance,
     backup_all_data,
-    configure_logging,
     get_data_dir,
     get_db_path,
     get_lock_path,
-    get_log_path,
     Settings,
     apply_base_currency_settings,
     get_base_currency_code,
@@ -8558,7 +8557,12 @@ class SettingsDialog(tk.Toplevel):
 
 
 def main() -> None:
-    configure_logging()
+    log_path = setup_logging(APP_NAME)
+
+    def _sys_hook(exc, val, tb):
+        logging.critical("Unhandled exception", exc_info=(exc, val, tb))
+
+    sys.excepthook = _sys_hook
     logging.info("Starting %s", APP_NAME)
     try:
         with SingleInstance(get_lock_path()):
@@ -8566,6 +8570,7 @@ def main() -> None:
             apply_base_currency_settings(settings)
             db.init_db()
             app = InventoryApp(settings)
+            install_tk_exception_handler(app, log_path)
             app.mainloop()
     except RuntimeError:
         messagebox.showwarning(APP_NAME, "Програма вже запущена.")
@@ -8574,9 +8579,9 @@ def main() -> None:
     except Exception:
         logging.exception("Fatal error")
         try:
-            messagebox.showerror(APP_NAME, f"Критична помилка. Деталі у логах: {get_log_path()}")
+            messagebox.showerror(APP_NAME, f"Критична помилка. Деталі у логах: {log_path}")
         except tk.TclError:
-            print("Критична помилка. Деталі у логах:", get_log_path(), file=sys.stderr)
+            print("Критична помилка. Деталі у логах:", log_path, file=sys.stderr)
         traceback.print_exc()
 
 

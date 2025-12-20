@@ -5,17 +5,22 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 import calendar
 from datetime import date, datetime
-from typing import Callable, List, Optional
+from functools import cmp_to_key
+from typing import Any, Callable, List, Optional
 
 
 class TableFrame(ttk.Frame):
     def __init__(self, master: tk.Widget, columns: List[tuple], selectmode: str = "browse", **kwargs):
         super().__init__(master, **kwargs)
+        self._sort_col: str | None = None
+        self._sort_desc = False
+        self._base_headings: dict[str, str] = {}
         self.tree = ttk.Treeview(
             self, columns=[c[0] for c in columns], show="headings", selectmode=selectmode
         )
         for col_id, col_title, width in columns:
-            self.tree.heading(col_id, text=col_title)
+            self._base_headings[col_id] = col_title
+            self.tree.heading(col_id, text=col_title, command=lambda c=col_id: self._on_heading_click(c))
             self.tree.column(col_id, width=width, anchor="w")
         yscroll = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=yscroll.set)
@@ -30,6 +35,8 @@ class TableFrame(ttk.Frame):
             values = [row[col] for col in self.tree.cget("columns")]
             tags = row.get("tags", ())
             self.tree.insert("", "end", iid=row["id"], values=values, tags=tags)
+        if self._sort_col:
+            self._apply_sort()
 
     def tag_configure(self, tag: str, **kwargs) -> None:
         self.tree.tag_configure(tag, **kwargs)
@@ -126,6 +133,103 @@ class TableFrame(ttk.Frame):
 
         self.tree.bind("<Button-3>", show_menu)
         self.context_menu = menu
+
+    def _on_heading_click(self, col_id: str) -> None:
+        if col_id == self._sort_col:
+            self._sort_desc = not self._sort_desc
+        else:
+            self._sort_col = col_id
+            self._sort_desc = False
+        self._apply_sort()
+
+    def _apply_sort(self) -> None:
+        if not self._sort_col:
+            return
+        col_id = self._sort_col
+        columns = list(self.tree.cget("columns"))
+        try:
+            col_index = columns.index(col_id)
+        except ValueError:
+            return
+
+        selection = self.tree.selection()
+        focus = self.tree.focus()
+
+        items: list[tuple[str, tuple[int, Any], int, bool]] = []
+        for idx, iid in enumerate(self.tree.get_children("")):
+            values = self.tree.item(iid, "values")
+            raw_value = values[col_index] if col_index < len(values) else ""
+            is_empty, sort_value = self._coerce_sort_value(raw_value, col_id)
+            items.append((iid, sort_value, idx, is_empty))
+
+        non_empty = [item for item in items if not item[3]]
+        empty = [item for item in items if item[3]]
+
+        def compare_items(left: tuple[str, tuple[int, Any], int, bool],
+                          right: tuple[str, tuple[int, Any], int, bool]) -> int:
+            if left[1] == right[1]:
+                if left[2] == right[2]:
+                    return 0
+                return -1 if left[2] < right[2] else 1
+            if self._sort_desc:
+                return -1 if left[1] > right[1] else 1
+            return -1 if left[1] < right[1] else 1
+
+        non_empty_sorted = sorted(non_empty, key=cmp_to_key(compare_items))
+        empty_sorted = sorted(empty, key=lambda item: item[2])
+        ordered_items = non_empty_sorted + empty_sorted
+
+        for new_index, (iid, _value, _idx, _empty) in enumerate(ordered_items):
+            self.tree.move(iid, "", new_index)
+
+        for heading_id in columns:
+            base_text = self._base_headings.get(heading_id, heading_id)
+            if heading_id == col_id:
+                indicator = "▼" if self._sort_desc else "▲"
+                text = f"{base_text} {indicator}"
+            else:
+                text = base_text
+            self.tree.heading(
+                heading_id, text=text, command=lambda c=heading_id: self._on_heading_click(c)
+            )
+
+        if selection:
+            existing_selection = [iid for iid in selection if self.tree.exists(iid)]
+            if existing_selection:
+                self.tree.selection_set(existing_selection)
+        if focus and self.tree.exists(focus):
+            self.tree.focus(focus)
+
+    def _coerce_sort_value(self, raw: Any, _col_id: str) -> tuple[bool, tuple[int, Any]]:
+        empty_markers = {"", "-", "—"}
+        if raw is None:
+            return True, (2, "")
+        raw_text = str(raw).strip()
+        if raw_text in empty_markers:
+            return True, (2, "")
+
+        try:
+            parsed_dt = datetime.fromisoformat(raw_text)
+            return False, (0, parsed_dt)
+        except ValueError:
+            pass
+
+        normalized = raw_text.replace(" ", "")
+        if not normalized:
+            return True, (2, "")
+        if normalized.startswith("0") and len(normalized) > 1:
+            return False, (2, raw_text.casefold())
+        stripped_numeric = normalized.replace(",", "").replace(".", "")
+        if len(stripped_numeric) > 10 and stripped_numeric.isdigit():
+            return False, (2, raw_text.casefold())
+        candidate = normalized.replace(",", ".")
+        if candidate.count(".") <= 1 and candidate.replace(".", "").isdigit():
+            try:
+                return False, (1, float(candidate))
+            except ValueError:
+                pass
+
+        return False, (2, raw_text.casefold())
 
 
 class DatePicker(ttk.Frame):
@@ -263,4 +367,3 @@ def simple_prompt(title: str, fields: List[str], initial: Optional[List[str]] = 
     root.bind("<Escape>", lambda e: on_cancel())
     root.wait_window()
     return result
-

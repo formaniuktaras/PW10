@@ -6189,6 +6189,8 @@ def counterparty_prompt(initial=None, default_type: str | None = None):
     ttk.Button(btns, text="Скасувати", command=on_cancel).pack(side=tk.LEFT, padx=4)
     dlg.bind("<Return>", lambda e: on_ok())
     dlg.bind("<Escape>", lambda e: on_cancel())
+    if editable:
+        scan_entry.focus_set()
     dlg.wait_window()
     return result
 

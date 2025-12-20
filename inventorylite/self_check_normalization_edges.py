@@ -4,7 +4,7 @@ import os
 import sqlite3
 import tempfile
 
-import db
+from inventorylite import db
 
 
 def main() -> None:

@@ -24,9 +24,9 @@ from tkinter import ttk, messagebox, filedialog
 import sqlite3
 from typing import Optional
 
-import db
-import labels
-from helpers import (
+from inventorylite import db
+from inventorylite import labels
+from inventorylite.helpers import (
     PRODUCT_FIELDS,
     PURCHASE_FIELDS,
     SALES_FIELDS,
@@ -49,8 +49,8 @@ from helpers import (
     parse_sales_file,
 )
 from inventorylite.error_handling import install_tk_exception_handler, setup_logging
-from label_templates_ui import TemplateManagerDialog
-from utils import (
+from inventorylite.label_templates_ui import TemplateManagerDialog
+from inventorylite.utils import (
     APP_NAME,
     VERSION,
     SingleInstance,
@@ -70,16 +70,16 @@ from utils import (
     backup_database,
     bind_common_shortcuts,
 )
-from ui_components import DatePicker, TableFrame, simple_prompt
-from dialogs import (
+from inventorylite.ui_components import DatePicker, TableFrame, simple_prompt
+from inventorylite.dialogs import (
     product_prompt,
     category_prompt,
     counterparty_prompt,
     warehouse_prompt,
     channel_prompt,
 )
-from dialogs_documents import document_prompt, ensure_rate_for_date
-from dialogs_inventory import inventory_prompt
+from inventorylite.dialogs_documents import document_prompt, ensure_rate_for_date
+from inventorylite.dialogs_inventory import inventory_prompt
 
 
 class InventoryApp(tk.Tk):

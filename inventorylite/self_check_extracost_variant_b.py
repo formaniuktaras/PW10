@@ -4,7 +4,7 @@ import math
 import os
 import tempfile
 
-import db
+from inventorylite import db
 
 EPS = 1e-6
 

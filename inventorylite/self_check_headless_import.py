@@ -2,7 +2,7 @@ import os
 
 os.environ["INVENTORYLITE_HEADLESS"] = "1"
 
-import db
+from inventorylite import db
 
 
 db.init_db()

@@ -4,9 +4,9 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from typing import Optional
 
-import db
-from helpers import _find_index_by_name, _sanitize_barcode_prefix
-from utils import Settings
+from inventorylite import db
+from inventorylite.helpers import _find_index_by_name, _sanitize_barcode_prefix
+from inventorylite.utils import Settings
 
 def product_prompt(brands, categories, title: str, initial=None, settings: Settings | None = None):
     base_initial = {

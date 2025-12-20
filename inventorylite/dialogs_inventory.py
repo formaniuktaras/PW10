@@ -8,10 +8,10 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 from typing import Optional
 
-import db
-from helpers import _parse_date_value, _sanitize_barcode_prefix
-from ui_components import DatePicker
-from utils import Settings, show_error
+from inventorylite import db
+from inventorylite.helpers import _parse_date_value, _sanitize_barcode_prefix
+from inventorylite.ui_components import DatePicker
+from inventorylite.utils import Settings, show_error
 
 
 def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=None):

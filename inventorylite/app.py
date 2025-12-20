@@ -6230,6 +6230,10 @@ def warehouse_prompt(initial=None):
     ttk.Button(btns, text="Скасувати", command=on_cancel).pack(side=tk.LEFT, padx=4)
     dlg.bind("<Return>", lambda e: on_ok())
     dlg.bind("<Escape>", lambda e: on_cancel())
+    if editable:
+        scan_entry.focus_set()
+        scan_entry.icursor("end")
+        scan_entry.selection_range(0, tk.END)
     dlg.wait_window()
     return result
 

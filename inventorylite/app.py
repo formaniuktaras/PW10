@@ -50,6 +50,7 @@ from inventorylite.helpers import (
 )
 from inventorylite.error_handling import install_tk_exception_handler, setup_logging
 from inventorylite.label_templates_ui import TemplateManagerDialog
+from inventorylite.tabs.settings import SettingsTab
 from inventorylite.utils import (
     APP_NAME,
     VERSION,
@@ -97,40 +98,46 @@ class InventoryApp(tk.Tk):
         self.create_menu()
         self.apply_settings()
 
-        notebook = ttk.Notebook(self)
-        notebook.pack(fill=tk.BOTH, expand=True)
+        self.notebook = ttk.Notebook(self)
+        self.notebook.pack(fill=tk.BOTH, expand=True)
 
-        self.brands_frame = ttk.Frame(notebook)
-        self.categories_frame = ttk.Frame(notebook)
-        self.products_frame = ttk.Frame(notebook)
-        self.counterparties_frame = ttk.Frame(notebook)
-        self.warehouses_frame = ttk.Frame(notebook)
-        self.channels_frame = ttk.Frame(notebook)
-        self.currencies_frame = ttk.Frame(notebook)
-        self.purchases_frame = ttk.Frame(notebook)
-        self.extra_costs_frame = ttk.Frame(notebook)
-        self.sales_frame = ttk.Frame(notebook)
-        self.inventory_frame = ttk.Frame(notebook)
-        self.cash_frame = ttk.Frame(notebook)
-        self.stock_frame = ttk.Frame(notebook)
-        self.reports_frame = ttk.Frame(notebook)
-        self.export_frame = ttk.Frame(notebook)
+        self.brands_frame = ttk.Frame(self.notebook)
+        self.categories_frame = ttk.Frame(self.notebook)
+        self.products_frame = ttk.Frame(self.notebook)
+        self.counterparties_frame = ttk.Frame(self.notebook)
+        self.warehouses_frame = ttk.Frame(self.notebook)
+        self.channels_frame = ttk.Frame(self.notebook)
+        self.currencies_frame = ttk.Frame(self.notebook)
+        self.purchases_frame = ttk.Frame(self.notebook)
+        self.extra_costs_frame = ttk.Frame(self.notebook)
+        self.sales_frame = ttk.Frame(self.notebook)
+        self.inventory_frame = ttk.Frame(self.notebook)
+        self.cash_frame = ttk.Frame(self.notebook)
+        self.stock_frame = ttk.Frame(self.notebook)
+        self.reports_frame = ttk.Frame(self.notebook)
+        self.export_frame = ttk.Frame(self.notebook)
 
-        notebook.add(self.brands_frame, text="Бренди")
-        notebook.add(self.categories_frame, text="Категорії")
-        notebook.add(self.products_frame, text="Товари")
-        notebook.add(self.counterparties_frame, text="Контрагенти")
-        notebook.add(self.warehouses_frame, text="Склади")
-        notebook.add(self.channels_frame, text="Канали продажу")
-        notebook.add(self.currencies_frame, text="Валюти")
-        notebook.add(self.purchases_frame, text="Закупівлі")
-        notebook.add(self.extra_costs_frame, text="Супутні витрати")
-        notebook.add(self.sales_frame, text="Продажі")
-        notebook.add(self.inventory_frame, text="Інвентаризація")
-        notebook.add(self.cash_frame, text="Каса")
-        notebook.add(self.stock_frame, text="Залишки")
-        notebook.add(self.reports_frame, text="Звіти")
-        notebook.add(self.export_frame, text="Експорт")
+        self.notebook.add(self.brands_frame, text="Бренди")
+        self.notebook.add(self.categories_frame, text="Категорії")
+        self.notebook.add(self.products_frame, text="Товари")
+        self.notebook.add(self.counterparties_frame, text="Контрагенти")
+        self.notebook.add(self.warehouses_frame, text="Склади")
+        self.notebook.add(self.channels_frame, text="Канали продажу")
+        self.notebook.add(self.currencies_frame, text="Валюти")
+        self.notebook.add(self.purchases_frame, text="Закупівлі")
+        self.notebook.add(self.extra_costs_frame, text="Супутні витрати")
+        self.notebook.add(self.sales_frame, text="Продажі")
+        self.notebook.add(self.inventory_frame, text="Інвентаризація")
+        self.notebook.add(self.cash_frame, text="Каса")
+        self.notebook.add(self.stock_frame, text="Залишки")
+        self.notebook.add(self.reports_frame, text="Звіти")
+        self.notebook.add(self.export_frame, text="Експорт")
+        self.settings_tab = SettingsTab(
+            parent=self.notebook,
+            settings=self.settings,
+            on_settings_saved=self._on_settings_saved,
+        )
+        self.notebook.add(self.settings_tab.frame, text="Налаштування")
 
         self.create_brands_tab()
         self.create_categories_tab()
@@ -179,7 +186,9 @@ class InventoryApp(tk.Tk):
             return get_data_dir()
 
     def open_settings_dialog(self, section: str = "general") -> None:
-        SettingsDialog(self, section)
+        self.settings_tab.refresh()
+        self.notebook.select(self.settings_tab.frame)
+        self.settings_tab.select_section(section)
 
     def reset_hotkeys_profile(self) -> None:
         self.settings.set("Типовий", "hotkeys", "profile")
@@ -195,6 +204,11 @@ class InventoryApp(tk.Tk):
         self.apply_status_bar()
         self.apply_window_modes()
         self.apply_editor_font()
+
+    def _on_settings_saved(self) -> None:
+        apply_base_currency_settings(self.settings)
+        self.refresh_currencies()
+        self.apply_settings()
 
     def apply_theme(self) -> None:
         theme = (self.settings.get("general", "theme") or "system").lower()
@@ -5594,349 +5608,6 @@ def extra_cost_prompt(counterparties, currencies, purchases, doc=None, lines=Non
 
 
 
-
-
-class SettingsDialog(tk.Toplevel):
-    def __init__(self, app: InventoryApp, section: str):
-        super().__init__(app)
-        self.app = app
-        self.section = section
-        self.title("Налаштування")
-        self.resizable(False, False)
-        self.grab_set()
-        self.vars: dict[str, tk.Variable] = {}
-        self.recent_cleared = False
-
-        notebook = ttk.Notebook(self)
-        notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-
-        self.general_tab = ttk.Frame(notebook)
-        self.defaults_tab = ttk.Frame(notebook)
-        self.files_tab = ttk.Frame(notebook)
-        self.ui_tab = ttk.Frame(notebook)
-        self.editor_tab = ttk.Frame(notebook)
-        self.hotkeys_tab = ttk.Frame(notebook)
-        self.support_tab = ttk.Frame(notebook)
-
-        notebook.add(self.general_tab, text="Загальні")
-        notebook.add(self.defaults_tab, text="Типові значення")
-        notebook.add(self.files_tab, text="Файли й шляхи")
-        notebook.add(self.ui_tab, text="Інтерфейс і вікна")
-        notebook.add(self.editor_tab, text="Редактор")
-        notebook.add(self.hotkeys_tab, text="Гарячі клавіші")
-        notebook.add(self.support_tab, text="Допомога й підтримка")
-
-        self.build_general_tab()
-        self.build_defaults_tab()
-        self.build_files_tab()
-        self.build_ui_tab()
-        self.build_editor_tab()
-        self.build_hotkeys_tab()
-        self.build_support_tab()
-
-        tab_index = {
-            "general": 0,
-            "defaults": 1,
-            "files": 2,
-            "ui": 3,
-            "editor": 4,
-            "hotkeys": 5,
-            "support": 6,
-        }.get(section, 0)
-        notebook.select(tab_index)
-
-        buttons = ttk.Frame(self)
-        buttons.pack(fill=tk.X, pady=(0, 8))
-        ttk.Button(buttons, text="Скасувати", command=self.destroy).pack(side=tk.RIGHT, padx=4)
-        ttk.Button(buttons, text="Зберегти", command=self.save).pack(side=tk.RIGHT, padx=4)
-
-    def build_general_tab(self) -> None:
-        language_var = self._add_var("general.language", tk.StringVar(value=self.app.settings.get("general", "language")))
-        ttk.Label(self.general_tab, text="Мова інтерфейсу:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
-        ttk.Combobox(self.general_tab, textvariable=language_var, values=["uk", "en", "pl", "de"], width=10).grid(
-            row=0, column=1, sticky="w", padx=6, pady=4
-        )
-
-        theme_var = self._add_var("general.theme", tk.StringVar(value=self.app.settings.get("general", "theme")))
-        ttk.Label(self.general_tab, text="Тема:").grid(row=1, column=0, sticky="w", padx=6, pady=4)
-        ttk.Combobox(
-            self.general_tab, textvariable=theme_var, values=["system", "light", "dark"], width=10
-        ).grid(row=1, column=1, sticky="w", padx=6, pady=4)
-
-    def build_defaults_tab(self) -> None:
-        product_frame = ttk.LabelFrame(self.defaults_tab, text="Товари")
-        product_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-
-        default_unit = self.app.settings.get("defaults", "product", "unit") or "pcs"
-        unit_var = self._add_var("defaults.product.unit", tk.StringVar(value=default_unit))
-        ttk.Label(product_frame, text="Одиниця за замовчуванням:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
-        ttk.Entry(product_frame, textvariable=unit_var, width=14).grid(row=0, column=1, sticky="w", padx=6, pady=4)
-
-        brands = db.list_brands()
-        brand_names = [b["name"] for b in brands]
-        brand_default = self.app.settings.get("defaults", "product", "brand") or ""
-        brand_var = self._add_var("defaults.product.brand", tk.StringVar(value=brand_default))
-        ttk.Label(product_frame, text="Бренд за замовчуванням:").grid(row=1, column=0, sticky="w", padx=6, pady=4)
-        ttk.Combobox(product_frame, textvariable=brand_var, values=brand_names, width=30).grid(
-            row=1, column=1, sticky="w", padx=6, pady=4
-        )
-        ttk.Label(product_frame, text="Залиште поле порожнім, щоб вибирати бренд вручну.").grid(
-            row=2, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 8)
-        )
-
-        categories = self.app.flatten_categories()
-        category_labels = [c["label"] for c in categories]
-        category_default = self.app.settings.get("defaults", "product", "category") or ""
-        category_var = self._add_var("defaults.product.category", tk.StringVar(value=category_default))
-        ttk.Label(product_frame, text="Категорія за замовчуванням:").grid(row=3, column=0, sticky="w", padx=6, pady=4)
-        ttk.Combobox(product_frame, textvariable=category_var, values=category_labels, width=30).grid(
-            row=3, column=1, sticky="w", padx=6, pady=4
-        )
-        ttk.Label(product_frame, text="Залиште поле порожнім, щоб обирати категорію під час створення.").grid(
-            row=4, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 4)
-        )
-
-        barcode_prefix = _sanitize_barcode_prefix(self.app.settings.get("defaults", "product", "barcode_prefix") or "")
-        barcode_prefix_var = self._add_var("defaults.product.barcode_prefix", tk.StringVar(value=barcode_prefix))
-        ttk.Label(product_frame, text="Префікс штрихкоду (додається перед SKU):").grid(
-            row=5, column=0, sticky="w", padx=6, pady=4
-        )
-        ttk.Entry(product_frame, textvariable=barcode_prefix_var, width=30).grid(
-            row=5, column=1, sticky="w", padx=6, pady=4
-        )
-        ttk.Label(product_frame, text="Залиште порожнім — без префікса (немає).").grid(
-            row=6, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 8)
-        )
-
-        currency_frame = ttk.LabelFrame(self.defaults_tab, text="Валюти")
-        currency_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
-
-        currencies = db.list_currencies(active_only=False)
-        currency_codes = [c["code"] for c in currencies]
-        currency_default = self.app.settings.get("defaults", "currency", "base_code") or get_base_currency_code()
-        currency_var = self._add_var("defaults.currency.base_code", tk.StringVar(value=currency_default))
-        ttk.Label(currency_frame, text="Базова валюта:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
-        ttk.Combobox(currency_frame, textvariable=currency_var, values=currency_codes, width=12, state="readonly").grid(
-            row=0, column=1, sticky="w", padx=6, pady=4
-        )
-
-    def build_files_tab(self) -> None:
-        workdir_var = self._add_var("files.working_dir", tk.StringVar(value=str(self.app.default_workdir())))
-        ttk.Label(self.files_tab, text="Робоча директорія:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
-        ttk.Entry(self.files_tab, textvariable=workdir_var, width=40).grid(row=0, column=1, sticky="w", padx=6, pady=4)
-        ttk.Button(self.files_tab, text="Огляд", command=lambda: self.choose_workdir(workdir_var)).grid(
-            row=0, column=2, padx=4, pady=4
-        )
-
-        recent_limit_var = self._add_var(
-            "files.recent_limit", tk.IntVar(value=int(self.app.settings.get("files", "recent_limit") or 10))
-        )
-        ttk.Label(self.files_tab, text="Кількість недавніх:").grid(row=1, column=0, sticky="w", padx=6, pady=4)
-        ttk.Spinbox(self.files_tab, from_=0, to=50, textvariable=recent_limit_var, width=8).grid(
-            row=1, column=1, sticky="w", padx=6, pady=4
-        )
-
-        self.recent_label = ttk.Label(
-            self.files_tab,
-            text=f"Збережено недавніх: {len(self.app.settings.get('files', 'recent_items', default=[]))}",
-        )
-        self.recent_label.grid(row=2, column=0, columnspan=2, sticky="w", padx=6, pady=4)
-        ttk.Button(self.files_tab, text="Очистити", command=self.clear_recent).grid(row=2, column=2, padx=4, pady=4)
-
-        encoding_var = self._add_var("files.encoding", tk.StringVar(value=self.app.settings.get("files", "encoding")))
-        ttk.Label(self.files_tab, text="Кодування тексту:").grid(row=3, column=0, sticky="w", padx=6, pady=4)
-        ttk.Combobox(
-            self.files_tab, textvariable=encoding_var, values=["utf-8", "cp1251", "latin-1", "utf-16"], width=12
-        ).grid(row=3, column=1, sticky="w", padx=6, pady=4)
-
-    def build_ui_tab(self) -> None:
-        layout_var = self._add_var("ui.panel_layout", tk.StringVar(value=self.app.settings.get("ui", "panel_layout")))
-        ttk.Label(self.ui_tab, text="Розташування панелей:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
-        ttk.Combobox(
-            self.ui_tab,
-            textvariable=layout_var,
-            values=["Авто", "Вертикально", "Горизонтально"],
-            width=16,
-        ).grid(row=0, column=1, sticky="w", padx=6, pady=4)
-
-        status_var = self._add_var("ui.status_bar", tk.BooleanVar(value=bool(self.app.settings.get("ui", "status_bar"))))
-        ttk.Checkbutton(self.ui_tab, text="Показувати рядок стану", variable=status_var).grid(
-            row=1, column=0, columnspan=2, sticky="w", padx=6, pady=4
-        )
-
-        compact_var = self._add_var("ui.compact_mode", tk.BooleanVar(value=bool(self.app.settings.get("ui", "compact_mode"))))
-        ttk.Checkbutton(self.ui_tab, text="Компактний режим", variable=compact_var).grid(
-            row=2, column=0, columnspan=2, sticky="w", padx=6, pady=4
-        )
-
-        fullscreen_var = self._add_var(
-            "ui.fullscreen", tk.BooleanVar(value=bool(self.app.settings.get("ui", "fullscreen")))
-        )
-        ttk.Checkbutton(self.ui_tab, text="Повноекранний режим", variable=fullscreen_var).grid(
-            row=3, column=0, columnspan=2, sticky="w", padx=6, pady=4
-        )
-
-        volume_var = self._add_var(
-            "ui.notifications_volume",
-            tk.IntVar(value=int(self.app.settings.get("ui", "notifications_volume") or 70)),
-        )
-        ttk.Label(self.ui_tab, text="Гучність сповіщень:").grid(row=4, column=0, sticky="w", padx=6, pady=4)
-        ttk.Scale(self.ui_tab, from_=0, to=100, variable=volume_var, orient=tk.HORIZONTAL, length=160).grid(
-            row=4, column=1, sticky="w", padx=6, pady=4
-        )
-
-        duration_var = self._add_var(
-            "ui.notifications_duration",
-            tk.IntVar(value=int(self.app.settings.get("ui", "notifications_duration") or 3)),
-        )
-        ttk.Label(self.ui_tab, text="Тривалість сповіщень (сек):").grid(row=5, column=0, sticky="w", padx=6, pady=4)
-        ttk.Spinbox(self.ui_tab, from_=1, to=30, textvariable=duration_var, width=8).grid(
-            row=5, column=1, sticky="w", padx=6, pady=4
-        )
-
-    def build_editor_tab(self) -> None:
-        family_var = self._add_var("editor.font_family", tk.StringVar(value=self.app.settings.get("editor", "font_family")))
-        ttk.Label(self.editor_tab, text="Шрифт редактора:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
-        font_box = ttk.Combobox(self.editor_tab, textvariable=family_var, values=sorted(tkfont.families()), width=24)
-        font_box.grid(row=0, column=1, sticky="w", padx=6, pady=4)
-
-        size_var = self._add_var("editor.font_size", tk.IntVar(value=int(self.app.settings.get("editor", "font_size") or 10)))
-        ttk.Label(self.editor_tab, text="Розмір шрифту:").grid(row=1, column=0, sticky="w", padx=6, pady=4)
-        ttk.Spinbox(self.editor_tab, from_=8, to=28, textvariable=size_var, width=6).grid(
-            row=1, column=1, sticky="w", padx=6, pady=4
-        )
-
-        syntax_var = self._add_var(
-            "editor.syntax_highlighting", tk.BooleanVar(value=bool(self.app.settings.get("editor", "syntax_highlighting")))
-        )
-        ttk.Checkbutton(self.editor_tab, text="Підсвічування синтаксису", variable=syntax_var).grid(
-            row=2, column=0, columnspan=2, sticky="w", padx=6, pady=4
-        )
-
-        indent_tabs_var = self._add_var(
-            "editor.indent_with_tabs", tk.BooleanVar(value=bool(self.app.settings.get("editor", "indent_with_tabs")))
-        )
-        ttk.Checkbutton(self.editor_tab, text="Використовувати табуляцію для відступів", variable=indent_tabs_var).grid(
-            row=3, column=0, columnspan=2, sticky="w", padx=6, pady=4
-        )
-
-        tab_width_var = self._add_var("editor.tab_width", tk.IntVar(value=int(self.app.settings.get("editor", "tab_width") or 4)))
-        ttk.Label(self.editor_tab, text="Ширина табуляції:").grid(row=4, column=0, sticky="w", padx=6, pady=4)
-        ttk.Spinbox(self.editor_tab, from_=2, to=12, textvariable=tab_width_var, width=6).grid(
-            row=4, column=1, sticky="w", padx=6, pady=4
-        )
-
-        line_numbers_var = self._add_var(
-            "editor.line_numbers", tk.BooleanVar(value=bool(self.app.settings.get("editor", "line_numbers")))
-        )
-        ttk.Checkbutton(self.editor_tab, text="Показувати номери рядків", variable=line_numbers_var).grid(
-            row=5, column=0, columnspan=2, sticky="w", padx=6, pady=4
-        )
-
-        minimap_var = self._add_var("editor.minimap", tk.BooleanVar(value=bool(self.app.settings.get("editor", "minimap"))))
-        ttk.Checkbutton(self.editor_tab, text="Вмикати мінімеп", variable=minimap_var).grid(
-            row=6, column=0, columnspan=2, sticky="w", padx=6, pady=4
-        )
-
-        auto_format_var = self._add_var(
-            "editor.auto_format", tk.BooleanVar(value=bool(self.app.settings.get("editor", "auto_format")))
-        )
-        ttk.Checkbutton(self.editor_tab, text="Автоматичне форматування", variable=auto_format_var).grid(
-            row=7, column=0, columnspan=2, sticky="w", padx=6, pady=4
-        )
-
-        autocomplete_var = self._add_var(
-            "editor.autocomplete", tk.BooleanVar(value=bool(self.app.settings.get("editor", "autocomplete")))
-        )
-        ttk.Checkbutton(self.editor_tab, text="Автодоповнення", variable=autocomplete_var).grid(
-            row=8, column=0, columnspan=2, sticky="w", padx=6, pady=4
-        )
-
-        length_limit_var = self._add_var(
-            "editor.line_length_limit",
-            tk.IntVar(value=int(self.app.settings.get("editor", "line_length_limit") or 120)),
-        )
-        ttk.Label(self.editor_tab, text="Фільтр по довжині рядка:").grid(row=9, column=0, sticky="w", padx=6, pady=4)
-        ttk.Spinbox(self.editor_tab, from_=40, to=240, textvariable=length_limit_var, width=6).grid(
-            row=9, column=1, sticky="w", padx=6, pady=4
-        )
-
-    def build_hotkeys_tab(self) -> None:
-        profile_var = self._add_var("hotkeys.profile", tk.StringVar(value=self.app.settings.get("hotkeys", "profile")))
-        ttk.Label(self.hotkeys_tab, text="Профіль клавіш:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
-        ttk.Combobox(
-            self.hotkeys_tab, textvariable=profile_var, values=["Типовий", "Emacs", "Vim"], width=12
-        ).grid(row=0, column=1, sticky="w", padx=6, pady=4)
-
-        allow_custom_var = self._add_var(
-            "hotkeys.allow_custom", tk.BooleanVar(value=bool(self.app.settings.get("hotkeys", "allow_custom")))
-        )
-        ttk.Checkbutton(self.hotkeys_tab, text="Дозволити переназначення", variable=allow_custom_var).grid(
-            row=1, column=0, columnspan=2, sticky="w", padx=6, pady=4
-        )
-
-    def build_support_tab(self) -> None:
-        log_var = self._add_var("support.log_level", tk.StringVar(value=self.app.settings.get("support", "log_level")))
-        ttk.Label(self.support_tab, text="Рівень логування:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
-        ttk.Combobox(self.support_tab, textvariable=log_var, values=["DEBUG", "INFO", "WARNING", "ERROR"], width=12).grid(
-            row=0, column=1, sticky="w", padx=6, pady=4
-        )
-
-        sysinfo_var = self._add_var(
-            "support.collect_system_info", tk.BooleanVar(value=bool(self.app.settings.get("support", "collect_system_info")))
-        )
-        ttk.Checkbutton(self.support_tab, text="Збирати системну інформацію", variable=sysinfo_var).grid(
-            row=1, column=0, columnspan=2, sticky="w", padx=6, pady=4
-        )
-
-        autoreport_var = self._add_var(
-            "support.auto_error_reports", tk.BooleanVar(value=bool(self.app.settings.get("support", "auto_error_reports")))
-        )
-        ttk.Checkbutton(self.support_tab, text="Надсилати звіти про помилки автоматично", variable=autoreport_var).grid(
-            row=2, column=0, columnspan=2, sticky="w", padx=6, pady=4
-        )
-
-        docs_var = self._add_var("support.docs_url", tk.StringVar(value=self.app.settings.get("support", "docs_url")))
-        ttk.Label(self.support_tab, text="Документація/FAQ:").grid(row=3, column=0, sticky="w", padx=6, pady=4)
-        ttk.Entry(self.support_tab, textvariable=docs_var, width=40).grid(row=3, column=1, sticky="w", padx=6, pady=4)
-
-    def choose_workdir(self, var: tk.StringVar) -> None:
-        path = filedialog.askdirectory(initialdir=var.get() or str(self.app.default_workdir()))
-        if path:
-            var.set(path)
-
-    def clear_recent(self) -> None:
-        self.recent_cleared = True
-        self.recent_label.configure(text="Збережено недавніх: 0")
-
-    def _add_var(self, path: str, var: tk.Variable) -> tk.Variable:
-        self.vars[path] = var
-        return var
-
-    def save(self) -> None:
-        for path, var in self.vars.items():
-            value = var.get()
-            if path == "defaults.product.barcode_prefix":
-                value = _sanitize_barcode_prefix(str(value))
-            keys = path.split(".")
-            self.app.settings.set(value, *keys)
-        base_code = str(self.vars.get("defaults.currency.base_code", tk.StringVar()).get()).strip().upper()
-        if base_code:
-            currencies = {c["code"]: c for c in db.list_currencies(active_only=False)}
-            selected = currencies.get(base_code)
-            if selected:
-                self.app.settings.set(selected["name"], "defaults", "currency", "base_name")
-                self.app.settings.set(int(selected["decimals"]), "defaults", "currency", "base_decimals")
-            else:
-                self.app.settings.set(base_code, "defaults", "currency", "base_name")
-                self.app.settings.set(get_base_currency_decimals(), "defaults", "currency", "base_decimals")
-        if self.recent_cleared:
-            self.app.settings.set([], "files", "recent_items")
-        self.app.settings.save()
-        apply_base_currency_settings(self.app.settings)
-        self.app.refresh_currencies()
-        self.app.apply_settings()
-        self.destroy()
 
 
 def main() -> None:

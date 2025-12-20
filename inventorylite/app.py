@@ -6578,6 +6578,41 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
     comment_entry = ttk.Entry(content, textvariable=comment_var, width=40, state="normal" if editable else "disabled")
     comment_entry.grid(row=row_idx, column=1, padx=6, pady=4, sticky="ew")
 
+    categories = db.list_categories(include_hidden=False)
+    category_children: dict[int | None, list[dict]] = defaultdict(list)
+    for cat in categories:
+        category_children[cat["parent_id"]].append(cat)
+    for items in category_children.values():
+        items.sort(key=lambda item: item["name"].lower())
+
+    category_display_names: list[str] = []
+    cat_display_to_id: dict[str, int] = {}
+
+    def _build_category_tree(parent_id: int | None, level: int = 0) -> None:
+        for cat in category_children.get(parent_id, []):
+            display = f"{'  ' * level}{cat['name']}"
+            category_display_names.append(display)
+            cat_display_to_id[display] = cat["id"]
+            _build_category_tree(cat["id"], level + 1)
+
+    _build_category_tree(None)
+    category_values = ["Усі", *category_display_names]
+
+    row_idx += 1
+    ttk.Label(content, text="Категорія").grid(row=row_idx, column=0, padx=6, pady=4, sticky="e")
+    cat_var = tk.StringVar(value="Усі")
+    include_children_var = tk.BooleanVar(value=True)
+    cat_frame = ttk.Frame(content)
+    cat_frame.grid(row=row_idx, column=1, padx=6, pady=4, sticky="w")
+    cat_combo = ttk.Combobox(cat_frame, textvariable=cat_var, values=category_values, state="readonly")
+    cat_combo.pack(side=tk.LEFT)
+    include_children_check = ttk.Checkbutton(
+        cat_frame,
+        text="Включати підкатегорії",
+        variable=include_children_var,
+    )
+    include_children_check.pack(side=tk.LEFT, padx=6)
+
     post_now_var = tk.BooleanVar(value=False)
     if editable:
         row_idx += 1
@@ -6638,6 +6673,7 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
     product_lookup = {f"{p['sku']} — {p['name']}": p for p in products}
     products_by_id = {p["id"]: p for p in products}
     product_names = list(product_lookup.keys())
+    allowed_product_ids: set[int] = set()
 
     line_data: list[dict] = []
     if lines:
@@ -6679,6 +6715,23 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
             return None
         match = next((w for w in warehouses if w["name"] == name), None)
         return match["id"] if match else None
+
+    def _rebuild_allowed_products() -> None:
+        allowed_product_ids.clear()
+        display = (cat_var.get() or "Усі").strip()
+        if display == "Усі":
+            return
+        cat_id = cat_display_to_id.get(display)
+        if not cat_id:
+            return
+        rows = db.list_products(
+            category_id=cat_id,
+            include_subcategories=include_children_var.get(),
+        )
+        allowed_product_ids.update(int(row["id"]) for row in rows)
+
+    def _is_allowed_product(product_id: int) -> bool:
+        return (not allowed_product_ids) or (product_id in allowed_product_ids)
 
     def _get_balance_cached(product_id: int) -> tuple[float, float]:
         if product_id not in balance_cache:
@@ -6757,7 +6810,17 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
     tree.bind("<<TreeviewSelect>>", _select_line)
 
     def _pick_product() -> Optional[dict]:
-        if not product_names:
+        def _filtered_product_names() -> list[str]:
+            if not allowed_product_ids:
+                return product_names
+            return [
+                name
+                for name, product in product_lookup.items()
+                if _is_allowed_product(int(product["id"]))
+            ]
+
+        filtered_names = _filtered_product_names()
+        if not filtered_names:
             messagebox.showinfo("Товари", "Список товарів порожній.")
             return None
         picker = tk.Toplevel(dlg)
@@ -6769,15 +6832,16 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
         ttk.Entry(picker, textvariable=search_var).grid(row=0, column=0, padx=8, pady=6, sticky="ew")
         listbox = tk.Listbox(picker, height=12)
         listbox.grid(row=1, column=0, padx=8, pady=6, sticky="nsew")
-        for name in product_names:
+        for name in filtered_names:
             listbox.insert(tk.END, name)
 
         result: dict[str, object] = {}
 
         def _filter(*_args) -> None:
             text = search_var.get().lower().strip()
+            allowed_names = _filtered_product_names()
             listbox.delete(0, tk.END)
-            for name in product_names:
+            for name in allowed_names:
                 if text in name.lower():
                     listbox.insert(tk.END, name)
 
@@ -6920,9 +6984,13 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
             messagebox.showinfo("Інвентаризація", "На складі немає залишків (qty>0).")
             refresh_lines()
             return
+        added_any = False
         for product_id, qty in stock.items():
             if qty <= 0:
                 continue
+            if not _is_allowed_product(product_id):
+                continue
+            added_any = True
             existing = next((ln for ln in line_data if ln["product_id"] == product_id), None)
             if existing:
                 existing["expected_qty"] = qty
@@ -6941,6 +7009,8 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
                     "note": "",
                 }
             )
+        if (cat_var.get() or "Усі").strip() != "Усі" and not added_any:
+            messagebox.showinfo("Інвентаризація", "У вибраній категорії немає залишків (qty>0).")
         refresh_lines()
 
     def _import_lines_csv() -> None:
@@ -6959,6 +7029,7 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
         if not file_path:
             return
         not_found_codes: list[str] = []
+        not_allowed_codes: list[str] = []
         bad_rows: list[str] = []
         updated_products: set[int] = set()
         new_products: set[int] = set()
@@ -7013,6 +7084,9 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
                 if not product:
                     not_found_codes.append(code)
                     continue
+                if not _is_allowed_product(int(product["id"])):
+                    not_allowed_codes.append(code)
+                    continue
                 existing = next((ln for ln in line_data if ln["product_id"] == product["id"]), None)
                 if existing:
                     existing["counted_qty"] += qty
@@ -7050,6 +7124,12 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
         if preview:
             summary += f"\nПроблемні коди: {preview}"
         messagebox.showinfo("Імпорт CSV", summary)
+        if not_allowed_codes:
+            skipped_preview = ", ".join(not_allowed_codes[:20])
+            messagebox.showinfo(
+                "Імпорт CSV",
+                f"Пропущено (поза категорією): {skipped_preview}",
+            )
 
     def _export_lines_csv() -> None:
         if not line_data:
@@ -7128,6 +7208,12 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
             scan_status.config(text="Товар не знайдено", foreground="#b91c1c")
             scan_entry.bell()
             return
+        if not _is_allowed_product(int(product["id"])):
+            scan_status.config(text="Товар поза вибраною категорією", foreground="#b91c1c")
+            scan_entry.bell()
+            scan_var.set("")
+            scan_entry.focus_set()
+            return
         qty = float(scan_qty_var.get() or 1)
         _add_line(product, counted_delta=qty)
         scan_var.set("")
@@ -7148,6 +7234,9 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
         refresh_lines()
 
     wh_combo.bind("<<ComboboxSelected>>", _on_warehouse_change)
+    cat_combo.bind("<<ComboboxSelected>>", lambda _event: _rebuild_allowed_products())
+    include_children_check.configure(command=_rebuild_allowed_products)
+    _rebuild_allowed_products()
 
     refresh_lines()
     if editable:

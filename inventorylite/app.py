@@ -1357,7 +1357,12 @@ class InventoryApp(tk.Tk):
     def add_counterparty(self) -> None:
         active_key, _, _ = self.get_active_counterparty_selection()
         default_types = {"suppliers": "supplier", "customers": "customer", "all": "other"}
-        values = counterparty_prompt(default_type=default_types.get(active_key))
+        try:
+            values = counterparty_prompt(default_type=default_types.get(active_key))
+        except Exception as exc:
+            logging.exception("Counterparty prompt error")
+            messagebox.showerror("Контрагенти", str(exc))
+            return
         if not values:
             return
         try:
@@ -6146,7 +6151,8 @@ def counterparty_prompt(initial=None, default_type: str | None = None):
     vars_ = [tk.StringVar(value=initial[i] if initial else "") for i in [0, 2, 3, 4, 5]]
 
     ttk.Label(dlg, text="Назва").grid(row=0, column=0, padx=6, pady=4, sticky="w")
-    ttk.Entry(dlg, textvariable=vars_[0], width=30).grid(row=0, column=1, padx=6, pady=4)
+    name_entry = ttk.Entry(dlg, textvariable=vars_[0], width=30)
+    name_entry.grid(row=0, column=1, padx=6, pady=4)
 
     ttk.Label(dlg, text="Тип").grid(row=1, column=0, padx=6, pady=4, sticky="w")
     type_var = tk.StringVar()
@@ -6189,8 +6195,7 @@ def counterparty_prompt(initial=None, default_type: str | None = None):
     ttk.Button(btns, text="Скасувати", command=on_cancel).pack(side=tk.LEFT, padx=4)
     dlg.bind("<Return>", lambda e: on_ok())
     dlg.bind("<Escape>", lambda e: on_cancel())
-    if editable:
-        scan_entry.focus_set()
+    dlg.after_idle(name_entry.focus_set)
     dlg.wait_window()
     return result
 

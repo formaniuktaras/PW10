@@ -1802,7 +1802,7 @@ class InventoryApp(tk.Tk):
         warehouses = db.list_warehouses(active_only=True)
         counterparties = db.list_counterparties()
         currencies = db.list_currencies()
-        result = document_prompt("purchase", products, counterparties, warehouses, [], currencies)
+        result = document_prompt("purchase", products, counterparties, warehouses, [], currencies, settings=self.settings)
         if not result:
             return
         info, lines = result
@@ -1834,7 +1834,17 @@ class InventoryApp(tk.Tk):
         warehouses = db.list_warehouses(active_only=False)
         counterparties = db.list_counterparties()
         currencies = db.list_currencies()
-        result = document_prompt("purchase", products, counterparties, warehouses, [], currencies, doc=doc, lines=lines)
+        result = document_prompt(
+            "purchase",
+            products,
+            counterparties,
+            warehouses,
+            [],
+            currencies,
+            doc=doc,
+            lines=lines,
+            settings=self.settings,
+        )
         if not result:
             return
         info, new_lines = result
@@ -2694,7 +2704,7 @@ class InventoryApp(tk.Tk):
         channels = db.list_channels(active_only=True)
         counterparties = db.list_counterparties()
         currencies = db.list_currencies()
-        result = document_prompt("sale", products, counterparties, warehouses, channels, currencies)
+        result = document_prompt("sale", products, counterparties, warehouses, channels, currencies, settings=self.settings)
         if not result:
             return
         info, lines = result
@@ -2728,7 +2738,17 @@ class InventoryApp(tk.Tk):
         channels = db.list_channels(active_only=False)
         counterparties = db.list_counterparties()
         currencies = db.list_currencies()
-        result = document_prompt("sale", products, counterparties, warehouses, channels, currencies, doc=doc, lines=lines)
+        result = document_prompt(
+            "sale",
+            products,
+            counterparties,
+            warehouses,
+            channels,
+            currencies,
+            doc=doc,
+            lines=lines,
+            settings=self.settings,
+        )
         if not result:
             return
         info, new_lines = result
@@ -5385,6 +5405,8 @@ def product_prompt(brands, categories, title: str, initial=None, settings: Setti
     ttk.Button(btns, text="Скасувати", command=on_cancel).pack(side=tk.LEFT, padx=4)
     dlg.bind("<Return>", lambda e: on_ok())
     dlg.bind("<Escape>", lambda e: on_cancel())
+    if editable:
+        scan_entry.focus_set()
     dlg.wait_window()
     return result
 
@@ -7179,7 +7201,17 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
     return result["info"], result["lines"], result["post_now"]
 
 
-def document_prompt(doc_type: str, products, counterparties, warehouses, channels, currencies, doc=None, lines=None):
+def document_prompt(
+    doc_type: str,
+    products,
+    counterparties,
+    warehouses,
+    channels,
+    currencies,
+    doc=None,
+    lines=None,
+    settings: Settings | None = None,
+):
     dlg = tk.Toplevel()
     dlg.title("Документ")
     dlg.grab_set()
@@ -7265,6 +7297,47 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
         ttk.Entry(content, textvariable=order_expense_var, width=20).grid(row=row_idx, column=1, padx=6, pady=4, sticky="w")
         row_idx += 1
 
+    scan_frame = ttk.LabelFrame(content, text="Сканування")
+    scan_frame.grid(row=row_idx, column=0, columnspan=2, padx=6, pady=6, sticky="ew")
+    scan_frame.columnconfigure(1, weight=1)
+
+    ttk.Label(scan_frame, text="Скан-код").grid(row=0, column=0, padx=6, pady=4, sticky="e")
+    scan_var = tk.StringVar()
+    scan_entry = ttk.Entry(scan_frame, textvariable=scan_var, width=30, state="normal" if editable else "disabled")
+    scan_entry.grid(row=0, column=1, padx=6, pady=4, sticky="w")
+    ttk.Label(scan_frame, text="К-сть при скані").grid(row=0, column=2, padx=6, pady=4, sticky="e")
+    scan_qty_var = tk.IntVar(value=1)
+    scan_qty_spin = ttk.Spinbox(
+        scan_frame,
+        from_=1,
+        to=999,
+        textvariable=scan_qty_var,
+        width=6,
+        state="normal" if editable else "disabled",
+    )
+    scan_qty_spin.grid(row=0, column=3, padx=6, pady=4, sticky="w")
+    scan_plus_one_var = tk.BooleanVar(value=False)
+    scan_plus_one = ttk.Checkbutton(
+        scan_frame,
+        text="Кожен скан = +1",
+        variable=scan_plus_one_var,
+        state="normal" if editable else "disabled",
+    )
+    scan_plus_one.grid(row=0, column=4, padx=6, pady=4, sticky="w")
+    scan_status = ttk.Label(scan_frame, text="")
+    scan_status.grid(row=1, column=0, columnspan=5, padx=6, pady=(0, 4), sticky="w")
+
+    def _apply_scan_mode() -> None:
+        if scan_plus_one_var.get():
+            scan_qty_var.set(1)
+            scan_qty_spin.config(state="disabled")
+        else:
+            scan_qty_spin.config(state="normal" if editable else "disabled")
+
+    scan_plus_one.config(command=_apply_scan_mode)
+    _apply_scan_mode()
+
+    row_idx += 1
     ttk.Label(content, text="Рядки").grid(row=row_idx, column=0, padx=6, pady=4, sticky="ne")
     line_frame = ttk.Frame(content)
     line_frame.grid(row=row_idx, column=1, padx=6, pady=4, sticky="nsew")
@@ -7424,6 +7497,89 @@ def document_prompt(doc_type: str, products, counterparties, warehouses, channel
                     f"{ln['amount']:.2f}",
                 ),
             )
+
+    def _scan_get_counterparty_id() -> Optional[int]:
+        cp_name = cp_var.get()
+        if not cp_name or cp_name == "-":
+            return None
+        match = next((c for c in filtered_counterparties if c["name"] == cp_name), None)
+        return match["id"] if match else None
+
+    def _scan_resolve_product(code: str) -> Optional[sqlite3.Row]:
+        prefix = _sanitize_barcode_prefix((settings.get("defaults", "product", "barcode_prefix") if settings else "") or "")
+        if doc_type == "purchase":
+            counterparty_id = _scan_get_counterparty_id()
+            if counterparty_id:
+                product = db.get_product_by_supplier_code(counterparty_id, code)
+                if product:
+                    return product
+        product = db.find_product_by_scan_code(code, barcode_prefix=prefix)
+        if product:
+            return product
+        return db.find_product_by_sku_or_name(None, None, supplier_sku=code)
+
+    def _scan_add_line(product_row: sqlite3.Row, qty_delta: float) -> None:
+        for idx, ln in enumerate(line_data):
+            if ln["product_id"] == product_row["id"]:
+                ln["quantity"] += qty_delta
+                ln["amount"] = ln["quantity"] * ln["price"]
+                refresh_lines()
+                tree.selection_set(str(idx))
+                tree.focus(str(idx))
+                tree.see(str(idx))
+                return
+        try:
+            price0 = float(price_var.get() or 0)
+        except ValueError:
+            price0 = 0.0
+        try:
+            exp0 = float(expense_var.get() or 0)
+        except ValueError:
+            exp0 = 0.0
+        product_name = f"{product_row['name']} ({product_row['sku']})"
+        line_data.append(
+            {
+                "product_id": product_row["id"],
+                "product_name": product_name,
+                "quantity": qty_delta,
+                "price": price0,
+                "expense": exp0,
+                "amount": qty_delta * price0,
+            }
+        )
+        refresh_lines()
+        idx = len(line_data) - 1
+        tree.selection_set(str(idx))
+        tree.focus(str(idx))
+        tree.see(str(idx))
+
+    def _on_scan_commit(event=None):
+        if not editable:
+            return "break"
+        code = scan_var.get().strip()
+        if not code:
+            return "break"
+        if scan_plus_one_var.get():
+            qty = 1.0
+        else:
+            try:
+                qty = float(scan_qty_var.get() or 1)
+            except (TypeError, ValueError):
+                qty = 1.0
+        product = _scan_resolve_product(code)
+        if not product:
+            scan_status.config(text="Товар не знайдено", foreground="#b91c1c")
+            scan_entry.bell()
+            scan_entry.focus_set()
+            return "break"
+        _scan_add_line(product, qty)
+        scan_var.set("")
+        scan_status.config(text=f"OK: {product['sku']} — {product['name']} (+{qty:g})", foreground="#15803d")
+        scan_entry.focus_set()
+        return "break"
+
+    scan_entry.bind("<Return>", _on_scan_commit)
+    scan_entry.bind("<KP_Enter>", _on_scan_commit)
 
     def on_select(event=None):
         selected_idx.clear()

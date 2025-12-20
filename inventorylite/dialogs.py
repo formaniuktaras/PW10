@@ -1,27 +1,12 @@
 from __future__ import annotations
 
-import re
 import tkinter as tk
 from tkinter import ttk, messagebox
 from typing import Optional
 
 import db
+from helpers import _find_index_by_name, _sanitize_barcode_prefix
 from utils import Settings
-
-
-def _find_index_by_name(items: list[str], target: str | None) -> int | None:
-    if not target:
-        return None
-    target_lower = target.lower()
-    return next((i for i, name in enumerate(items) if str(name).lower() == target_lower), None)
-
-
-def _sanitize_barcode_prefix(prefix: str) -> str:
-    cleaned = (prefix or "").strip()
-    if not cleaned:
-        return ""
-    return re.sub(r"\s+", "-", cleaned)
-
 
 def product_prompt(brands, categories, title: str, initial=None, settings: Settings | None = None):
     base_initial = {

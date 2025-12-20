@@ -54,6 +54,47 @@ from utils import (
 from ui_components import DatePicker, TableFrame, simple_prompt
 
 
+def _parse_num(text: str) -> float | None:
+    if text is None:
+        return None
+    s = str(text).strip().replace(" ", "").replace(",", ".")
+    if not s:
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _read_rate_two_way(cur: str, base: str, v_direct: str, v_inverse: str) -> float:
+    """
+    Returns canonical rate: 1 cur = rate base
+    Accepts either:
+      direct  (1 cur = X base)
+      inverse (1 base = X cur) -> rate = 1/X
+    """
+    a = _parse_num(v_direct)  # 1 cur = a base
+    b = _parse_num(v_inverse)  # 1 base = b cur
+    if a is None and b is None:
+        raise ValueError("Курс не вказано")
+    if a is not None and a <= 0:
+        raise ValueError("Курс має бути більшим за 0")
+    if b is not None and b <= 0:
+        raise ValueError("Курс має бути більшим за 0")
+
+    if a is None:
+        return 1.0 / b
+    if b is None:
+        return a
+
+    # Якщо введено обидва — перевір узгодженість (інакше помилка)
+    inv = 1.0 / b
+    # допустимо 0.5% різниці через округлення
+    if a == 0 or abs(a - inv) / a > 0.005:
+        raise ValueError("Курси не узгоджуються (перевір обидва поля)")
+    return a
+
+
 def ensure_rate_for_date(currency_code: str, rate_date: str) -> float:
     currency_code = currency_code.strip().upper()
     base_currency = get_base_currency_code()
@@ -68,24 +109,29 @@ def ensure_rate_for_date(currency_code: str, rate_date: str) -> float:
     except Exception:
         suggestion = None
     while True:
-        defaults = [f"{suggestion:.4f}" if suggestion else ""]
+        if suggestion:
+            direct_default = f"{suggestion:.6f}"
+            inverse_default = f"{(1.0 / suggestion):.6f}"
+        else:
+            direct_default = ""
+            inverse_default = ""
         values = simple_prompt(
             "Курс валюти",
-            [f"Курс {currency_code} -> {base_currency} на {rate_date}"],
-            defaults,
+            [
+                f"1 {currency_code} = ? {base_currency}",
+                f"1 {base_currency} = ? {currency_code}",
+            ],
+            [direct_default, inverse_default],
         )
         if not values:
             raise ValueError("Курс не вказано")
         try:
-            rate = float(values[0])
-        except ValueError:
-            messagebox.showerror("Курс", "Введіть числовий курс")
+            rate = _read_rate_two_way(currency_code, base_currency, values[0], values[1])
+            db.add_currency_rate(currency_code, rate_date, rate)
+            return rate
+        except ValueError as exc:
+            messagebox.showerror("Курс", str(exc))
             continue
-        if rate <= 0:
-            messagebox.showerror("Курс", "Курс має бути більшим за 0")
-            continue
-        db.add_currency_rate(currency_code, rate_date, rate)
-        return rate
 
 
 class InventoryApp(tk.Tk):
@@ -1673,12 +1719,17 @@ class InventoryApp(tk.Tk):
         if not code:
             show_error("Курси", "Оберіть валюту")
             return
-        defaults = [datetime.now().strftime("%Y-%m-%d"), "1"]
-        values = simple_prompt("Новий курс", ["Дата", "Курс до базової валюти"], defaults)
+        base = get_base_currency_code()
+        defaults = [datetime.now().strftime("%Y-%m-%d"), "1", ""]
+        values = simple_prompt(
+            "Новий курс",
+            ["Дата", f"1 {code} = ? {base}", f"1 {base} = ? {code}"],
+            defaults,
+        )
         if not values:
             return
         try:
-            rate = float(values[1])
+            rate = _read_rate_two_way(code, base, values[1], values[2])
             db.add_currency_rate(code, values[0], rate)
             self.refresh_rates()
         except Exception as exc:
@@ -1694,15 +1745,18 @@ class InventoryApp(tk.Tk):
         if not rates:
             return
         current = rates[0]
+        base = get_base_currency_code()
+        direct_default = f"{current['rate']:.6f}"
+        inverse_default = f"{(1.0 / current['rate']):.6f}" if current["rate"] > 0 else ""
         values = simple_prompt(
             "Змінити курс",
-            ["Дата", "Курс до базової валюти"],
-            [current["rate_date"], f"{current['rate']:.4f}"],
+            ["Дата", f"1 {code} = ? {base}", f"1 {base} = ? {code}"],
+            [current["rate_date"], direct_default, inverse_default],
         )
         if not values:
             return
         try:
-            rate = float(values[1])
+            rate = _read_rate_two_way(code, base, values[1], values[2])
             db.update_currency_rate(rate_id, values[0], rate)
             self.refresh_rates()
         except Exception as exc:

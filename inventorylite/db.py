@@ -23,8 +23,8 @@ from pathlib import Path
 from statistics import mean, pstdev
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-import utils
-from utils import get_db_path
+from inventorylite import utils
+from inventorylite.utils import get_db_path
 
 
 def _strip_weird(value: str | None) -> str:

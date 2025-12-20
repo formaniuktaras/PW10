@@ -1,0 +1,1 @@
+"""InventoryLite package."""

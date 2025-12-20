@@ -10,10 +10,10 @@ from typing import Any
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-import db
-import labels
-from ui_components import simple_prompt
-from utils import open_file, show_error
+from inventorylite import db
+from inventorylite import labels
+from inventorylite.ui_components import simple_prompt
+from inventorylite.utils import open_file, show_error
 
 
 DEFAULT_TEMPLATE = {

@@ -6,10 +6,10 @@ from datetime import datetime
 from tkinter import ttk, messagebox
 from typing import Optional
 
-import db
-from helpers import _read_rate_two_way
-from ui_components import simple_prompt
-from utils import Settings, get_base_currency_code
+from inventorylite import db
+from inventorylite.helpers import _read_rate_two_way
+from inventorylite.ui_components import simple_prompt
+from inventorylite.utils import Settings, get_base_currency_code
 
 
 def ensure_rate_for_date(currency_code: str, rate_date: str) -> float:

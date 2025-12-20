@@ -34,7 +34,7 @@ if exist ".\assets\fonts\DejaVuSans.ttf" (
     )
 )
 
-pyinstaller --onefile --noconsole --name InventoryLite --icon %ICON% %FONT_ARGS% app.py
+pyinstaller --onefile --noconsole --name InventoryLite --icon %ICON% %FONT_ARGS% app.py --collect-submodules inventorylite
 
 if exist dist\InventoryLite.exe (
     echo Build complete: %CD%\dist\InventoryLite.exe

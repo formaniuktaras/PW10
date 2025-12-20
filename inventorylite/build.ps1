@@ -33,7 +33,7 @@ if (Test-Path "./assets/fonts/DejaVuSans.ttf") {
     }
 }
 
-$cmd = "pyinstaller --onefile --noconsole --name InventoryLite --icon $iconPath $fontArgs app.py"
+$cmd = "pyinstaller --onefile --noconsole --name InventoryLite --icon $iconPath $fontArgs app.py --collect-submodules inventorylite"
 Write-Host "Running: $cmd"
 Invoke-Expression $cmd
 

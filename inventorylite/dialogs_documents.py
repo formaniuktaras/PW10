@@ -1,0 +1,850 @@
+from __future__ import annotations
+
+import sqlite3
+import tkinter as tk
+from datetime import datetime
+from tkinter import ttk, messagebox
+from typing import Optional
+
+import db
+from helpers import _read_rate_two_way
+from ui_components import simple_prompt
+from utils import Settings, get_base_currency_code
+
+
+def ensure_rate_for_date(currency_code: str, rate_date: str) -> float:
+    currency_code = currency_code.strip().upper()
+    base_currency = get_base_currency_code()
+    if not currency_code or currency_code == base_currency:
+        return 1.0
+    existing = db.rate_on_date(currency_code, rate_date)
+    if existing is not None:
+        return existing
+    suggestion: float | None = None
+    try:
+        suggestion = db.rate_on_or_before(currency_code, rate_date)
+    except Exception:
+        suggestion = None
+    while True:
+        if suggestion:
+            direct_default = f"{suggestion:.6f}"
+            inverse_default = f"{(1.0 / suggestion):.6f}"
+        else:
+            direct_default = ""
+            inverse_default = ""
+        values = simple_prompt(
+            "Курс валюти",
+            [
+                f"1 {currency_code} = ? {base_currency}",
+                f"1 {base_currency} = ? {currency_code}",
+            ],
+            [direct_default, inverse_default],
+        )
+        if not values:
+            raise ValueError("Курс не вказано")
+        try:
+            rate = _read_rate_two_way(currency_code, base_currency, values[0], values[1])
+            db.add_currency_rate(currency_code, rate_date, rate)
+            return rate
+        except ValueError as exc:
+            messagebox.showerror("Курс", str(exc))
+            continue
+
+
+def document_prompt(
+    doc_type: str,
+    products,
+    counterparties,
+    warehouses,
+    channels,
+    currencies,
+    doc=None,
+    lines=None,
+    settings: Settings | None = None,
+):
+    dlg = tk.Toplevel()
+    dlg.title("Документ")
+    dlg.grab_set()
+    editable = not doc or doc["status"] == "draft"
+
+    if doc and isinstance(doc, sqlite3.Row):
+        doc = dict(doc)
+
+    dlg.columnconfigure(0, weight=1)
+    dlg.rowconfigure(0, weight=1)
+    content = ttk.Frame(dlg, padding=10)
+    content.grid(row=0, column=0, sticky="nsew")
+    content.columnconfigure(1, weight=1)
+
+    row_idx = 0
+    ttk.Label(content, text="Тип").grid(row=row_idx, column=0, padx=6, pady=4, sticky="e")
+    doc_type_label = "Закупівля" if doc_type == "purchase" else "Продаж"
+    ttk.Label(content, text=doc_type_label).grid(row=row_idx, column=1, padx=6, pady=4, sticky="w")
+
+    row_idx += 1
+    ttk.Label(content, text="Дата (YYYY-MM-DD)").grid(row=row_idx, column=0, padx=6, pady=4, sticky="e")
+    date_var = tk.StringVar(value=doc["doc_date"] if doc else datetime.now().strftime("%Y-%m-%d"))
+    ttk.Entry(content, textvariable=date_var, width=15, state="normal" if editable else "disabled").grid(row=row_idx, column=1, padx=6, pady=4, sticky="w")
+
+    row_idx += 1
+    ttk.Label(content, text="Валюта").grid(row=row_idx, column=0, padx=6, pady=4, sticky="e")
+    curr_var = tk.StringVar(
+        value=doc["currency_code"]
+        if doc
+        else (currencies[0]["code"] if currencies else get_base_currency_code())
+    )
+    curr_codes = [c["code"] for c in currencies] if currencies else [get_base_currency_code()]
+    curr_combo = ttk.Combobox(content, textvariable=curr_var, values=curr_codes, state="readonly")
+    if not editable:
+        curr_combo.state(["disabled"])
+    curr_combo.grid(row=row_idx, column=1, padx=6, pady=4, sticky="w")
+    last_currency = curr_var.get()
+
+    row_idx += 1
+    ttk.Label(content, text="Курс до базової").grid(row=row_idx, column=0, padx=6, pady=4, sticky="e")
+    try:
+        default_rate = doc["exchange_rate"] if doc else ensure_rate_for_date(curr_var.get(), date_var.get())
+    except Exception:
+        default_rate = doc["exchange_rate"] if doc else 1.0
+    rate_var = tk.StringVar(value=f"{default_rate:.4f}")
+    rate_entry = ttk.Entry(content, textvariable=rate_var, width=12, state="normal" if editable else "disabled")
+    rate_entry.grid(row=row_idx, column=1, padx=6, pady=4, sticky="w")
+
+    row_idx += 1
+    ttk.Label(content, text="Склад").grid(row=row_idx, column=0, padx=6, pady=4, sticky="e")
+    wh_var = tk.StringVar()
+    wh_names = [w["name"] for w in warehouses]
+    wh_combo = ttk.Combobox(content, textvariable=wh_var, values=wh_names, state="readonly")
+    wh_combo.grid(row=row_idx, column=1, padx=6, pady=4, sticky="w")
+
+    row_idx += 1
+    ch_var = tk.StringVar()
+    ch_combo = None
+    if doc_type == "sale":
+        ttk.Label(content, text="Канал").grid(row=row_idx, column=0, padx=6, pady=4, sticky="e")
+        ch_names = [c["name"] for c in channels]
+        ch_combo = ttk.Combobox(content, textvariable=ch_var, values=ch_names, state="readonly")
+        ch_combo.grid(row=row_idx, column=1, padx=6, pady=4, sticky="w")
+        row_idx += 1
+
+    ttk.Label(content, text="Контрагент").grid(row=row_idx, column=0, padx=6, pady=4, sticky="e")
+    allowed_types = {"purchase": {"supplier", "both", "other"}, "sale": {"customer", "both", "other"}}[doc_type]
+    filtered_counterparties = [c for c in counterparties if c["type"] in allowed_types]
+    cp_names = ["-"] + [c["name"] for c in filtered_counterparties]
+    cp_var = tk.StringVar()
+    cp_combo = ttk.Combobox(content, textvariable=cp_var, values=cp_names, state="readonly", width=25)
+    cp_combo.grid(row=row_idx, column=1, padx=6, pady=4, sticky="w")
+    row_idx += 1
+
+    ttk.Label(content, text="Коментар").grid(row=row_idx, column=0, padx=6, pady=4, sticky="e")
+    comment_var = tk.StringVar(value=doc["comment"] if doc else "")
+    ttk.Entry(content, textvariable=comment_var, width=40).grid(row=row_idx, column=1, padx=6, pady=4, sticky="ew")
+
+    row_idx += 1
+    order_expense_var = tk.StringVar(value=f"{float(doc.get('order_expense_doc', 0.0)):.2f}" if doc else "0")
+    if doc_type == "sale":
+        ttk.Label(content, text="Витрати замовлення").grid(row=row_idx, column=0, padx=6, pady=4, sticky="e")
+        ttk.Entry(content, textvariable=order_expense_var, width=20).grid(row=row_idx, column=1, padx=6, pady=4, sticky="w")
+        row_idx += 1
+
+    scan_frame = ttk.LabelFrame(content, text="Сканування")
+    scan_frame.grid(row=row_idx, column=0, columnspan=2, padx=6, pady=6, sticky="ew")
+    scan_frame.columnconfigure(1, weight=1)
+
+    ttk.Label(scan_frame, text="Скан-код").grid(row=0, column=0, padx=6, pady=4, sticky="e")
+    scan_var = tk.StringVar()
+    scan_entry = ttk.Entry(scan_frame, textvariable=scan_var, width=30, state="normal" if editable else "disabled")
+    scan_entry.grid(row=0, column=1, padx=6, pady=4, sticky="w")
+    ttk.Label(scan_frame, text="К-сть при скані").grid(row=0, column=2, padx=6, pady=4, sticky="e")
+    scan_qty_var = tk.IntVar(value=1)
+    scan_qty_spin = ttk.Spinbox(
+        scan_frame,
+        from_=1,
+        to=999,
+        textvariable=scan_qty_var,
+        width=6,
+        state="normal" if editable else "disabled",
+    )
+    scan_qty_spin.grid(row=0, column=3, padx=6, pady=4, sticky="w")
+    scan_plus_one_var = tk.BooleanVar(value=False)
+    scan_plus_one = ttk.Checkbutton(
+        scan_frame,
+        text="Кожен скан = +1",
+        variable=scan_plus_one_var,
+        state="normal" if editable else "disabled",
+    )
+    scan_plus_one.grid(row=0, column=4, padx=6, pady=4, sticky="w")
+    scan_use_avg_cost_var = tk.BooleanVar(value=True)
+    ttk.Checkbutton(
+        scan_frame,
+        text="Ціна зі середньої собівартості",
+        variable=scan_use_avg_cost_var,
+    ).grid(row=1, column=1, padx=6, pady=(0, 4), sticky="w")
+    scan_status = ttk.Label(scan_frame, text="")
+    scan_status.grid(row=2, column=0, columnspan=5, padx=6, pady=(0, 4), sticky="w")
+
+    def _apply_scan_mode() -> None:
+        if scan_plus_one_var.get():
+            scan_qty_var.set(1)
+            scan_qty_spin.config(state="disabled")
+        else:
+            scan_qty_spin.config(state="normal" if editable else "disabled")
+
+    scan_plus_one.config(command=_apply_scan_mode)
+    _apply_scan_mode()
+
+    row_idx += 1
+    ttk.Label(content, text="Рядки").grid(row=row_idx, column=0, padx=6, pady=4, sticky="ne")
+    line_frame = ttk.Frame(content)
+    line_frame.grid(row=row_idx, column=1, padx=6, pady=4, sticky="nsew")
+    line_frame.grid_columnconfigure(0, weight=1)
+    content.rowconfigure(row_idx, weight=1)
+
+    columns = ["product", "quantity", "price", "expense", "amount"]
+    tree = ttk.Treeview(line_frame, columns=columns, show="headings", height=8)
+    headings = {
+        "product": ("Товар", 200),
+        "quantity": ("Кількість", 90),
+        "price": ("Ціна", 90),
+        "expense": ("Витрата/од.", 110),
+        "amount": ("Сума", 90),
+    }
+    for col, (title, width) in headings.items():
+        tree.heading(col, text=title)
+        tree.column(col, width=width, anchor="w")
+    tree.grid(row=0, column=0, sticky="nsew")
+    yscroll = ttk.Scrollbar(line_frame, orient="vertical", command=tree.yview)
+    tree.configure(yscrollcommand=yscroll.set)
+    yscroll.grid(row=0, column=1, sticky="ns")
+    line_frame.grid_rowconfigure(0, weight=1)
+
+    def refresh_currency_ui() -> None:
+        price_label.config(text=f"Ціна ({curr_var.get()})")
+        tree.heading("price", text=f"Ціна ({curr_var.get()})")
+        expense_label.config(text=f"Витрата/од. ({curr_var.get()})")
+        tree.heading("expense", text=f"Витрата/од. ({curr_var.get()})")
+        tree.heading("amount", text=f"Сума ({curr_var.get()})")
+
+    def on_currency_change(event=None):
+        nonlocal last_currency
+        if editable:
+            try:
+                rate_val = ensure_rate_for_date(curr_var.get(), date_var.get())
+            except ValueError as exc:
+                messagebox.showerror("Курс", str(exc))
+                curr_var.set(last_currency)
+                return
+            rate_var.set(f"{rate_val:.4f}")
+            last_currency = curr_var.get()
+        refresh_currency_ui()
+
+    curr_combo.bind("<<ComboboxSelected>>", on_currency_change)
+
+    product_lookup = {f"{p['name']} ({p['sku']})": p["id"] for p in products}
+    products_by_id = {p["id"]: f"{p['name']} ({p['sku']})" for p in products}
+    product_names = list(product_lookup.keys())
+
+    row_idx += 1
+    entry_frame = ttk.Frame(content)
+    entry_frame.grid(row=row_idx, column=0, columnspan=2, padx=6, pady=4, sticky="ew")
+    entry_frame.columnconfigure(1, weight=1)
+    ttk.Label(entry_frame, text="Товар").grid(row=0, column=0, padx=4, pady=2, sticky="e")
+    product_var = tk.StringVar()
+    product_combo_state = "normal" if editable else "readonly"
+    product_combo = ttk.Combobox(entry_frame, textvariable=product_var, values=product_names, state=product_combo_state, width=40)
+    product_combo.grid(row=0, column=1, padx=4, pady=2, sticky="ew")
+    if product_lookup:
+        product_combo.current(0)
+
+    def filter_products(event=None):
+        if not editable:
+            return
+        text = product_var.get().lower()
+        matches = [name for name in product_names if text in name.lower()]
+        product_combo["values"] = matches if matches else product_names
+
+    product_combo.bind("<KeyRelease>", filter_products)
+
+    ttk.Label(entry_frame, text="Кількість").grid(row=0, column=2, padx=4, pady=2, sticky="e")
+    qty_var = tk.StringVar(value="1")
+    ttk.Entry(entry_frame, textvariable=qty_var, width=10).grid(row=0, column=3, padx=4, pady=2, sticky="w")
+
+    price_label = ttk.Label(entry_frame, text="Ціна")
+    price_label.grid(row=0, column=4, padx=4, pady=2, sticky="e")
+    price_var = tk.StringVar(value="0")
+    ttk.Entry(entry_frame, textvariable=price_var, width=10).grid(row=0, column=5, padx=4, pady=2, sticky="w")
+
+    expense_label = ttk.Label(entry_frame, text="Витрата/од.")
+    expense_label.grid(row=0, column=6, padx=4, pady=2, sticky="e")
+    expense_var = tk.StringVar(value="0")
+    ttk.Entry(entry_frame, textvariable=expense_var, width=10).grid(row=0, column=7, padx=4, pady=2, sticky="w")
+
+    line_data = []
+    if lines:
+        for ln in lines:
+            price_field = "purchase_price" if doc_type == "purchase" else "sale_price"
+            expense_value = 0.0
+            if doc_type == "sale" and "unit_expense_doc" in ln.keys():
+                try:
+                    expense_value = float(ln["unit_expense_doc"])
+                except Exception:
+                    expense_value = 0.0
+            line_data.append(
+                {
+                    "product_id": ln["product_id"],
+                    "product_name": ln["product_name"],
+                    "quantity": float(ln["quantity"]),
+                    "price": float(ln[price_field]),
+                    "expense": expense_value,
+                    "amount": float(ln["quantity"]) * float(ln[price_field]),
+                }
+            )
+
+    if doc:
+        if doc["warehouse_id"]:
+            try:
+                wh_combo.current(next(i for i, w in enumerate(warehouses) if w["id"] == doc["warehouse_id"]))
+            except StopIteration:
+                wh_combo.set(warehouses[0]["name"] if warehouses else "")
+        if curr_codes:
+            try:
+                curr_combo.current(curr_codes.index(doc.get("currency_code", curr_codes[0])))
+            except ValueError:
+                curr_combo.current(0)
+        if doc_type == "sale" and ch_combo:
+            if doc["channel"]:
+                try:
+                    ch_combo.current(next(i for i, c in enumerate(channels) if c["name"] == doc["channel"]))
+                except StopIteration:
+                    ch_combo.set(channels[0]["name"] if channels else "")
+            elif channels:
+                ch_combo.current(0)
+        if doc.get("supplier_id"):
+            target = next((c["name"] for c in filtered_counterparties if c["id"] == doc.get("supplier_id")), "-")
+            cp_var.set(target)
+        if doc.get("customer_id"):
+            target = next((c["name"] for c in filtered_counterparties if c["id"] == doc.get("customer_id")), "-")
+            cp_var.set(target)
+    else:
+        if warehouses:
+            wh_combo.current(0)
+        if ch_combo and channels:
+            ch_combo.current(0)
+        if curr_codes:
+            curr_combo.current(0)
+        cp_var.set("-")
+
+    selected_idx: list[int] = []
+
+    refresh_currency_ui()
+
+    def refresh_lines():
+        tree.delete(*tree.get_children())
+        for idx, ln in enumerate(line_data):
+            tree.insert(
+                "",
+                "end",
+                iid=str(idx),
+                values=(
+                    ln["product_name"],
+                    f"{ln['quantity']:.2f}",
+                    f"{ln['price']:.2f}",
+                    f"{ln.get('expense', 0.0):.2f}",
+                    f"{ln['amount']:.2f}",
+                ),
+            )
+
+    def _scan_get_counterparty_id() -> Optional[int]:
+        cp_name = cp_var.get()
+        if not cp_name or cp_name == "-":
+            return None
+        match = next((c for c in filtered_counterparties if c["name"] == cp_name), None)
+        return match["id"] if match else None
+
+    def _current_warehouse_id() -> int | None:
+        name = (wh_var.get() or "").strip()
+        w = next((x for x in warehouses if x["name"] == name), None)
+        return int(w["id"]) if w else None
+
+    def _scan_resolve_product(code: str) -> Optional[sqlite3.Row]:
+        if settings is None:
+            prefix = ""
+        elif isinstance(settings, Settings):
+            prefix = settings.get("defaults", "product", "barcode_prefix") or ""
+        else:
+            prefix = (settings.get("defaults", {}).get("product", {}).get("barcode_prefix") or "")
+        prefix = prefix.strip()
+        if doc_type == "purchase":
+            counterparty_id = _scan_get_counterparty_id()
+            if counterparty_id:
+                product = db.get_product_by_supplier_code(counterparty_id, code)
+                if product:
+                    return product
+        product = db.find_product_by_scan_code(code, barcode_prefix=prefix)
+        if product:
+            return product
+        product = db.find_product_by_sku_or_name(None, None, supplier_sku=code)
+        if product:
+            return product
+        supplier_lookup = getattr(db, "get_product_by_supplier_sku", None)
+        if callable(supplier_lookup):
+            return supplier_lookup(code)
+        return None
+
+    def _scan_add_line(product_row: sqlite3.Row, qty_delta: float) -> None:
+        for idx, ln in enumerate(line_data):
+            if ln["product_id"] == product_row["id"]:
+                ln["quantity"] += qty_delta
+                ln["amount"] = ln["quantity"] * ln["price"]
+                refresh_lines()
+                tree.selection_set(str(idx))
+                tree.focus(str(idx))
+                tree.see(str(idx))
+                return
+        price0 = 0.0
+        if scan_use_avg_cost_var.get():
+            wh_id = _current_warehouse_id()
+            if wh_id:
+                _, avg_cost = db.get_stock_balance(int(product_row["id"]), int(wh_id))
+                if doc_type == "sale":
+                    try:
+                        rate = float(rate_var.get() or 1)
+                    except ValueError:
+                        rate = 1.0
+                    if rate <= 0:
+                        rate = 1.0
+                    price0 = avg_cost / rate
+                else:
+                    price0 = avg_cost
+        if price0 <= 0:
+            try:
+                price0 = float(price_var.get() or 0)
+            except ValueError:
+                price0 = 0.0
+        try:
+            exp0 = float(expense_var.get() or 0)
+        except ValueError:
+            exp0 = 0.0
+        product_name = f"{product_row['name']} ({product_row['sku']})"
+        line_data.append(
+            {
+                "product_id": product_row["id"],
+                "product_name": product_name,
+                "quantity": qty_delta,
+                "price": price0,
+                "expense": exp0,
+                "amount": qty_delta * price0,
+            }
+        )
+        refresh_lines()
+        idx = len(line_data) - 1
+        tree.selection_set(str(idx))
+        tree.focus(str(idx))
+        tree.see(str(idx))
+
+    def _on_scan_commit(event=None):
+        if not editable:
+            return "break"
+        code = scan_var.get().strip()
+        if not code:
+            return "break"
+        try:
+            qty = 1 if scan_plus_one_var.get() else int(scan_qty_var.get() or 1)
+        except (TypeError, ValueError):
+            qty = 1
+        product = _scan_resolve_product(code)
+        if not product:
+            scan_status.config(text=f"Не знайдено: {code}", foreground="#b91c1c")
+            dlg.bell()
+            scan_entry.focus_set()
+            scan_var.set("")
+            return "break"
+        _scan_add_line(product, qty)
+        scan_var.set("")
+        scan_status.config(text=f"OK: {product['sku']} — {product['name']} (+{qty})", foreground="#15803d")
+        scan_entry.focus_set()
+        return "break"
+
+    scan_entry.bind("<Return>", _on_scan_commit)
+    scan_entry.bind("<KP_Enter>", _on_scan_commit)
+
+    def on_select(event=None):
+        selected_idx.clear()
+        sel = tree.selection()
+        if sel:
+            idx = int(sel[0])
+            selected_idx.append(idx)
+            ln = line_data[idx]
+            product_name = products_by_id.get(ln["product_id"], ln["product_name"])
+            product_var.set(product_name)
+            qty_var.set(str(ln["quantity"]))
+            price_var.set(str(ln["price"]))
+            expense_var.set(str(ln.get("expense", 0.0)))
+
+    tree.bind("<<TreeviewSelect>>", on_select)
+
+    def add_or_update_line():
+        if not editable:
+            return
+        try:
+            qty = float(qty_var.get())
+            price = float(price_var.get())
+            expense_value = float(expense_var.get() or 0)
+        except ValueError:
+            messagebox.showerror("Валідація", "Невірні числові значення")
+            return
+        if qty <= 0:
+            messagebox.showerror("Валідація", "Кількість повинна бути більшою за 0")
+            return
+        if expense_value < 0:
+            messagebox.showerror("Валідація", "Витрати не можуть бути від'ємними")
+            return
+        product_name = product_var.get().strip()
+        product_id = product_lookup.get(product_name)
+        if not product_id:
+            if not editable:
+                return
+            if not product_name:
+                messagebox.showerror("Валідація", "Введіть назву товару")
+                return
+            created = add_new_product(product_name)
+            if not created:
+                return
+            product_id, product_name = created
+        data = {
+            "product_id": product_id,
+            "product_name": product_name,
+            "quantity": qty,
+            "price": price,
+            "expense": expense_value,
+            "amount": qty * price,
+        }
+        if selected_idx:
+            line_data[selected_idx[0]] = data
+        else:
+            line_data.append(data)
+        refresh_lines()
+        selected_idx.clear()
+
+    def delete_line():
+        if not editable:
+            return
+        if not selected_idx:
+            return
+        line_data.pop(selected_idx[0])
+        selected_idx.clear()
+        refresh_lines()
+
+    def add_new_product(default_name: str = ""):
+        if not editable:
+            return None
+        brands = db.list_brands()
+        categories = [
+            {
+                **c,
+                "label": c.get("label") or ("    " * c.get("depth", 0) + c.get("name", "")),
+            }
+            for c in db.list_categories_tree()
+        ]
+        if not brands or not categories:
+            messagebox.showerror(
+                "Товари",
+                "Додайте принаймні один бренд і категорію у вкладці \"Товари\", щоб створювати нові позиції.",
+            )
+            return None
+
+        dlg_product = tk.Toplevel(dlg)
+        dlg_product.title("Новий товар")
+        dlg_product.grab_set()
+
+        ttk.Label(dlg_product, text="Артикул").grid(row=0, column=0, padx=6, pady=4, sticky="e")
+        sku_var = tk.StringVar(value=default_name)
+        ttk.Entry(dlg_product, textvariable=sku_var, width=30).grid(row=0, column=1, padx=6, pady=4, sticky="w")
+
+        ttk.Label(dlg_product, text="Назва").grid(row=1, column=0, padx=6, pady=4, sticky="e")
+        name_var = tk.StringVar(value=default_name)
+        ttk.Entry(dlg_product, textvariable=name_var, width=30).grid(row=1, column=1, padx=6, pady=4, sticky="w")
+
+        ttk.Label(dlg_product, text="Бренд").grid(row=2, column=0, padx=6, pady=4, sticky="e")
+        brand_var = tk.StringVar()
+        brand_combo = ttk.Combobox(
+            dlg_product,
+            textvariable=brand_var,
+            values=[b["name"] for b in brands],
+            state="readonly",
+            width=28,
+        )
+        brand_combo.grid(row=2, column=1, padx=6, pady=4, sticky="w")
+
+        preferred_brand = _find_index_by_name([b["name"] for b in brands], self.settings.get("defaults", "product", "brand"))
+        if preferred_brand is not None:
+            brand_combo.current(preferred_brand)
+        else:
+            brand_combo.current(0)
+
+        ttk.Label(dlg_product, text="Категорія").grid(row=3, column=0, padx=6, pady=4, sticky="e")
+        category_var = tk.StringVar()
+        category_combo = ttk.Combobox(
+            dlg_product,
+            textvariable=category_var,
+            values=[c["label"] for c in categories],
+            state="readonly",
+            width=28,
+        )
+        category_combo.grid(row=3, column=1, padx=6, pady=4, sticky="w")
+        default_category = self.settings.get("defaults", "product", "category") or ""
+        preferred_category = _find_index_by_name([c["label"] for c in categories], default_category)
+        if preferred_category is not None:
+            category_combo.current(preferred_category)
+        else:
+            category_combo.current(0)
+
+        default_unit = self.settings.get("defaults", "product", "unit") or "pcs"
+        ttk.Label(dlg_product, text="Одиниця").grid(row=4, column=0, padx=6, pady=4, sticky="e")
+        unit_var = tk.StringVar(value=default_unit)
+        ttk.Entry(dlg_product, textvariable=unit_var, width=30).grid(row=4, column=1, padx=6, pady=4, sticky="w")
+
+        result_new: tuple[int, str] | None = None
+
+        def on_save():
+            nonlocal result_new
+            sku = sku_var.get().strip()
+            name = name_var.get().strip()
+            unit = unit_var.get().strip() or "pcs"
+            if not sku or not name:
+                messagebox.showerror("Товари", "Введіть артикул і назву товару")
+                return
+            brand_idx = brand_combo.current()
+            cat_idx = category_combo.current()
+            try:
+                brand_id = brands[brand_idx]["id"]
+                category_id = categories[cat_idx]["id"]
+            except Exception:
+                messagebox.showerror("Товари", "Оберіть бренд та категорію")
+                return
+            try:
+                new_id = db.add_product(sku, name, brand_id, category_id, unit, True)
+            except Exception as exc:
+                messagebox.showerror("Товари", f"Не вдалося створити товар: {exc}")
+                return
+            product_full_name = f"{name} ({sku})"
+            product_lookup[product_full_name] = new_id
+            products_by_id[new_id] = product_full_name
+            product_names.append(product_full_name)
+            product_names.sort(key=str.lower)
+            product_combo["values"] = product_names
+            product_var.set(product_full_name)
+            result_new = (new_id, product_full_name)
+            dlg_product.destroy()
+
+        def on_cancel():
+            dlg_product.destroy()
+
+        btns_new = ttk.Frame(dlg_product)
+        btns_new.grid(row=5, column=0, columnspan=2, pady=8)
+        ttk.Button(btns_new, text="Зберегти", command=on_save).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns_new, text="Скасувати", command=on_cancel).pack(side=tk.LEFT, padx=4)
+        dlg_product.bind("<Return>", lambda e: on_save())
+        dlg_product.bind("<Escape>", lambda e: on_cancel())
+        dlg_product.wait_window()
+        return result_new
+
+    btn_line = ttk.Frame(entry_frame)
+    btn_line.grid(row=0, column=8, padx=6)
+    ttk.Button(btn_line, text="Новий товар", command=lambda: add_new_product(product_var.get()), state="normal" if editable else "disabled").pack(side=tk.LEFT, padx=4)
+    ttk.Button(btn_line, text="Додати/Оновити", command=add_or_update_line, state="normal" if editable else "disabled").pack(side=tk.LEFT)
+    ttk.Button(btn_line, text="Видалити", command=delete_line, state="normal" if editable else "disabled").pack(side=tk.LEFT, padx=4)
+
+    refresh_lines()
+
+    row_idx += 1
+
+    result = None
+
+    def on_ok():
+        nonlocal result
+        try:
+            datetime.fromisoformat(date_var.get())
+        except ValueError:
+            messagebox.showerror("Валідація", "Невірний формат дати (YYYY-MM-DD)")
+            return
+        if editable and not line_data:
+            messagebox.showerror("Валідація", "Додайте хоча б один рядок")
+            return
+        try:
+            rate = float(rate_var.get())
+        except ValueError:
+            messagebox.showerror("Валідація", "Невірний курс")
+            return
+        if rate <= 0:
+            messagebox.showerror("Валідація", "Курс має бути більшим за 0")
+            return
+        currency_code = curr_var.get().strip().upper()
+        order_expense = 0.0
+        if doc_type == "sale":
+            try:
+                order_expense = float(order_expense_var.get() or 0)
+            except ValueError:
+                messagebox.showerror("Валідація", "Невірна сума витрат замовлення")
+                return
+            if order_expense < 0:
+                messagebox.showerror("Валідація", "Витрати замовлення не можуть бути від'ємними")
+                return
+        cp_name = cp_var.get()
+        cp_id = None
+        if cp_name and cp_name != "-":
+            cp_id = next((c["id"] for c in filtered_counterparties if c["name"] == cp_name), None)
+        if currency_code != get_base_currency_code() and not db.rate_on_date(currency_code, date_var.get()):
+            db.add_currency_rate(currency_code, date_var.get(), rate)
+        try:
+            warehouse_id = warehouses[wh_combo.current()]["id"]
+        except Exception:
+            messagebox.showerror("Валідація", "Оберіть склад")
+            return
+        channel_name = ""
+        if doc_type == "sale":
+            channel_name = ch_var.get() if ch_var.get() else (channels[0]["name"] if channels else "")
+        info = {
+            "doc_type": doc_type,
+            "doc_date": date_var.get().strip(),
+            "counterparty_id": cp_id,
+            "warehouse_id": warehouse_id,
+            "channel": channel_name,
+            "comment": comment_var.get().strip(),
+            "currency": curr_var.get(),
+            "rate": rate,
+            "order_expense_doc": order_expense if doc_type == "sale" else 0.0,
+        }
+        if doc_type == "sale":
+            lines_to_save = [
+                (ln["product_id"], ln["quantity"], ln["price"], ln.get("expense", 0.0)) for ln in line_data
+            ]
+        else:
+            lines_to_save = [(ln["product_id"], ln["quantity"], ln["price"]) for ln in line_data]
+        result = (info, lines_to_save)
+        dlg.destroy()
+
+    def on_cancel():
+        dlg.destroy()
+
+    def _focus_scan(event=None):
+        if editable:
+            scan_entry.focus_set()
+            scan_entry.selection_range(0, tk.END)
+        return "break"
+
+    def _toggle_plus_one(event=None):
+        if editable:
+            scan_plus_one_var.set(not scan_plus_one_var.get())
+            _apply_scan_mode()
+            scan_entry.focus_set()
+        return "break"
+
+    btns = ttk.Frame(content)
+    btns.grid(row=row_idx, column=0, columnspan=2, pady=8, sticky="e")
+    ttk.Button(btns, text="OK", command=on_ok).pack(side=tk.LEFT, padx=4)
+    ttk.Button(btns, text="Скасувати", command=on_cancel).pack(side=tk.LEFT, padx=4)
+    dlg.bind("<Return>", lambda e: on_ok())
+    dlg.bind("<Control-Return>", lambda e: on_ok())
+    dlg.bind("<Control-KP_Enter>", lambda e: on_ok())
+    dlg.bind("<F8>", _focus_scan)
+    dlg.bind("<F9>", _toggle_plus_one)
+    dlg.bind("<Escape>", lambda e: on_cancel())
+    if editable:
+        dlg.after_idle(
+            lambda: (
+                scan_entry.focus_set(),
+                scan_entry.selection_range(0, tk.END),
+                scan_entry.icursor(tk.END),
+            )
+        )
+    dlg.wait_window()
+    return result
+
+
+def cash_prompt(counterparties, channels):
+    dlg = tk.Toplevel()
+    dlg.title("Рух коштів")
+    dlg.grab_set()
+
+    ttk.Label(dlg, text="Дата (YYYY-MM-DD)").grid(row=0, column=0, padx=6, pady=4, sticky="w")
+    date_var = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
+    ttk.Entry(dlg, textvariable=date_var, width=15).grid(row=0, column=1, padx=6, pady=4, sticky="w")
+
+    ttk.Label(dlg, text="Тип").grid(row=1, column=0, padx=6, pady=4, sticky="w")
+    type_var = tk.StringVar()
+    types = [
+        ("Оплата від клієнта", "sale_payment"),
+        ("Оплата постачальнику", "purchase_payment"),
+        ("Інший дохід", "other_income"),
+        ("Змінна витрата", "other_variable_expense"),
+        ("Постійна витрата", "fixed_expense"),
+    ]
+    type_combo = ttk.Combobox(dlg, textvariable=type_var, values=[t[0] for t in types], state="readonly")
+    type_combo.grid(row=1, column=1, padx=6, pady=4, sticky="w")
+    type_combo.current(0)
+
+    ttk.Label(dlg, text="Сума (+ вхід, - вихід)").grid(row=2, column=0, padx=6, pady=4, sticky="w")
+    amount_var = tk.StringVar(value="0")
+    ttk.Entry(dlg, textvariable=amount_var, width=15).grid(row=2, column=1, padx=6, pady=4, sticky="w")
+
+    ttk.Label(dlg, text="Контрагент").grid(row=3, column=0, padx=6, pady=4, sticky="w")
+    cp_var = tk.StringVar()
+    cp_names = ["-"] + [c["name"] for c in counterparties]
+    cp_combo = ttk.Combobox(dlg, textvariable=cp_var, values=cp_names, state="readonly", width=30)
+    cp_combo.grid(row=3, column=1, padx=6, pady=4, sticky="w")
+    cp_combo.current(0)
+
+    ttk.Label(dlg, text="Канал").grid(row=4, column=0, padx=6, pady=4, sticky="w")
+    ch_var = tk.StringVar()
+    ch_names = [c["name"] for c in channels]
+    ch_combo = ttk.Combobox(dlg, textvariable=ch_var, values=ch_names, state="readonly", width=20)
+    ch_combo.grid(row=4, column=1, padx=6, pady=4, sticky="w")
+    if channels:
+        ch_combo.current(0)
+
+    ttk.Label(dlg, text="Коментар").grid(row=5, column=0, padx=6, pady=4, sticky="w")
+    comment_var = tk.StringVar()
+    ttk.Entry(dlg, textvariable=comment_var, width=40).grid(row=5, column=1, padx=6, pady=4, sticky="w")
+
+    result: list[dict] | None = None
+
+    def on_ok():
+        nonlocal result
+        try:
+            datetime.fromisoformat(date_var.get())
+            amount = float(amount_var.get())
+        except ValueError:
+            messagebox.showerror("Валідація", "Невірні значення дати або суми")
+            return
+        ctype = next((t[1] for t in types if t[0] == type_var.get()), types[0][1])
+        cp_name = cp_var.get()
+        cp_id = None
+        if cp_name and cp_name != "-":
+            cp_id = next((c["id"] for c in counterparties if c["name"] == cp_name), None)
+        channel = ch_var.get() if ch_var.get() else ""
+        result = [
+            {
+                "date": date_var.get().strip(),
+                "amount": amount,
+                "ctype": ctype,
+                "counterparty_id": cp_id,
+                "related_doc_type": None,
+                "related_doc_id": None,
+                "channel": channel,
+                "comment": comment_var.get().strip(),
+            }
+        ]
+        dlg.destroy()
+
+    def on_cancel():
+        dlg.destroy()
+
+    btns = ttk.Frame(dlg)
+    btns.grid(row=6, column=0, columnspan=2, pady=8)
+    ttk.Button(btns, text="OK", command=on_ok).pack(side=tk.LEFT, padx=4)
+    ttk.Button(btns, text="Скасувати", command=on_cancel).pack(side=tk.LEFT, padx=4)
+    dlg.bind("<Return>", lambda e: on_ok())
+    dlg.bind("<Escape>", lambda e: on_cancel())
+    dlg.wait_window()
+    return result

@@ -483,6 +483,37 @@ def category_prompt(title: str, initial=None):
     return result
 
 
+def select_category_dialog(title: str, options: list[tuple[Optional[int], str]]) -> Optional[int]:
+    dlg = tk.Toplevel()
+    dlg.title(title)
+    dlg.grab_set()
+
+    ttk.Label(dlg, text="Категорія").grid(row=0, column=0, padx=6, pady=4, sticky="w")
+    values = [opt[1] for opt in options]
+    combo_var = tk.StringVar()
+    combo = ttk.Combobox(dlg, textvariable=combo_var, state="readonly", values=values)
+    combo.grid(row=0, column=1, padx=6, pady=4)
+    combo.current(0 if values else -1)
+
+    result: Optional[int] = None
+
+    def on_ok():
+        nonlocal result
+        if not values:
+            result = None
+        else:
+            idx = combo.current()
+            result = options[idx][0]
+        dlg.destroy()
+
+    ttk.Button(dlg, text="OK", command=on_ok).grid(row=1, column=0, padx=6, pady=8)
+    ttk.Button(dlg, text="Скасувати", command=dlg.destroy).grid(row=1, column=1, padx=6, pady=8)
+    dlg.bind("<Return>", lambda e: on_ok())
+    dlg.bind("<Escape>", lambda e: dlg.destroy())
+    dlg.wait_window()
+    return result
+
+
 def counterparty_prompt(initial=None, default_type: str | None = None):
     dlg = tk.Toplevel()
     dlg.title("Контрагент")

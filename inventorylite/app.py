@@ -46,6 +46,7 @@ from inventorylite.helpers import (
 )
 from inventorylite.error_handling import install_tk_exception_handler, setup_logging
 from inventorylite.label_templates_ui import TemplateManagerDialog
+from inventorylite.tabs.categories import CategoriesTab
 from inventorylite.tabs.products import ProductsTab, open_products_bulk_actions_dialog
 from inventorylite.tabs.reports import ReportsTab
 from inventorylite.tabs.settings import SettingsTab
@@ -70,12 +71,7 @@ from inventorylite.utils import (
     bind_common_shortcuts,
 )
 from inventorylite.ui_components import DatePicker, TableFrame, simple_prompt
-from inventorylite.dialogs import (
-    category_prompt,
-    counterparty_prompt,
-    warehouse_prompt,
-    channel_prompt,
-)
+from inventorylite.dialogs import counterparty_prompt, warehouse_prompt, channel_prompt
 from inventorylite.dialogs_documents import document_prompt, ensure_rate_for_date
 from inventorylite.dialogs_inventory import inventory_prompt
 
@@ -98,7 +94,6 @@ class InventoryApp(tk.Tk):
         self.notebook.pack(fill=tk.BOTH, expand=True)
 
         self.brands_frame = ttk.Frame(self.notebook)
-        self.categories_frame = ttk.Frame(self.notebook)
         self.counterparties_frame = ttk.Frame(self.notebook)
         self.warehouses_frame = ttk.Frame(self.notebook)
         self.channels_frame = ttk.Frame(self.notebook)
@@ -112,7 +107,14 @@ class InventoryApp(tk.Tk):
         self.export_frame = ttk.Frame(self.notebook)
 
         self.notebook.add(self.brands_frame, text="Бренди")
-        self.notebook.add(self.categories_frame, text="Категорії")
+        self.categories_tab = CategoriesTab(
+            parent=self.notebook,
+            settings=self.settings,
+            flatten_categories_provider=self.flatten_categories,
+            on_categories_changed=self.update_category_filters,
+            on_products_refresh=lambda: self.refresh_products(),
+        )
+        self.notebook.add(self.categories_tab.frame, text="Категорії")
         self.products_tab = ProductsTab(
             parent=self.notebook,
             settings=self.settings,
@@ -140,7 +142,6 @@ class InventoryApp(tk.Tk):
         self.notebook.add(self.reports_tab.frame, text="Звіти")
 
         self.create_brands_tab()
-        self.create_categories_tab()
         self.create_counterparties_tab()
         self.create_warehouses_tab()
         self.create_channels_tab()
@@ -625,205 +626,6 @@ class InventoryApp(tk.Tk):
         except Exception:
             logging.exception("Delete brand error")
             show_error("Бренди", "Не вдалося видалити бренд.")
-
-    # Categories
-    def create_categories_tab(self) -> None:
-        top = ttk.Frame(self.categories_frame)
-        top.pack(fill=tk.X, padx=8, pady=4)
-        ttk.Label(top, text="Пошук").pack(side=tk.LEFT)
-        self.category_search_var = tk.StringVar()
-        ttk.Entry(top, textvariable=self.category_search_var, width=30).pack(side=tk.LEFT, padx=4)
-        ttk.Button(top, text="Знайти", command=self.refresh_categories).pack(side=tk.LEFT)
-
-        btns = ttk.Frame(self.categories_frame)
-        btns.pack(fill=tk.X, padx=8)
-        ttk.Button(btns, text="Коренева", command=lambda: self.add_category(parent_id=None)).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="Підкатегорія", command=lambda: self.add_category(parent_id=self.selected_category_id())).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="Перейменувати", command=self.edit_category).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="Перемістити", command=self.move_category_ui).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="Вище", command=lambda: self.bump_category(-1)).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="Нижче", command=lambda: self.bump_category(1)).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="Службова/Прихована", command=self.toggle_category_flags).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="Видалити/Злити", command=self.delete_category).pack(side=tk.LEFT, padx=4)
-
-        columns = ("products", "quantity", "flags")
-        self.category_tree = ttk.Treeview(
-            self.categories_frame,
-            columns=columns,
-            show="tree headings",
-            selectmode="browse",
-        )
-        self.category_tree.heading("#0", text="Категорія")
-        self.category_tree.heading("products", text="Найменувань")
-        self.category_tree.column("products", width=110, anchor="center")
-        self.category_tree.heading("quantity", text="Одиниць на складі")
-        self.category_tree.column("quantity", width=140, anchor="center")
-        self.category_tree.heading("flags", text="Статус")
-        self.category_tree.column("flags", width=160, anchor="w")
-        self.category_tree.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-        self.category_tree.bind("<Double-1>", lambda e: self.edit_category())
-        self.category_tree.bind(
-            "<Button-3>",
-            lambda e: self.category_tree.event_generate("<<TreeviewSelect>>") or self.category_tree.tk.call(
-                self.category_tree, "identify", "row", e.y
-            ),
-        )
-
-    def selected_category_id(self) -> Optional[int]:
-        sel = self.category_tree.selection()
-        if not sel:
-            return None
-        try:
-            return int(sel[0])
-        except ValueError:
-            return None
-
-    def add_category(self, parent_id: Optional[int]) -> None:
-        values = category_prompt("Нова категорія", None)
-        if not values:
-            return
-        try:
-            name, color, icon, attrs, is_service, is_hidden = values
-            db.add_category(name, parent_id, color, icon, attrs, is_service, is_hidden)
-            self.refresh_categories()
-        except sqlite3.IntegrityError:
-            show_error("Категорії", "Категорія з такою назвою вже існує.")
-        except Exception:
-            logging.exception("Add category error")
-            show_error("Категорії", "Не вдалося додати категорію.")
-
-    def edit_category(self) -> None:
-        category_id = self.selected_category_id()
-        if not category_id:
-            show_error("Категорії", "Оберіть категорію для редагування.")
-            return
-        current = self.categories_index.get(category_id)
-        values = category_prompt(
-            "Редагувати категорію",
-            (
-                current.get("name", "") if current else "",
-                current.get("color") if current else "",
-                current.get("icon") if current else "",
-                current.get("typical_attributes") if current else "",
-                bool(current.get("is_service")) if current else False,
-                bool(current.get("is_hidden")) if current else False,
-            ),
-        )
-        if not values:
-            return
-        try:
-            name, color, icon, attrs, is_service, is_hidden = values
-            db.update_category(
-                category_id,
-                name,
-                parent_id=current.get("parent_id") if current else None,
-                color=color,
-                icon=icon,
-                typical_attributes=attrs,
-                is_service=is_service,
-                is_hidden=is_hidden,
-                sort_order=current.get("sort_order") if current else None,
-            )
-            self.refresh_categories()
-            self.refresh_products()
-        except sqlite3.IntegrityError:
-            show_error("Категорії", "Категорія з такою назвою вже існує.")
-        except Exception as exc:
-            logging.exception("Edit category error")
-            show_error("Категорії", f"Не вдалося змінити категорію: {exc}")
-
-    def bump_category(self, direction: str) -> None:
-        category_id = self.selected_category_id()
-        if not category_id:
-            show_error("Категорії", "Оберіть категорію для переміщення.")
-            return
-        db.bump_category_order(category_id, direction)
-        self.refresh_categories()
-
-    def move_category_ui(self) -> None:
-        category_id = self.selected_category_id()
-        if not category_id:
-            show_error("Категорії", "Оберіть категорію для переміщення.")
-            return
-        exclude = {category_id}
-        exclude.update(db.get_category_descendants(category_id))
-        options = [(None, "(Корінь)")]
-        for cat in self.flatten_categories():
-            if cat["id"] in exclude:
-                continue
-            options.append((cat["id"], cat["label"]))
-        choice = select_category_dialog("Новий батько", options)
-        if choice is None:
-            return
-        try:
-            db.move_category(category_id, choice)
-            self.refresh_categories()
-            self.refresh_products()
-        except Exception:
-            logging.exception("Move category error")
-            show_error("Категорії", "Не вдалося перемістити категорію.")
-
-    def bump_category(self, delta: int) -> None:
-        category_id = self.selected_category_id()
-        if not category_id:
-            show_error("Категорії", "Оберіть категорію для зміни порядку.")
-            return
-        db.bump_category_order(category_id, delta)
-        self.refresh_categories()
-
-    def toggle_category_flags(self) -> None:
-        category_id = self.selected_category_id()
-        if not category_id:
-            show_error("Категорії", "Оберіть категорію.")
-            return
-        current = self.categories_index.get(category_id)
-        if not current:
-            return
-        try:
-            db.update_category(
-                category_id,
-                current["name"],
-                parent_id=current.get("parent_id"),
-                color=current.get("color"),
-                icon=current.get("icon"),
-                typical_attributes=current.get("typical_attributes"),
-                is_service=not bool(current.get("is_service")) if messagebox.askyesno(
-                    "Статус", "Позначити/зняти позначку 'службова'?"
-                )
-                else bool(current.get("is_service")),
-                is_hidden=not bool(current.get("is_hidden")) if messagebox.askyesno(
-                    "Статус", "Приховати/показати категорію?"
-                )
-                else bool(current.get("is_hidden")),
-                sort_order=current.get("sort_order"),
-            )
-            self.refresh_categories()
-        except Exception:
-            logging.exception("Toggle flags error")
-            show_error("Категорії", "Не вдалося змінити статус.")
-
-    def delete_category(self) -> None:
-        category_id = self.selected_category_id()
-        if not category_id:
-            show_error("Категорії", "Оберіть категорію для видалення.")
-            return
-        target = None
-        if messagebox.askyesno("Злиття", "Злити категорію з іншою (рекомендовано для категорій з товарами)?"):
-            options = [(None, "(видалити, якщо порожня)")]
-            for cat in self.flatten_categories():
-                if cat["id"] == category_id:
-                    continue
-                options.append((cat["id"], cat["label"]))
-            target = select_category_dialog("Цільова категорія", options)
-        try:
-            db.delete_category(category_id, target)
-            self.refresh_categories()
-            self.refresh_products()
-        except ValueError as exc:
-            show_error("Категорії", str(exc))
-        except Exception:
-            logging.exception("Delete category error")
-            show_error("Категорії", f"Не вдалося видалити категорію: {exc}")
 
     # Counterparties
     def create_counterparties_tab(self) -> None:
@@ -2863,69 +2665,8 @@ class InventoryApp(tk.Tk):
         self.brand_table.set_rows([{"id": r["id"], "name": r["name"]} for r in rows])
 
     def refresh_categories(self) -> None:
-        rows = db.list_categories(include_hidden=True)
-        self.categories_index = {int(r["id"]): dict(r) for r in rows}
-        search = getattr(self, "category_search_var", tk.StringVar(value="")).get().lower().strip()
-        category_products, product_quantities = db.category_inventory_data()
-
-        children_map: dict[Optional[int], list[dict]] = {}
-        for row in rows:
-            children_map.setdefault(row["parent_id"], []).append(dict(row))
-
-        for lst in children_map.values():
-            lst.sort(key=lambda c: (c.get("sort_order", 0), c.get("name", "")))
-
-        subtree_counts: dict[int, int] = {}
-        subtree_quantities: dict[int, float] = {}
-
-        def calc_total(cid: int) -> set[int]:
-            products = set(category_products.get(cid, set()))
-            for child in children_map.get(cid, []):
-                products |= calc_total(child["id"])
-            subtree_counts[cid] = len(products)
-            subtree_quantities[cid] = sum(product_quantities.get(pid, 0.0) for pid in products)
-            return products
-
-        for root in children_map.get(None, []):
-            calc_total(root["id"])
-
-        match_cache: dict[int, bool] = {}
-
-        def has_match(cid: int) -> bool:
-            if cid in match_cache:
-                return match_cache[cid]
-            cat = self.categories_index.get(cid, {})
-            own_match = not search or search in cat.get("name", "").lower()
-            child_match = any(has_match(child["id"]) for child in children_map.get(cid, []))
-            match_cache[cid] = bool(own_match or child_match)
-            return match_cache[cid]
-
-        self.category_tree.delete(*self.category_tree.get_children())
-
-        def render(parent_id: Optional[int], tree_parent: str) -> None:
-            for cat in children_map.get(parent_id, []):
-                if not has_match(cat["id"]):
-                    continue
-                flags = []
-                if cat.get("is_service"):
-                    flags.append("службова")
-                if cat.get("is_hidden"):
-                    flags.append("прихована")
-                node_id = self.category_tree.insert(
-                    tree_parent,
-                    "end",
-                    iid=str(cat["id"]),
-                    text=cat["name"],
-                    values=(
-                        subtree_counts.get(cat["id"], len(category_products.get(cat["id"], set()))),
-                        f"{subtree_quantities.get(cat['id'], 0.0):.2f}",
-                        ", ".join(flags),
-                    ),
-                )
-                render(cat["id"], node_id)
-
-        render(None, "")
-        self.update_category_filters()
+        if hasattr(self, "categories_tab"):
+            self.categories_tab.refresh_categories()
 
     def flatten_categories(self) -> list[dict]:
         rows = db.list_categories(include_hidden=False)
@@ -3797,37 +3538,6 @@ def open_labels_print_dialog(parent, items: list[dict], mode_title: str) -> None
     ttk.Button(dlg, text="Закрити", command=dlg.destroy).grid(row=4, column=2, padx=8, pady=8, sticky="e")
     dlg.columnconfigure(1, weight=1)
     dlg.protocol("WM_DELETE_WINDOW", dlg.destroy)
-
-def select_category_dialog(title: str, options: list[tuple[Optional[int], str]]):
-    dlg = tk.Toplevel()
-    dlg.title(title)
-    dlg.grab_set()
-
-    ttk.Label(dlg, text="Категорія").grid(row=0, column=0, padx=6, pady=4, sticky="w")
-    values = [opt[1] for opt in options]
-    combo_var = tk.StringVar()
-    combo = ttk.Combobox(dlg, textvariable=combo_var, state="readonly", values=values)
-    combo.grid(row=0, column=1, padx=6, pady=4)
-    combo.current(0 if values else -1)
-
-    result: Optional[int] = None
-
-    def on_ok():
-        nonlocal result
-        if not values:
-            result = None
-        else:
-            idx = combo.current()
-            result = options[idx][0]
-        dlg.destroy()
-
-    ttk.Button(dlg, text="OK", command=on_ok).grid(row=1, column=0, padx=6, pady=8)
-    ttk.Button(dlg, text="Скасувати", command=dlg.destroy).grid(row=1, column=1, padx=6, pady=8)
-    dlg.bind("<Return>", lambda e: on_ok())
-    dlg.bind("<Escape>", lambda e: dlg.destroy())
-    dlg.wait_window()
-    return result
-
 
 def extra_cost_prompt(counterparties, currencies, purchases, doc=None, lines=None, selected_purchase_ids=None, allow_edit: bool = True):
     dlg = tk.Toplevel()

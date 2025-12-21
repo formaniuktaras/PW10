@@ -47,6 +47,7 @@ from inventorylite.helpers import (
 from inventorylite.error_handling import install_tk_exception_handler, setup_logging
 from inventorylite.label_templates_ui import TemplateManagerDialog
 from inventorylite.tabs.categories import CategoriesTab
+from inventorylite.tabs.brands import BrandsTab
 from inventorylite.tabs.products import ProductsTab, open_products_bulk_actions_dialog
 from inventorylite.tabs.reports import ReportsTab
 from inventorylite.tabs.settings import SettingsTab
@@ -93,7 +94,6 @@ class InventoryApp(tk.Tk):
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill=tk.BOTH, expand=True)
 
-        self.brands_frame = ttk.Frame(self.notebook)
         self.counterparties_frame = ttk.Frame(self.notebook)
         self.warehouses_frame = ttk.Frame(self.notebook)
         self.channels_frame = ttk.Frame(self.notebook)
@@ -106,7 +106,12 @@ class InventoryApp(tk.Tk):
         self.stock_frame = ttk.Frame(self.notebook)
         self.export_frame = ttk.Frame(self.notebook)
 
-        self.notebook.add(self.brands_frame, text="Бренди")
+        self.brands_tab = BrandsTab(
+            parent=self.notebook,
+            settings=self.settings,
+            on_products_refresh=lambda: self.refresh_products(),
+        )
+        self.notebook.add(self.brands_tab.frame, text="Бренди")
         self.categories_tab = CategoriesTab(
             parent=self.notebook,
             settings=self.settings,
@@ -141,7 +146,6 @@ class InventoryApp(tk.Tk):
         self.reports_tab = ReportsTab(parent=self.notebook, settings=self.settings)
         self.notebook.add(self.reports_tab.frame, text="Звіти")
 
-        self.create_brands_tab()
         self.create_counterparties_tab()
         self.create_warehouses_tab()
         self.create_channels_tab()
@@ -565,67 +569,6 @@ class InventoryApp(tk.Tk):
         except Exception as exc:
             logging.exception("Backup failed")
             show_error("Резервна копія", str(exc))
-
-    # Brands
-    def create_brands_tab(self) -> None:
-        columns = [("name", "Назва", 300)]
-        self.brand_table = TableFrame(self.brands_frame, columns)
-        self.brand_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-        self.brand_table.on_double_click(self.edit_brand)
-        self.brand_table.register_context_menu(self.edit_brand, self.delete_brand)
-
-        btns = ttk.Frame(self.brands_frame)
-        btns.pack(pady=4)
-        ttk.Button(btns, text="Додати", command=self.add_brand).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="Змінити", command=self.edit_brand).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="Видалити", command=self.delete_brand).pack(side=tk.LEFT, padx=4)
-
-    def add_brand(self) -> None:
-        values = simple_prompt("Новий бренд", ["Назва бренду"])
-        if not values:
-            return
-        try:
-            db.add_brand(values[0])
-            self.refresh_brands()
-        except sqlite3.IntegrityError:
-            show_error("Бренди", "Бренд з такою назвою вже існує.")
-        except Exception:
-            logging.exception("Add brand error")
-            show_error("Бренди", "Не вдалося додати бренд.")
-
-    def edit_brand(self) -> None:
-        brand_id = self.brand_table.selected_id()
-        if not brand_id:
-            show_error("Бренди", "Оберіть бренд для редагування.")
-            return
-        rows = [b for b in db.list_brands() if b["id"] == brand_id]
-        values = simple_prompt("Редагувати бренд", ["Назва бренду"], [rows[0]["name"]] if rows else None)
-        if not values:
-            return
-        try:
-            db.update_brand(brand_id, values[0])
-            self.refresh_brands()
-            self.refresh_products()
-        except sqlite3.IntegrityError:
-            show_error("Бренди", "Бренд з такою назвою вже існує.")
-        except Exception:
-            logging.exception("Edit brand error")
-            show_error("Бренди", "Не вдалося змінити бренд.")
-
-    def delete_brand(self) -> None:
-        brand_id = self.brand_table.selected_id()
-        if not brand_id:
-            show_error("Бренди", "Оберіть бренд для видалення.")
-            return
-        if not messagebox.askyesno("Підтвердження", "Видалити бренд та пов'язані товари?"):
-            return
-        try:
-            db.delete_brand(brand_id)
-            self.refresh_brands()
-            self.refresh_products()
-        except Exception:
-            logging.exception("Delete brand error")
-            show_error("Бренди", "Не вдалося видалити бренд.")
 
     # Counterparties
     def create_counterparties_tab(self) -> None:
@@ -2661,8 +2604,8 @@ class InventoryApp(tk.Tk):
 
     # Refresh helpers
     def refresh_brands(self) -> None:
-        rows = db.list_brands()
-        self.brand_table.set_rows([{"id": r["id"], "name": r["name"]} for r in rows])
+        if hasattr(self, "brands_tab"):
+            self.brands_tab.refresh_brands()
 
     def refresh_categories(self) -> None:
         if hasattr(self, "categories_tab"):

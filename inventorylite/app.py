@@ -52,6 +52,8 @@ from inventorylite.tabs.counterparties import CounterpartiesTab
 from inventorylite.tabs.products import ProductsTab, open_products_bulk_actions_dialog
 from inventorylite.tabs.reports import ReportsTab
 from inventorylite.tabs.settings import SettingsTab
+from inventorylite.tabs.warehouses import WarehousesTab
+from inventorylite.tabs.channels import ChannelsTab
 from inventorylite.utils import (
     APP_NAME,
     VERSION,
@@ -73,7 +75,6 @@ from inventorylite.utils import (
     bind_common_shortcuts,
 )
 from inventorylite.ui_components import DatePicker, TableFrame, simple_prompt
-from inventorylite.dialogs import warehouse_prompt, channel_prompt
 from inventorylite.dialogs_documents import document_prompt, ensure_rate_for_date
 from inventorylite.dialogs_inventory import inventory_prompt
 
@@ -95,8 +96,6 @@ class InventoryApp(tk.Tk):
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill=tk.BOTH, expand=True)
 
-        self.warehouses_frame = ttk.Frame(self.notebook)
-        self.channels_frame = ttk.Frame(self.notebook)
         self.currencies_frame = ttk.Frame(self.notebook)
         self.purchases_frame = ttk.Frame(self.notebook)
         self.extra_costs_frame = ttk.Frame(self.notebook)
@@ -128,8 +127,15 @@ class InventoryApp(tk.Tk):
         self.notebook.add(self.products_tab.frame, text="Товари")
         self.counterparties_tab = CounterpartiesTab(parent=self.notebook, settings=self.settings)
         self.notebook.add(self.counterparties_tab.frame, text="Контрагенти")
-        self.notebook.add(self.warehouses_frame, text="Склади")
-        self.notebook.add(self.channels_frame, text="Канали продажу")
+        self.warehouses_tab = WarehousesTab(
+            parent=self.notebook,
+            settings=self.settings,
+            on_warehouses_changed=self._on_warehouses_changed,
+        )
+        self.notebook.add(self.warehouses_tab.frame, text="Склади")
+
+        self.channels_tab = ChannelsTab(parent=self.notebook, settings=self.settings)
+        self.notebook.add(self.channels_tab.frame, text="Канали продажу")
         self.notebook.add(self.currencies_frame, text="Валюти")
         self.notebook.add(self.purchases_frame, text="Закупівлі")
         self.notebook.add(self.extra_costs_frame, text="Супутні витрати")
@@ -147,8 +153,6 @@ class InventoryApp(tk.Tk):
         self.reports_tab = ReportsTab(parent=self.notebook, settings=self.settings)
         self.notebook.add(self.reports_tab.frame, text="Звіти")
 
-        self.create_warehouses_tab()
-        self.create_channels_tab()
         self.create_currencies_tab()
         self.create_purchases_tab()
         self.create_extra_costs_tab()
@@ -212,6 +216,13 @@ class InventoryApp(tk.Tk):
         apply_base_currency_settings(self.settings)
         self.refresh_currencies()
         self.apply_settings()
+
+    def _on_warehouses_changed(self) -> None:
+        if hasattr(self, "_refresh_inventory_warehouse_filter"):
+            try:
+                self._refresh_inventory_warehouse_filter()
+            except Exception:
+                logging.exception("Failed to refresh inventory warehouse filter")
 
     def apply_theme(self) -> None:
         theme = (self.settings.get("general", "theme") or "system").lower()
@@ -569,132 +580,6 @@ class InventoryApp(tk.Tk):
         except Exception as exc:
             logging.exception("Backup failed")
             show_error("Резервна копія", str(exc))
-
-    # Warehouses
-    def create_warehouses_tab(self) -> None:
-        columns = [("name", "Назва", 200), ("description", "Опис", 260), ("is_active", "Активний", 100)]
-        self.warehouse_table = TableFrame(self.warehouses_frame, columns)
-        self.warehouse_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-        self.warehouse_table.on_double_click(self.edit_warehouse)
-        self.warehouse_table.register_context_menu(self.edit_warehouse, self.delete_warehouse)
-        btns = ttk.Frame(self.warehouses_frame)
-        btns.pack(pady=4)
-        ttk.Button(btns, text="Додати", command=self.add_warehouse).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="Змінити", command=self.edit_warehouse).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="Видалити", command=self.delete_warehouse).pack(side=tk.LEFT, padx=4)
-
-    def add_warehouse(self) -> None:
-        values = warehouse_prompt()
-        if not values:
-            return
-        name, description, is_active = values
-        try:
-            db.add_warehouse(name, description, is_active)
-            self.refresh_warehouses()
-        except sqlite3.IntegrityError:
-            show_error("Склади", "Склад з такою назвою вже існує.")
-        except Exception:
-            logging.exception("Add warehouse error")
-            show_error("Склади", "Не вдалося додати склад.")
-
-    def edit_warehouse(self) -> None:
-        warehouse_id = self.warehouse_table.selected_id()
-        if not warehouse_id:
-            show_error("Склади", "Оберіть склад.")
-            return
-        rows = [w for w in db.list_warehouses() if w["id"] == warehouse_id]
-        if not rows:
-            return
-        w = rows[0]
-        values = warehouse_prompt((w["name"], w["description"] or "", bool(w["is_active"])))
-        if not values:
-            return
-        name, description, is_active = values
-        try:
-            db.update_warehouse(warehouse_id, name, description, is_active)
-            self.refresh_warehouses()
-        except sqlite3.IntegrityError:
-            show_error("Склади", "Склад з такою назвою вже існує.")
-        except Exception:
-            logging.exception("Edit warehouse error")
-            show_error("Склади", "Не вдалося змінити склад.")
-
-    def delete_warehouse(self) -> None:
-        warehouse_id = self.warehouse_table.selected_id()
-        if not warehouse_id:
-            show_error("Склади", "Оберіть склад для видалення.")
-            return
-        if not messagebox.askyesno("Підтвердження", "Видалити склад?"):
-            return
-        try:
-            db.delete_warehouse(warehouse_id)
-            self.refresh_warehouses()
-        except Exception as exc:
-            logging.exception("Delete warehouse error")
-            show_error("Склади", str(exc))
-
-    # Channels
-    def create_channels_tab(self) -> None:
-        columns = [("name", "Назва", 240), ("is_active", "Активний", 100)]
-        self.channel_table = TableFrame(self.channels_frame, columns)
-        self.channel_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-        self.channel_table.on_double_click(self.edit_channel)
-        self.channel_table.register_context_menu(self.edit_channel, self.delete_channel)
-        btns = ttk.Frame(self.channels_frame)
-        btns.pack(pady=4)
-        ttk.Button(btns, text="Додати", command=self.add_channel).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="Змінити", command=self.edit_channel).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="Видалити", command=self.delete_channel).pack(side=tk.LEFT, padx=4)
-
-    def add_channel(self) -> None:
-        values = channel_prompt()
-        if not values:
-            return
-        name, is_active = values
-        try:
-            db.add_channel(name, is_active)
-            self.refresh_channels()
-        except sqlite3.IntegrityError:
-            show_error("Канали", "Канал з такою назвою вже існує.")
-        except Exception:
-            logging.exception("Add channel error")
-            show_error("Канали", "Не вдалося додати канал.")
-
-    def edit_channel(self) -> None:
-        channel_id = self.channel_table.selected_id()
-        if not channel_id:
-            show_error("Канали", "Оберіть канал.")
-            return
-        rows = [c for c in db.list_channels() if c["id"] == channel_id]
-        if not rows:
-            return
-        c = rows[0]
-        values = channel_prompt((c["name"], bool(c["is_active"])))
-        if not values:
-            return
-        name, is_active = values
-        try:
-            db.update_channel(channel_id, name, is_active)
-            self.refresh_channels()
-        except sqlite3.IntegrityError:
-            show_error("Канали", "Канал з такою назвою вже існує.")
-        except Exception:
-            logging.exception("Edit channel error")
-            show_error("Канали", "Не вдалося змінити канал.")
-
-    def delete_channel(self) -> None:
-        channel_id = self.channel_table.selected_id()
-        if not channel_id:
-            show_error("Канали", "Оберіть канал для видалення.")
-            return
-        if not messagebox.askyesno("Підтвердження", "Видалити канал?"):
-            return
-        try:
-            db.delete_channel(channel_id)
-            self.refresh_channels()
-        except Exception as exc:
-            logging.exception("Delete channel error")
-            show_error("Канали", str(exc))
 
     # Currencies
     def create_currencies_tab(self) -> None:
@@ -2526,31 +2411,12 @@ class InventoryApp(tk.Tk):
             self.counterparties_tab.refresh_counterparties()
 
     def refresh_warehouses(self) -> None:
-        rows = db.list_warehouses()
-        self.warehouse_table.set_rows(
-            [
-                {
-                    "id": r["id"],
-                    "name": r["name"],
-                    "description": r["description"] or "",
-                    "is_active": "Так" if r["is_active"] else "Ні",
-                }
-                for r in rows
-            ]
-        )
+        if hasattr(self, "warehouses_tab"):
+            self.warehouses_tab.refresh_warehouses()
 
     def refresh_channels(self) -> None:
-        rows = db.list_channels()
-        self.channel_table.set_rows(
-            [
-                {
-                    "id": r["id"],
-                    "name": r["name"],
-                    "is_active": "Так" if r["is_active"] else "Ні",
-                }
-                for r in rows
-            ]
-        )
+        if hasattr(self, "channels_tab"):
+            self.channels_tab.refresh_channels()
 
     def refresh_all(self) -> None:
         self.refresh_brands()

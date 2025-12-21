@@ -582,7 +582,8 @@ def warehouse_prompt(initial=None):
     active_var = tk.BooleanVar(value=initial[2] if initial else True)
 
     ttk.Label(dlg, text="Назва").grid(row=0, column=0, padx=6, pady=4, sticky="w")
-    ttk.Entry(dlg, textvariable=name_var, width=30).grid(row=0, column=1, padx=6, pady=4)
+    name_entry = ttk.Entry(dlg, textvariable=name_var, width=30)
+    name_entry.grid(row=0, column=1, padx=6, pady=4)
     ttk.Label(dlg, text="Опис").grid(row=1, column=0, padx=6, pady=4, sticky="w")
     ttk.Entry(dlg, textvariable=desc_var, width=40).grid(row=1, column=1, padx=6, pady=4)
     ttk.Checkbutton(dlg, text="Активний", variable=active_var).grid(row=2, column=1, padx=6, pady=4, sticky="w")
@@ -605,12 +606,9 @@ def warehouse_prompt(initial=None):
     btns.grid(row=3, column=0, columnspan=2, pady=8)
     ttk.Button(btns, text="OK", command=on_ok).pack(side=tk.LEFT, padx=4)
     ttk.Button(btns, text="Скасувати", command=on_cancel).pack(side=tk.LEFT, padx=4)
-    dlg.bind("<Return>", lambda e: on_ok())
+    dlg.bind("<Return>", lambda e: (on_ok(), "break"))
     dlg.bind("<Escape>", lambda e: on_cancel())
-    if editable:
-        scan_entry.focus_set()
-        scan_entry.icursor("end")
-        scan_entry.selection_range(0, tk.END)
+    dlg.after_idle(name_entry.focus_set)
     dlg.wait_window()
     return result
 
@@ -623,7 +621,8 @@ def channel_prompt(initial=None):
     active_var = tk.BooleanVar(value=initial[1] if initial else True)
 
     ttk.Label(dlg, text="Назва").grid(row=0, column=0, padx=6, pady=4, sticky="w")
-    ttk.Entry(dlg, textvariable=name_var, width=30).grid(row=0, column=1, padx=6, pady=4)
+    name_entry = ttk.Entry(dlg, textvariable=name_var, width=30)
+    name_entry.grid(row=0, column=1, padx=6, pady=4)
     ttk.Checkbutton(dlg, text="Активний", variable=active_var).grid(row=1, column=1, padx=6, pady=4, sticky="w")
 
     result = None
@@ -644,15 +643,8 @@ def channel_prompt(initial=None):
     btns.grid(row=2, column=0, columnspan=2, pady=8)
     ttk.Button(btns, text="OK", command=on_ok).pack(side=tk.LEFT, padx=4)
     ttk.Button(btns, text="Скасувати", command=on_cancel).pack(side=tk.LEFT, padx=4)
-    dlg.bind("<Return>", lambda e: on_ok())
+    dlg.bind("<Return>", lambda e: (on_ok(), "break"))
     dlg.bind("<Escape>", lambda e: on_cancel())
-    if editable:
-        dlg.after_idle(
-            lambda: (
-                scan_entry.focus_set(),
-                scan_entry.selection_range(0, tk.END),
-                scan_entry.icursor(tk.END),
-            )
-        )
+    dlg.after_idle(name_entry.focus_set)
     dlg.wait_window()
     return result

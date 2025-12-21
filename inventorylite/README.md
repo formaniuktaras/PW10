@@ -50,7 +50,11 @@ py -3.13 -m PyInstaller --onedir --noconsole app.py
 - Після збірки відкрийте `dist\InventoryLite.exe` (one-file, без консолі) або `dist\app\InventoryLite.exe` (onedir).
 - Запуск із вихідних для відлагодження:
   ```bash
-  python app.py
+  python -m inventorylite.app
+  ```
+  або
+  ```bash
+  python inventorylite/app.py
   ```
   Логи пишуться у `%LOCALAPPDATA%\InventoryLite\app.log`.
 

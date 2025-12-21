@@ -2,6 +2,9 @@ param(
     [string]$PythonPath = "python"
 )
 
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+Set-Location (Join-Path $scriptDir "..")
+
 Write-Host "Building InventoryLite..."
 
 # Check python
@@ -19,21 +22,21 @@ if (-Not (Test-Path $venvPath)) {
 . "$venvPath/Scripts/Activate.ps1"
 
 python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+python -m pip install -r inventorylite/requirements.txt
 
-$iconBase64 = Get-Content -Raw "icons/app_ico_base64.txt"
-[IO.File]::WriteAllBytes("icons/app.ico", [Convert]::FromBase64String($iconBase64))
+$iconBase64 = Get-Content -Raw "inventorylite/icons/app_ico_base64.txt"
+[IO.File]::WriteAllBytes("inventorylite/icons/app.ico", [Convert]::FromBase64String($iconBase64))
 
-$iconPath = "icons/app.ico"
+$iconPath = "inventorylite/icons/app.ico"
 $fontArgs = ""
-if (Test-Path "./assets/fonts/DejaVuSans.ttf") {
-    $fontArgs = "--add-data \"assets/fonts/DejaVuSans.ttf;assets/fonts\""
-    if (Test-Path "./assets/fonts/DejaVuSans-Bold.ttf") {
-        $fontArgs = "$fontArgs --add-data \"assets/fonts/DejaVuSans-Bold.ttf;assets/fonts\""
+if (Test-Path "./inventorylite/assets/fonts/DejaVuSans.ttf") {
+    $fontArgs = "--add-data \"inventorylite/assets/fonts/DejaVuSans.ttf;inventorylite/assets/fonts\""
+    if (Test-Path "./inventorylite/assets/fonts/DejaVuSans-Bold.ttf") {
+        $fontArgs = "$fontArgs --add-data \"inventorylite/assets/fonts/DejaVuSans-Bold.ttf;inventorylite/assets/fonts\""
     }
 }
 
-$cmd = "pyinstaller --onefile --noconsole --name InventoryLite --icon $iconPath $fontArgs app.py --collect-submodules inventorylite"
+$cmd = "pyinstaller --onefile --noconsole --name InventoryLite --icon $iconPath $fontArgs inventorylite/app.py --collect-submodules inventorylite"
 Write-Host "Running: $cmd"
 Invoke-Expression $cmd
 

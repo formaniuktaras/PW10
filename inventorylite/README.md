@@ -41,7 +41,7 @@ build.bat
 
 ### Ручна команда PyInstaller
 ```powershell
-py -3.13 -m PyInstaller --onedir --noconsole app.py
+py -3.13 -m PyInstaller --onedir --noconsole inventorylite/app.py
 ```
 - Додаткові параметри: `--icon icons/app.ico` та `--name InventoryLite` (див. скрипти збірки).
 - Іконка генерується автоматично з `icons/app_ico_base64.txt` у `icons/app.ico`, тому двійкових файлів у репозиторії немає.

@@ -37,7 +37,6 @@ from inventorylite.helpers import (
     _parse_date_value,
     _parse_float_value,
     _parse_num,
-    _read_rate_two_way,
     _sanitize_barcode_prefix,
     _suggest_purchase_mapping,
     _suggest_sales_mapping,
@@ -54,6 +53,7 @@ from inventorylite.tabs.reports import ReportsTab
 from inventorylite.tabs.settings import SettingsTab
 from inventorylite.tabs.warehouses import WarehousesTab
 from inventorylite.tabs.channels import ChannelsTab
+from inventorylite.tabs.currencies import CurrenciesTab
 from inventorylite.utils import (
     APP_NAME,
     VERSION,
@@ -65,8 +65,6 @@ from inventorylite.utils import (
     Settings,
     apply_base_currency_settings,
     get_base_currency_code,
-    get_base_currency_name,
-    get_base_currency_decimals,
     open_data_folder,
     open_file,
     restore_all_data,
@@ -96,7 +94,6 @@ class InventoryApp(tk.Tk):
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill=tk.BOTH, expand=True)
 
-        self.currencies_frame = ttk.Frame(self.notebook)
         self.purchases_frame = ttk.Frame(self.notebook)
         self.extra_costs_frame = ttk.Frame(self.notebook)
         self.sales_frame = ttk.Frame(self.notebook)
@@ -136,7 +133,8 @@ class InventoryApp(tk.Tk):
 
         self.channels_tab = ChannelsTab(parent=self.notebook, settings=self.settings)
         self.notebook.add(self.channels_tab.frame, text="Канали продажу")
-        self.notebook.add(self.currencies_frame, text="Валюти")
+        self.currencies_tab = CurrenciesTab(parent=self.notebook, settings=self.settings)
+        self.notebook.add(self.currencies_tab.frame, text="Валюти")
         self.notebook.add(self.purchases_frame, text="Закупівлі")
         self.notebook.add(self.extra_costs_frame, text="Супутні витрати")
         self.notebook.add(self.sales_frame, text="Продажі")
@@ -153,7 +151,6 @@ class InventoryApp(tk.Tk):
         self.reports_tab = ReportsTab(parent=self.notebook, settings=self.settings)
         self.notebook.add(self.reports_tab.frame, text="Звіти")
 
-        self.create_currencies_tab()
         self.create_purchases_tab()
         self.create_extra_costs_tab()
         self.create_sales_tab()
@@ -582,196 +579,9 @@ class InventoryApp(tk.Tk):
             show_error("Резервна копія", str(exc))
 
     # Currencies
-    def create_currencies_tab(self) -> None:
-        top = ttk.Frame(self.currencies_frame)
-        top.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-
-        ttk.Label(top, text="Довідник валют").pack(anchor="w")
-        self.base_currency_label = ttk.Label(top, text=self._format_base_currency_label())
-        self.base_currency_label.pack(anchor="w", pady=(0, 4))
-        curr_columns = [("code", "Код", 80), ("name", "Назва", 200), ("decimals", "Знаків", 60), ("is_active", "Активна", 80)]
-        self.currency_table = TableFrame(top, curr_columns, height=6)
-        self.currency_table.pack(fill=tk.X, pady=4)
-        self.currency_table.on_double_click(self.edit_currency)
-        self.currency_table.register_context_menu(self.edit_currency, self.delete_currency)
-
-        btns = ttk.Frame(top)
-        btns.pack(pady=4, anchor="w")
-        ttk.Button(btns, text="Додати валюту", command=self.add_currency).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="Змінити", command=self.edit_currency).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="Видалити", command=self.delete_currency).pack(side=tk.LEFT, padx=4)
-
-        ttk.Label(top, text="Курси валют").pack(anchor="w", pady=(10, 0))
-        rate_columns = [("rate_date", "Дата", 120), ("rate", "Курс до базової", 160)]
-        self.rate_table = TableFrame(top, rate_columns, height=6)
-        self.rate_table.pack(fill=tk.X, pady=4)
-
-        rate_btns = ttk.Frame(top)
-        rate_btns.pack(pady=4, anchor="w")
-        ttk.Button(rate_btns, text="Додати курс", command=self.add_rate).pack(side=tk.LEFT, padx=4)
-        ttk.Button(rate_btns, text="Змінити", command=self.edit_rate).pack(side=tk.LEFT, padx=4)
-        ttk.Button(rate_btns, text="Видалити", command=self.delete_rate).pack(side=tk.LEFT, padx=4)
-
-        self.currency_table.on_select(self.refresh_rates)
-        self.rate_table.on_double_click(self.edit_rate)
-        self.rate_table.register_context_menu(self.edit_rate, self.delete_rate)
-
-    def add_currency(self) -> None:
-        values = simple_prompt("Нова валюта", ["Код", "Назва", "Знаків після коми"], ["USD", "Долар США", "2"])
-        if not values:
-            return
-        try:
-            decimals = int(values[2]) if len(values) > 2 else 2
-            db.add_currency(values[0], values[1], decimals)
-            self.refresh_currencies()
-        except sqlite3.IntegrityError:
-            show_error("Валюти", "Валюта з таким кодом вже існує")
-        except Exception as exc:
-            logging.exception("Add currency error")
-            show_error("Валюти", str(exc))
-
-    def edit_currency(self) -> None:
-        code = self.currency_table.selected_id()
-        if not code:
-            show_error("Валюти", "Оберіть валюту")
-            return
-        rows = [c for c in db.list_currencies(active_only=False) if c["code"] == code]
-        if not rows:
-            return
-        cur = rows[0]
-        values = simple_prompt("Змінити валюту", ["Код", "Назва", "Знаків після коми", "Активна (1/0)"], [cur["code"], cur["name"], str(cur["decimals"]), str(cur["is_active"]),])
-        if not values:
-            return
-        try:
-            decimals = int(values[2]) if len(values) > 2 else 2
-            is_active = values[3].strip() != "0" if len(values) > 3 else True
-            db.update_currency(values[0], values[1], decimals, is_active)
-            self.refresh_currencies()
-        except Exception as exc:
-            logging.exception("Edit currency error")
-            show_error("Валюти", str(exc))
-
-    def delete_currency(self) -> None:
-        code = self.currency_table.selected_id()
-        if not code:
-            show_error("Валюти", "Оберіть валюту")
-            return
-        if not messagebox.askyesno("Валюти", "Видалити валюту?"):
-            return
-        try:
-            db.delete_currency(code)
-            self.refresh_currencies()
-        except Exception as exc:
-            logging.exception("Delete currency error")
-            show_error("Валюти", str(exc))
-
     def refresh_currencies(self) -> None:
-        rows = db.list_currencies(active_only=False)
-        self.currency_table.set_rows(
-            [
-                {
-                    "id": row["code"],
-                    "code": row["code"],
-                    "name": row["name"],
-                    "decimals": row["decimals"],
-                    "is_active": "Так" if row["is_active"] else "Ні",
-                }
-                for row in rows
-            ]
-        )
-        self.update_base_currency_label()
-        self.refresh_rates()
-
-    def _format_base_currency_label(self) -> str:
-        return (
-            f"Базова валюта: {get_base_currency_code()} — "
-            f"{get_base_currency_name()} ({get_base_currency_decimals()} знаків)"
-        )
-
-    def update_base_currency_label(self) -> None:
-        if hasattr(self, "base_currency_label"):
-            self.base_currency_label.configure(text=self._format_base_currency_label())
-
-    def refresh_rates(self) -> None:
-        code = self.currency_table.selected_id()
-        code = code or (db.list_currencies(active_only=True)[0]["code"] if db.list_currencies(active_only=True) else None)
-        if not code:
-            self.rate_table.set_rows([])
-            return
-        rates = db.list_currency_rates(code)
-        self.rate_table.set_rows(
-            [
-                {
-                    "id": r["id"],
-                    "rate_date": r["rate_date"],
-                    "rate": f"{r['rate']:.4f}",
-                }
-                for r in rates
-            ]
-        )
-
-    def add_rate(self) -> None:
-        code = self.currency_table.selected_id()
-        if not code:
-            show_error("Курси", "Оберіть валюту")
-            return
-        base = get_base_currency_code()
-        defaults = [datetime.now().strftime("%Y-%m-%d"), "1", ""]
-        values = simple_prompt(
-            "Новий курс",
-            ["Дата", f"1 {code} = ? {base}", f"1 {base} = ? {code}"],
-            defaults,
-        )
-        if not values:
-            return
-        try:
-            rate = _read_rate_two_way(code, base, values[1], values[2])
-            db.add_currency_rate(code, values[0], rate)
-            self.refresh_rates()
-        except Exception as exc:
-            logging.exception("Add rate error")
-            show_error("Курси", str(exc))
-
-    def edit_rate(self) -> None:
-        rate_id = self.rate_table.selected_id()
-        if not rate_id:
-            show_error("Курси", "Оберіть курс")
-            return
-        rates = [r for r in db.list_currency_rates(self.currency_table.selected_id()) if r["id"] == rate_id]
-        if not rates:
-            return
-        current = rates[0]
-        base = get_base_currency_code()
-        direct_default = f"{current['rate']:.6f}"
-        inverse_default = f"{(1.0 / current['rate']):.6f}" if current["rate"] > 0 else ""
-        values = simple_prompt(
-            "Змінити курс",
-            ["Дата", f"1 {code} = ? {base}", f"1 {base} = ? {code}"],
-            [current["rate_date"], direct_default, inverse_default],
-        )
-        if not values:
-            return
-        try:
-            rate = _read_rate_two_way(code, base, values[1], values[2])
-            db.update_currency_rate(rate_id, values[0], rate)
-            self.refresh_rates()
-        except Exception as exc:
-            logging.exception("Edit rate error")
-            show_error("Курси", str(exc))
-
-    def delete_rate(self) -> None:
-        rate_id = self.rate_table.selected_id()
-        if not rate_id:
-            show_error("Курси", "Оберіть курс")
-            return
-        if not messagebox.askyesno("Курси", "Видалити курс?"):
-            return
-        try:
-            db.delete_currency_rate(rate_id)
-            self.refresh_rates()
-        except Exception as exc:
-            logging.exception("Delete rate error")
-            show_error("Курси", str(exc))
+        if hasattr(self, "currencies_tab"):
+            self.currencies_tab.refresh_currencies()
 
     # Purchases
     def create_purchases_tab(self) -> None:

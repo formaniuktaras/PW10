@@ -51,6 +51,7 @@ from inventorylite.tabs.sales import SalesTab
 from inventorylite.tabs.cash import CashTab
 from inventorylite.tabs.stock import StockTab
 from inventorylite.tabs.extra_costs import ExtraCostsTab
+from inventorylite.tabs.export import ExportTab
 from inventorylite.utils import (
     APP_NAME,
     VERSION,
@@ -86,8 +87,6 @@ class InventoryApp(tk.Tk):
 
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill=tk.BOTH, expand=True)
-
-        self.export_frame = ttk.Frame(self.notebook)
 
         self.brands_tab = BrandsTab(
             parent=self.notebook,
@@ -144,7 +143,8 @@ class InventoryApp(tk.Tk):
             open_bulk_actions_dialog=open_products_bulk_actions_dialog,
         )
         self.notebook.add(self.stock_tab.frame, text="Залишки")
-        self.notebook.add(self.export_frame, text="Експорт")
+        self.export_tab = ExportTab(parent=self.notebook)
+        self.notebook.add(self.export_tab.frame, text="Експорт")
         self.settings_tab = SettingsTab(
             parent=self.notebook,
             settings=self.settings,
@@ -173,7 +173,6 @@ class InventoryApp(tk.Tk):
             on_refresh_cash=self.refresh_cash,
         )
         self.notebook.add(self.sales_tab.frame, text="Продажі")
-        self.create_export_tab()
         # "Про програму" is opened from the File menu
 
         self.refresh_all()
@@ -640,37 +639,6 @@ class InventoryApp(tk.Tk):
     def refresh_stock(self, search: str | None = None) -> None:
         if hasattr(self, "stock_tab"):
             self.stock_tab.refresh_stock(search)
-
-    # Export
-    def create_export_tab(self) -> None:
-        ttk.Label(self.export_frame, text="Експорт таблиць у CSV", font=("Segoe UI", 10, "bold")).pack(pady=10)
-        tables = [
-            ("Brands", "Бренди"),
-            ("Categories", "Категорії"),
-            ("Products", "Товари"),
-            ("AdditionalProductCategories", "Додаткові категорії"),
-            ("Counterparties", "Контрагенти"),
-            ("Warehouses", "Склади"),
-            ("SalesChannels", "Канали"),
-            ("PurchaseDocuments", "Закупівлі"),
-            ("PurchaseLines", "Рядки закупівель"),
-            ("SalesDocuments", "Продажі"),
-            ("SalesLines", "Рядки продажів"),
-            ("StockBalances", "Залишки"),
-            ("StockMoves", "Рухи товарів"),
-            ("CashTransactions", "Каса"),
-        ]
-        for table, label in tables:
-            ttk.Button(self.export_frame, text=f"Експорт {label}", command=lambda t=table: self.export_csv(t)).pack(pady=4)
-
-    def export_csv(self, table: str) -> None:
-        file_path = get_data_dir() / f"{table.lower()}_export.csv"
-        try:
-            db.export_table_to_csv(table, file_path)
-            messagebox.showinfo("Експорт", f"Файл збережено: {file_path}")
-        except Exception:
-            logging.exception("Export error")
-            show_error("Експорт", "Не вдалося експортувати таблицю.")
 
     # About
     def show_about(self) -> None:

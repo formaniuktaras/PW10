@@ -21,6 +21,7 @@ from tkinter import ttk, messagebox, filedialog
 from typing import Optional
 
 from inventorylite import db
+from inventorylite import diagnostics
 from inventorylite.helpers import (
     _find_index_by_name,
     _format_cell_value,
@@ -67,12 +68,13 @@ from inventorylite.utils import (
 
 
 class InventoryApp(tk.Tk):
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(self, settings: Settings | None = None, log_path: Path | None = None) -> None:
         super().__init__()
         self.title(APP_NAME)
         self.geometry("1180x720")
         self.iconbitmap(default="icons/app.ico") if Path("icons/app.ico").exists() else None
         self.settings = settings or Settings()
+        self.log_path = log_path
         apply_base_currency_settings(self.settings)
         self.status_var = tk.StringVar(value="Готово")
         self.status_bar: ttk.Label | None = None
@@ -190,7 +192,68 @@ class InventoryApp(tk.Tk):
         file_menu.add_separator()
         file_menu.add_command(label="Вихід", command=self.destroy)
         menubar.add_cascade(label="Файл", menu=file_menu)
+        diagnostics_menu = tk.Menu(menubar, tearoff=0)
+        diagnostics_menu.add_command(
+            label="Відкрити теку даних", command=lambda: open_data_folder(get_data_dir())
+        )
+        diagnostics_menu.add_command(label="Відкрити папку логів", command=self.open_log_folder)
+        diagnostics_menu.add_command(label="Відкрити поточний лог", command=self.open_log_file)
+        diagnostics_menu.add_separator()
+        diagnostics_menu.add_command(label="Швидка перевірка БД", command=self.show_db_healthcheck)
+        menubar.add_cascade(label="Діагностика", menu=diagnostics_menu)
         self.config(menu=menubar)
+
+    def open_log_folder(self) -> None:
+        if not self.log_path:
+            show_error(APP_NAME, "Шлях до логу невідомий.")
+            return
+        diagnostics.open_in_os(self.log_path.parent)
+
+    def open_log_file(self) -> None:
+        if not self.log_path:
+            show_error(APP_NAME, "Шлях до логу невідомий.")
+            return
+        diagnostics.open_in_os(self.log_path)
+
+    def show_db_healthcheck(self) -> None:
+        results = diagnostics.run_db_healthcheck()
+        lines = [
+            f"DB: {results['db_path']}",
+            f"integrity_check: {results['integrity']}",
+            f"foreign_key_check: {results['foreign_key_issues']} issues",
+            "counts:",
+        ]
+        for table, count in results["counts"].items():
+            lines.append(f"  {table}: {count}")
+        content = "\n".join(lines)
+
+        window = tk.Toplevel(self)
+        window.title("Швидка перевірка БД")
+        window.transient(self)
+        window.grab_set()
+        window.geometry("520x360")
+
+        frame = ttk.Frame(window, padding=12)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        text = tk.Text(frame, wrap="word", height=12)
+        text.insert("1.0", content)
+        text.configure(state="disabled")
+        text.pack(fill=tk.BOTH, expand=True)
+
+        actions = ttk.Frame(frame)
+        actions.pack(fill=tk.X, pady=(10, 0))
+        ttk.Button(
+            actions,
+            text="Копіювати",
+            command=lambda: self._copy_healthcheck_result(content),
+        ).pack(side=tk.RIGHT, padx=(4, 0))
+        ttk.Button(actions, text="Закрити", command=window.destroy).pack(side=tk.RIGHT)
+
+    def _copy_healthcheck_result(self, content: str) -> None:
+        self.clipboard_clear()
+        self.clipboard_append(content)
+        self.update_idletasks()
 
     def default_workdir(self) -> Path:
         path = self.settings.get("files", "working_dir") or str(get_data_dir())
@@ -755,7 +818,7 @@ def main() -> None:
             settings = Settings()
             apply_base_currency_settings(settings)
             db.init_db()
-            app = InventoryApp(settings)
+            app = InventoryApp(settings, log_path=log_path)
             install_tk_exception_handler(app, log_path)
             app.mainloop()
     except RuntimeError:

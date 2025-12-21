@@ -48,6 +48,7 @@ from inventorylite.error_handling import install_tk_exception_handler, setup_log
 from inventorylite.label_templates_ui import TemplateManagerDialog
 from inventorylite.tabs.categories import CategoriesTab
 from inventorylite.tabs.brands import BrandsTab
+from inventorylite.tabs.counterparties import CounterpartiesTab
 from inventorylite.tabs.products import ProductsTab, open_products_bulk_actions_dialog
 from inventorylite.tabs.reports import ReportsTab
 from inventorylite.tabs.settings import SettingsTab
@@ -72,7 +73,7 @@ from inventorylite.utils import (
     bind_common_shortcuts,
 )
 from inventorylite.ui_components import DatePicker, TableFrame, simple_prompt
-from inventorylite.dialogs import counterparty_prompt, warehouse_prompt, channel_prompt
+from inventorylite.dialogs import warehouse_prompt, channel_prompt
 from inventorylite.dialogs_documents import document_prompt, ensure_rate_for_date
 from inventorylite.dialogs_inventory import inventory_prompt
 
@@ -94,7 +95,6 @@ class InventoryApp(tk.Tk):
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill=tk.BOTH, expand=True)
 
-        self.counterparties_frame = ttk.Frame(self.notebook)
         self.warehouses_frame = ttk.Frame(self.notebook)
         self.channels_frame = ttk.Frame(self.notebook)
         self.currencies_frame = ttk.Frame(self.notebook)
@@ -126,7 +126,8 @@ class InventoryApp(tk.Tk):
             flatten_categories_provider=self.flatten_categories,
         )
         self.notebook.add(self.products_tab.frame, text="Товари")
-        self.notebook.add(self.counterparties_frame, text="Контрагенти")
+        self.counterparties_tab = CounterpartiesTab(parent=self.notebook, settings=self.settings)
+        self.notebook.add(self.counterparties_tab.frame, text="Контрагенти")
         self.notebook.add(self.warehouses_frame, text="Склади")
         self.notebook.add(self.channels_frame, text="Канали продажу")
         self.notebook.add(self.currencies_frame, text="Валюти")
@@ -146,7 +147,6 @@ class InventoryApp(tk.Tk):
         self.reports_tab = ReportsTab(parent=self.notebook, settings=self.settings)
         self.notebook.add(self.reports_tab.frame, text="Звіти")
 
-        self.create_counterparties_tab()
         self.create_warehouses_tab()
         self.create_channels_tab()
         self.create_currencies_tab()
@@ -569,124 +569,6 @@ class InventoryApp(tk.Tk):
         except Exception as exc:
             logging.exception("Backup failed")
             show_error("Резервна копія", str(exc))
-
-    # Counterparties
-    def create_counterparties_tab(self) -> None:
-        columns = [
-            ("name", "Назва", 200),
-            ("type", "Тип", 120),
-            ("phone", "Телефон", 120),
-            ("email", "Email", 170),
-            ("address", "Адреса", 200),
-            ("note", "Нотатка", 200),
-        ]
-
-        def make_table(parent: tk.Widget) -> TableFrame:
-            table = TableFrame(parent, columns)
-            table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-            table.on_double_click(self.edit_counterparty)
-            table.register_context_menu(self.edit_counterparty, self.delete_counterparty)
-            return table
-
-        self.counterparty_notebook = ttk.Notebook(self.counterparties_frame)
-        self.counterparty_notebook.pack(fill=tk.BOTH, expand=True)
-
-        supplier_tab = ttk.Frame(self.counterparty_notebook)
-        customer_tab = ttk.Frame(self.counterparty_notebook)
-        all_tab = ttk.Frame(self.counterparty_notebook)
-
-        self.counterparty_notebook.add(supplier_tab, text="Постачальники")
-        self.counterparty_notebook.add(customer_tab, text="Покупці")
-        self.counterparty_notebook.add(all_tab, text="Всі/Інші")
-
-        self.counterparty_tables = {
-            "suppliers": make_table(supplier_tab),
-            "customers": make_table(customer_tab),
-            "all": make_table(all_tab),
-        }
-        self.counterparty_tab_frames = {
-            "suppliers": supplier_tab,
-            "customers": customer_tab,
-            "all": all_tab,
-        }
-
-        btns = ttk.Frame(self.counterparties_frame)
-        btns.pack(pady=4)
-        ttk.Button(btns, text="Додати", command=self.add_counterparty).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="Змінити", command=self.edit_counterparty).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="Видалити", command=self.delete_counterparty).pack(side=tk.LEFT, padx=4)
-
-    def get_active_counterparty_selection(self) -> tuple[str, TableFrame | None, int | None]:
-        if not hasattr(self, "counterparty_notebook"):
-            return "suppliers", None, None
-        current_tab = self.counterparty_notebook.select()
-        active_key = "suppliers"
-        for key, frame in self.counterparty_tab_frames.items():
-            if str(frame) == current_tab:
-                active_key = key
-                break
-        table = self.counterparty_tables.get(active_key)
-        selected_id = table.selected_id() if table else None
-        return active_key, table, selected_id
-
-    def add_counterparty(self) -> None:
-        active_key, _, _ = self.get_active_counterparty_selection()
-        default_types = {"suppliers": "supplier", "customers": "customer", "all": "other"}
-        try:
-            values = counterparty_prompt(default_type=default_types.get(active_key))
-        except Exception as exc:
-            logging.exception("Counterparty prompt error")
-            messagebox.showerror("Контрагенти", str(exc))
-            return
-        if not values:
-            return
-        try:
-            db.add_counterparty(*values)
-            self.refresh_counterparties()
-        except sqlite3.IntegrityError:
-            show_error("Контрагенти", "Контрагент з такою назвою вже існує.")
-        except Exception:
-            logging.exception("Add counterparty error")
-            show_error("Контрагенти", "Не вдалося додати контрагента.")
-
-    def edit_counterparty(self) -> None:
-        _, _, counterparty_id = self.get_active_counterparty_selection()
-        if not counterparty_id:
-            show_error("Контрагенти", "Оберіть контрагента.")
-            return
-        rows = [c for c in db.list_counterparties() if c["id"] == counterparty_id]
-        if not rows:
-            return
-        c = rows[0]
-        values = counterparty_prompt(
-            (c["name"], c["type"], c["phone"], c["email"], c["address"], c["note"])
-        )
-        if not values:
-            return
-        try:
-            db.update_counterparty(counterparty_id, *values)
-            self.refresh_counterparties()
-        except sqlite3.IntegrityError:
-            show_error("Контрагенти", "Контрагент з такою назвою вже існує.")
-        except Exception:
-            logging.exception("Edit counterparty error")
-            show_error("Контрагенти", "Не вдалося змінити контрагента.")
-
-    def delete_counterparty(self) -> None:
-        _, _, counterparty_id = self.get_active_counterparty_selection()
-        if not counterparty_id:
-            show_error("Контрагенти", "Оберіть контрагента для видалення.")
-            return
-        if not messagebox.askyesno("Підтвердження", "Видалити контрагента?"):
-            return
-        try:
-            db.delete_counterparty(counterparty_id)
-            self.refresh_counterparties()
-        except ValueError as exc:
-            show_error("Контрагенти", str(exc))
-        except Exception:
-            logging.exception("Delete counterparty error")
-            show_error("Контрагенти", "Не вдалося видалити контрагента.")
 
     # Warehouses
     def create_warehouses_tab(self) -> None:
@@ -2640,37 +2522,8 @@ class InventoryApp(tk.Tk):
             self.products_tab.refresh_products(search)
 
     def refresh_counterparties(self) -> None:
-        rows = db.list_counterparties()
-        type_labels = {
-            "supplier": "Постачальник",
-            "customer": "Покупець",
-            "both": "Постачальник/Покупець",
-            "other": "Інший",
-        }
-
-        suppliers: list[dict] = []
-        customers: list[dict] = []
-        all_rows: list[dict] = []
-
-        for r in rows:
-            mapped = {
-                "id": r["id"],
-                "name": r["name"],
-                "type": type_labels.get(r["type"], r["type"]),
-                "phone": r["phone"] or "",
-                "email": r["email"] or "",
-                "address": r["address"] or "",
-                "note": r["note"] or "",
-            }
-            all_rows.append(mapped)
-            if r["type"] in ("supplier", "both"):
-                suppliers.append(mapped)
-            if r["type"] in ("customer", "both"):
-                customers.append(mapped)
-
-        self.counterparty_tables["suppliers"].set_rows(suppliers)
-        self.counterparty_tables["customers"].set_rows(customers)
-        self.counterparty_tables["all"].set_rows(all_rows)
+        if hasattr(self, "counterparties_tab"):
+            self.counterparties_tab.refresh_counterparties()
 
     def refresh_warehouses(self) -> None:
         rows = db.list_warehouses()

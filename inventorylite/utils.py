@@ -286,10 +286,23 @@ def bind_common_shortcuts(root: tk.Tk) -> None:
 
     if tk is None:
         return
+
+    def _find_tableframe_from_widget(widget: tk.Widget | None):
+        current = widget
+        while current is not None:
+            if hasattr(current, "copy_selection_to_clipboard") and hasattr(current, "tree"):
+                return current
+            current = getattr(current, "master", None)
+        return None
+
     def handle_copy(event: tk.Event) -> str | None:
         widget = event.widget
         if _is_text_input(widget):
             widget.event_generate("<<Copy>>")
+            return "break"
+        tableframe = _find_tableframe_from_widget(widget)
+        if tableframe:
+            tableframe.copy_selection_to_clipboard(include_headers=False)
             return "break"
         return None
 
@@ -326,6 +339,31 @@ def bind_common_shortcuts(root: tk.Tk) -> None:
         if _is_text_input(widget):
             _enable_undo(widget)
             widget.event_generate("<<Redo>>")
+            return "break"
+        return None
+
+    def handle_copy_with_headers(event: tk.Event) -> str | None:
+        widget = event.widget
+        if _is_text_input(widget):
+            widget.event_generate("<<Copy>>")
+            return "break"
+        tableframe = _find_tableframe_from_widget(widget)
+        if tableframe:
+            tableframe.copy_selection_to_clipboard(include_headers=True)
+            return "break"
+        return None
+
+    def handle_find(event: tk.Event) -> str | None:
+        widget = event.widget
+        if _is_text_input(widget):
+            return None
+        tableframe = _find_tableframe_from_widget(widget)
+        if tableframe is None:
+            tableframe = _find_tableframe_from_widget(root.focus_get())
+        if tableframe:
+            from inventorylite.dialogs_table_find import open_table_find_dialog
+
+            open_table_find_dialog(root)
             return "break"
         return None
 
@@ -419,6 +457,9 @@ def bind_common_shortcuts(root: tk.Tk) -> None:
         ("<Shift-F10>", show_context_menu_keyboard),
     ):
         root.bind_all(sequence, handler, add="+")
+
+    root.bind_all("<Control-Shift-C>", handle_copy_with_headers, add=True)
+    root.bind_all("<Control-f>", handle_find, add=True)
 
 
 class SingleInstance:

@@ -160,6 +160,32 @@ class TableFrame(ttk.Frame):
         self.tree.bind("<Button-3>", show_menu)
         self.context_menu = menu
 
+    def copy_selection_to_clipboard(
+        self,
+        include_headers: bool = False,
+        delimiter: str = "\t",
+    ) -> bool:
+        items = list(self.tree.selection())
+        if not items:
+            focus = self.tree.focus()
+            if focus:
+                items = [focus]
+            else:
+                return False
+        cols = list(self.tree.cget("columns"))
+        lines: list[str] = []
+        if include_headers:
+            headers = [self._base_headings.get(c, c) for c in cols]
+            lines.append(delimiter.join(headers))
+        for iid in items:
+            values = self.tree.item(iid, "values")
+            line = delimiter.join(str(v) for v in values)
+            lines.append(line)
+        text = "\n".join(lines)
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        return True
+
     def _on_heading_click(self, col_id: str) -> None:
         if col_id == self._sort_col:
             self._sort_desc = not self._sort_desc

@@ -7,7 +7,7 @@ from tkinter import ttk, messagebox
 from typing import Optional
 
 from inventorylite import db
-from inventorylite.helpers import _read_rate_two_way
+from inventorylite.helpers import _read_rate_two_way, parse_paste_lines
 from inventorylite.ui_components import simple_prompt
 from inventorylite.utils import Settings, get_base_currency_code
 
@@ -180,6 +180,13 @@ def document_prompt(
         text="Ціна зі середньої собівартості",
         variable=scan_use_avg_cost_var,
     ).grid(row=1, column=1, padx=6, pady=(0, 4), sticky="w")
+    paste_btn = ttk.Button(
+        scan_frame,
+        text="Вставити список…",
+        command=lambda: None,
+        state="normal" if editable else "disabled",
+    )
+    paste_btn.grid(row=1, column=2, padx=6, pady=(0, 4), sticky="w")
     scan_status = ttk.Label(scan_frame, text="")
     scan_status.grid(row=2, column=0, columnspan=5, padx=6, pady=(0, 4), sticky="w")
 
@@ -441,6 +448,263 @@ def document_prompt(
         tree.selection_set(str(idx))
         tree.focus(str(idx))
         tree.see(str(idx))
+
+    def _open_paste_preview() -> None:
+        if not editable:
+            return
+
+        preview_dlg = tk.Toplevel(dlg)
+        preview_dlg.title("Вставка списку — попередній перегляд")
+        preview_dlg.grab_set()
+        preview_dlg.columnconfigure(0, weight=1)
+        preview_dlg.rowconfigure(2, weight=1)
+
+        ttk.Label(preview_dlg, text="Вставити список рядків").grid(
+            row=0, column=0, padx=8, pady=(8, 2), sticky="w"
+        )
+        input_text = tk.Text(preview_dlg, height=9, width=60)
+        input_text.grid(row=1, column=0, padx=8, pady=4, sticky="ew")
+        try:
+            clipboard_text = dlg.clipboard_get()
+        except tk.TclError:
+            clipboard_text = ""
+        if clipboard_text:
+            input_text.insert("1.0", clipboard_text)
+
+        options_frame = ttk.Frame(preview_dlg)
+        options_frame.grid(row=2, column=0, padx=8, pady=(0, 6), sticky="ew")
+        options_frame.columnconfigure(0, weight=1)
+        merge_var = tk.BooleanVar(value=True)
+        update_price_var = tk.BooleanVar(value=False)
+        default_qty_var = tk.BooleanVar(value=True)
+        use_avg_cost_var = tk.BooleanVar(value=scan_use_avg_cost_var.get())
+
+        ttk.Checkbutton(
+            options_frame,
+            text="Об’єднувати дублікати у вставці",
+            variable=merge_var,
+        ).grid(row=0, column=0, padx=4, pady=2, sticky="w")
+        ttk.Checkbutton(
+            options_frame,
+            text="Оновлювати ціну в існуючих рядках",
+            variable=update_price_var,
+        ).grid(row=0, column=1, padx=4, pady=2, sticky="w")
+        ttk.Checkbutton(
+            options_frame,
+            text="Якщо qty не вказано → 1",
+            variable=default_qty_var,
+        ).grid(row=1, column=0, padx=4, pady=2, sticky="w")
+        ttk.Checkbutton(
+            options_frame,
+            text='Для відсутньої ціни брати "Ціна зі середньої собівартості"',
+            variable=use_avg_cost_var,
+        ).grid(row=1, column=1, padx=4, pady=2, sticky="w")
+
+        preview_columns = ["status", "code", "sku", "name", "qty", "price", "note"]
+        preview_tree = ttk.Treeview(
+            preview_dlg,
+            columns=preview_columns,
+            show="headings",
+            height=8,
+        )
+        preview_headings = {
+            "status": ("Статус", 90),
+            "code": ("Код", 120),
+            "sku": ("SKU", 90),
+            "name": ("Назва", 200),
+            "qty": ("К-сть", 80),
+            "price": ("Ціна", 90),
+            "note": ("Примітка", 180),
+        }
+        for col, (title, width) in preview_headings.items():
+            preview_tree.heading(col, text=title)
+            preview_tree.column(col, width=width, anchor="w")
+        preview_tree.grid(row=3, column=0, padx=8, pady=6, sticky="nsew")
+        preview_dlg.rowconfigure(3, weight=1)
+
+        preview_state: list[dict] = []
+
+        def _resolve_missing_price(product_row: sqlite3.Row) -> float:
+            price0 = 0.0
+            if use_avg_cost_var.get():
+                wh_id = _current_warehouse_id()
+                if wh_id:
+                    _, avg_cost = db.get_stock_balance(int(product_row["id"]), int(wh_id))
+                    if doc_type == "sale":
+                        try:
+                            rate = float(rate_var.get() or 1)
+                        except ValueError:
+                            rate = 1.0
+                        if rate <= 0:
+                            rate = 1.0
+                        price0 = avg_cost / rate
+                    else:
+                        price0 = avg_cost
+            if price0 <= 0:
+                try:
+                    price0 = float(price_var.get() or 0)
+                except ValueError:
+                    price0 = 0.0
+            return price0
+
+        def _append_note(existing: str, addition: str) -> str:
+            if not existing:
+                return addition
+            if addition in existing:
+                return existing
+            return f"{existing}; {addition}"
+
+        def _render_preview(rows: list[dict]) -> None:
+            preview_tree.delete(*preview_tree.get_children())
+            for idx, row in enumerate(rows):
+                preview_tree.insert(
+                    "",
+                    "end",
+                    iid=str(idx),
+                    values=(
+                        row["status"],
+                        row["code"],
+                        row.get("sku", ""),
+                        row.get("name", ""),
+                        f"{row['qty']:.2f}" if row.get("qty") is not None else "",
+                        f"{row['price']:.2f}" if row.get("price") is not None else "",
+                        row.get("note", ""),
+                    ),
+                )
+
+        def _run_preview() -> None:
+            nonlocal preview_state
+            preview_state = []
+            raw_text = input_text.get("1.0", "end")
+            parsed = parse_paste_lines(raw_text)
+            merged: dict[int, dict] = {}
+            for entry in parsed:
+                code = (entry.get("code") or "").strip()
+                if not code:
+                    continue
+                qty = entry.get("qty")
+                if qty is None:
+                    if default_qty_var.get():
+                        qty_val = 1.0
+                    else:
+                        preview_state.append(
+                            {
+                                "status": "NOT FOUND",
+                                "code": code,
+                                "note": "qty invalid",
+                            }
+                        )
+                        continue
+                else:
+                    qty_val = float(qty)
+                if qty_val <= 0:
+                    preview_state.append(
+                        {
+                            "status": "NOT FOUND",
+                            "code": code,
+                            "note": "qty invalid",
+                        }
+                    )
+                    continue
+                product = _scan_resolve_product(code)
+                if not product:
+                    preview_state.append(
+                        {
+                            "status": "NOT FOUND",
+                            "code": code,
+                            "note": "не знайдено код",
+                        }
+                    )
+                    continue
+                price_val = entry.get("price")
+                if price_val is None:
+                    price_val = _resolve_missing_price(product)
+                else:
+                    price_val = float(price_val)
+                row = {
+                    "status": "OK",
+                    "code": code,
+                    "sku": product["sku"],
+                    "name": product["name"],
+                    "qty": qty_val,
+                    "price": price_val,
+                    "product_id": int(product["id"]),
+                    "product_row": product,
+                    "note": "",
+                }
+                if merge_var.get():
+                    existing = merged.get(row["product_id"])
+                    if existing:
+                        existing["qty"] += row["qty"]
+                        if (
+                            existing.get("price") is not None
+                            and row.get("price") is not None
+                            and abs(existing["price"] - row["price"]) > 1e-9
+                        ):
+                            existing["note"] = _append_note(
+                                existing.get("note", ""),
+                                "ціни різні, взято першу",
+                            )
+                        merged[row["product_id"]] = existing
+                    else:
+                        merged[row["product_id"]] = row
+                else:
+                    preview_state.append(row)
+            if merge_var.get():
+                preview_state.extend(merged.values())
+            ok_count = sum(1 for row in preview_state if row.get("status") == "OK")
+            add_btn.config(state="normal" if ok_count > 0 else "disabled")
+            _render_preview(preview_state)
+
+        def _confirm_add() -> None:
+            ok_rows = [row for row in preview_state if row.get("status") == "OK"]
+            if not ok_rows:
+                return
+            added_count = 0
+            for row in ok_rows:
+                product = row["product_row"]
+                qty_val = float(row["qty"])
+                price_val = float(row["price"] or 0.0)
+                existing = next((ln for ln in line_data if ln["product_id"] == product["id"]), None)
+                if existing:
+                    existing["quantity"] += qty_val
+                    if update_price_var.get():
+                        existing["price"] = price_val
+                    existing["amount"] = existing["quantity"] * existing["price"]
+                else:
+                    try:
+                        exp0 = float(expense_var.get() or 0)
+                    except ValueError:
+                        exp0 = 0.0
+                    product_name = f"{product['name']} ({product['sku']})"
+                    line_data.append(
+                        {
+                            "product_id": product["id"],
+                            "product_name": product_name,
+                            "quantity": qty_val,
+                            "price": price_val,
+                            "expense": exp0,
+                            "amount": qty_val * price_val,
+                        }
+                    )
+                added_count += 1
+            refresh_lines()
+            not_found = [row["code"] for row in preview_state if row.get("status") != "OK"]
+            preview_list = ", ".join(not_found[:20])
+            summary = f"Додано: {added_count}, не знайдено: {len(not_found)}"
+            if preview_list:
+                summary += f"\nКоди: {preview_list}"
+            messagebox.showinfo("Вставка списку", summary)
+            preview_dlg.destroy()
+
+        btns_frame = ttk.Frame(preview_dlg)
+        btns_frame.grid(row=4, column=0, padx=8, pady=(0, 8), sticky="e")
+        ttk.Button(btns_frame, text="Preview", command=_run_preview).pack(side=tk.LEFT, padx=4)
+        add_btn = ttk.Button(btns_frame, text="Додати", command=_confirm_add, state="disabled")
+        add_btn.pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns_frame, text="Закрити", command=preview_dlg.destroy).pack(side=tk.LEFT, padx=4)
+
+    paste_btn.config(command=_open_paste_preview)
 
     def _on_scan_commit(event=None):
         if not editable:

@@ -83,6 +83,11 @@ DEFAULT_SETTINGS = {
     "sales_import": {"templates": {}, "last_template": ""},
     "purchase_import": {"templates": {}, "last_template": ""},
     "print": {"last_template_id": None},
+    "ui_state": {
+        "window_geometry": "",
+        "last_tab": "",
+        "table_columns": {},
+    },
     "defaults": {
         "product": {
             "unit": "pcs",

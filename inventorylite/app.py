@@ -71,9 +71,13 @@ class InventoryApp(tk.Tk):
     def __init__(self, settings: Settings | None = None, log_path: Path | None = None) -> None:
         super().__init__()
         self.title(APP_NAME)
-        self.geometry("1180x720")
-        self.iconbitmap(default="icons/app.ico") if Path("icons/app.ico").exists() else None
         self.settings = settings or Settings()
+        saved_geometry = self.settings.get("ui_state", "window_geometry") or ""
+        if saved_geometry:
+            self.geometry(saved_geometry)
+        else:
+            self.geometry("1180x720")
+        self.iconbitmap(default="icons/app.ico") if Path("icons/app.ico").exists() else None
         self.log_path = log_path
         apply_base_currency_settings(self.settings)
         self.status_var = tk.StringVar(value="Готово")
@@ -81,6 +85,7 @@ class InventoryApp(tk.Tk):
         bind_common_shortcuts(self)
         self.create_menu()
         self.apply_settings()
+        self.protocol("WM_DELETE_WINDOW", self.on_exit)
 
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill=tk.BOTH, expand=True)
@@ -172,6 +177,7 @@ class InventoryApp(tk.Tk):
         self.notebook.add(self.sales_tab.frame, text="Продажі")
         # "Про програму" is opened from the File menu
 
+        self.after_idle(self._restore_last_tab)
         self.refresh_all()
 
     # Menu
@@ -190,7 +196,7 @@ class InventoryApp(tk.Tk):
         file_menu.add_separator()
         file_menu.add_command(label="Про програму", command=self.show_about)
         file_menu.add_separator()
-        file_menu.add_command(label="Вихід", command=self.destroy)
+        file_menu.add_command(label="Вихід", command=self.on_exit)
         menubar.add_cascade(label="Файл", menu=file_menu)
         diagnostics_menu = tk.Menu(menubar, tearoff=0)
         diagnostics_menu.add_command(
@@ -202,6 +208,45 @@ class InventoryApp(tk.Tk):
         diagnostics_menu.add_command(label="Швидка перевірка БД", command=self.show_db_healthcheck)
         menubar.add_cascade(label="Діагностика", menu=diagnostics_menu)
         self.config(menu=menubar)
+
+    def _restore_last_tab(self) -> None:
+        name = (self.settings.get("ui_state", "last_tab") or "").strip()
+        if not name:
+            return
+        for tab_id in self.notebook.tabs():
+            if self.notebook.tab(tab_id, "text") == name:
+                self.notebook.select(tab_id)
+                return
+
+    def _persist_ui_state(self) -> None:
+        try:
+            self.settings.set(self.geometry(), "ui_state", "window_geometry")
+        except Exception:
+            pass
+        try:
+            selected = self.notebook.select()
+            if selected:
+                text = self.notebook.tab(selected, "text")
+                self.settings.set(text, "ui_state", "last_tab")
+        except Exception:
+            pass
+        for table in (
+            getattr(self.products_tab, "product_table", None),
+            getattr(self.stock_tab, "stock_table", None),
+            getattr(self.purchases_tab, "purchase_table", None),
+            getattr(self.sales_tab, "sales_table", None),
+            getattr(self.inventory_tab, "inventory_table", None),
+        ):
+            if table:
+                try:
+                    table.persist_column_widths()
+                except Exception:
+                    pass
+
+    def on_exit(self) -> None:
+        self._persist_ui_state()
+        self.settings.save()
+        self.destroy()
 
     def open_log_folder(self) -> None:
         if not self.log_path:

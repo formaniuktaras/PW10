@@ -76,7 +76,12 @@ class PurchasesTab:
             ("total_extra", "Супутні (база)", 120),
             ("comment", "Коментар", 240),
         ]
-        self.purchase_table = TableFrame(self.frame, columns)
+        self.purchase_table = TableFrame(
+            self.frame,
+            columns,
+            settings=self.settings,
+            persist_key="purchases_table",
+        )
         self.purchase_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
         self.purchase_table.on_double_click(self.edit_purchase)
         self.purchase_table.register_context_menu_actions(

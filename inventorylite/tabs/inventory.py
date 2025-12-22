@@ -76,7 +76,12 @@ class InventoryTab:
             ("diff_total", "Розбіжність", 120),
             ("comment", "Коментар", 240),
         ]
-        self.inventory_table = TableFrame(self.frame, columns)
+        self.inventory_table = TableFrame(
+            self.frame,
+            columns,
+            settings=self.settings,
+            persist_key="inventory_table",
+        )
         self.inventory_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
         self.inventory_table.on_double_click(self.edit_inventory)
         self.inventory_table.register_context_menu_actions(

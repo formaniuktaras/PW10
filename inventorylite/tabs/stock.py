@@ -44,7 +44,13 @@ class StockTab:
             ("quantity", "Кількість", 100),
             ("average_cost", "Сер. собівартість", 140),
         ]
-        self.stock_table = TableFrame(self.frame, columns, selectmode="extended")
+        self.stock_table = TableFrame(
+            self.frame,
+            columns,
+            selectmode="extended",
+            settings=self.settings,
+            persist_key="stock_table",
+        )
         self.stock_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
         self.stock_table.register_context_menu_actions(
             [

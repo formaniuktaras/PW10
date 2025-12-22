@@ -76,7 +76,13 @@ class ProductsTab:
             ("unit", "Одиниця", 90),
             ("is_active", "Активний", 90),
         ]
-        self.product_table = TableFrame(self.frame, columns, selectmode="extended")
+        self.product_table = TableFrame(
+            self.frame,
+            columns,
+            selectmode="extended",
+            settings=self.settings,
+            persist_key="products_table",
+        )
         self.product_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
         self.product_table.on_double_click(self.edit_product)
         self.product_table.register_context_menu(self.edit_product, self.delete_product)

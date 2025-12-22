@@ -74,7 +74,12 @@ class SalesTab:
             ("total", "Сума (база)", 110),
             ("comment", "Коментар", 240),
         ]
-        self.sales_table = TableFrame(self.frame, columns)
+        self.sales_table = TableFrame(
+            self.frame,
+            columns,
+            settings=self.settings,
+            persist_key="sales_table",
+        )
         self.sales_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
         self.sales_table.on_double_click(self.edit_sale)
         self.sales_table.register_context_menu_actions(

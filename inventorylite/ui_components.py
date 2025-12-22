@@ -6,15 +6,28 @@ from tkinter import messagebox, ttk
 import calendar
 from datetime import date, datetime
 from functools import cmp_to_key
-from typing import Any, Callable, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, List, Optional
+
+if TYPE_CHECKING:
+    from inventorylite.utils import Settings
 
 
 class TableFrame(ttk.Frame):
-    def __init__(self, master: tk.Widget, columns: List[tuple], selectmode: str = "browse", **kwargs):
+    def __init__(
+        self,
+        master: tk.Widget,
+        columns: List[tuple],
+        selectmode: str = "browse",
+        settings: Settings | None = None,
+        persist_key: str | None = None,
+        **kwargs,
+    ):
         super().__init__(master, **kwargs)
         self._sort_col: str | None = None
         self._sort_desc = False
         self._base_headings: dict[str, str] = {}
+        self._settings = settings
+        self._persist_key = persist_key
         self.tree = ttk.Treeview(
             self, columns=[c[0] for c in columns], show="headings", selectmode=selectmode
         )
@@ -22,6 +35,13 @@ class TableFrame(ttk.Frame):
             self._base_headings[col_id] = col_title
             self.tree.heading(col_id, text=col_title, command=lambda c=col_id: self._on_heading_click(c))
             self.tree.column(col_id, width=width, anchor="w")
+        if self._settings and self._persist_key:
+            widths = (
+                self._settings.get("ui_state", "table_columns", self._persist_key, default={}) or {}
+            )
+            for col_id in self.tree.cget("columns"):
+                if col_id in widths:
+                    self.tree.column(col_id, width=int(widths[col_id]))
         yscroll = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=yscroll.set)
         self.tree.grid(row=0, column=0, sticky="nsew")
@@ -40,6 +60,12 @@ class TableFrame(ttk.Frame):
 
     def tag_configure(self, tag: str, **kwargs) -> None:
         self.tree.tag_configure(tag, **kwargs)
+
+    def persist_column_widths(self) -> None:
+        if not self._settings or not self._persist_key:
+            return
+        widths = {col: int(self.tree.column(col, "width")) for col in self.tree.cget("columns")}
+        self._settings.set(widths, "ui_state", "table_columns", self._persist_key)
 
     def selected_id(self) -> Optional[str | int]:
         item = self.tree.selection()

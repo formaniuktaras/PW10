@@ -9,7 +9,7 @@ from tkinter import ttk, messagebox, filedialog
 from typing import Optional
 
 from inventorylite import db
-from inventorylite.helpers import _parse_date_value, _sanitize_barcode_prefix
+from inventorylite.helpers import _parse_date_value, _sanitize_barcode_prefix, parse_paste_lines
 from inventorylite.ui_components import DatePicker
 from inventorylite.utils import Settings, show_error
 
@@ -540,6 +540,234 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
         if not added_any:
             messagebox.showinfo("Інвентаризація", "У вибраній категорії немає товарів.")
 
+    def _open_paste_preview() -> None:
+        if not editable:
+            return
+
+        preview_dlg = tk.Toplevel(dlg)
+        preview_dlg.title("Вставка списку — попередній перегляд")
+        preview_dlg.grab_set()
+        preview_dlg.columnconfigure(0, weight=1)
+        preview_dlg.rowconfigure(2, weight=1)
+
+        ttk.Label(preview_dlg, text="Вставити список рядків").grid(
+            row=0, column=0, padx=8, pady=(8, 2), sticky="w"
+        )
+        input_text = tk.Text(preview_dlg, height=9, width=60)
+        input_text.grid(row=1, column=0, padx=8, pady=4, sticky="ew")
+        try:
+            clipboard_text = dlg.clipboard_get()
+        except tk.TclError:
+            clipboard_text = ""
+        if clipboard_text:
+            input_text.insert("1.0", clipboard_text)
+
+        options_frame = ttk.Frame(preview_dlg)
+        options_frame.grid(row=2, column=0, padx=8, pady=(0, 6), sticky="ew")
+        options_frame.columnconfigure(0, weight=1)
+        merge_var = tk.BooleanVar(value=True)
+        default_qty_var = tk.BooleanVar(value=True)
+        mode_var = tk.StringVar(value="add")
+
+        ttk.Checkbutton(
+            options_frame,
+            text="Об’єднувати дублікати",
+            variable=merge_var,
+        ).grid(row=0, column=0, padx=4, pady=2, sticky="w")
+        ttk.Checkbutton(
+            options_frame,
+            text="Якщо qty не вказано → 1",
+            variable=default_qty_var,
+        ).grid(row=0, column=1, padx=4, pady=2, sticky="w")
+        ttk.Label(options_frame, text="Режим qty:").grid(row=1, column=0, padx=4, pady=2, sticky="w")
+        ttk.Radiobutton(
+            options_frame,
+            text="Додати до факту (+qty)",
+            variable=mode_var,
+            value="add",
+        ).grid(row=1, column=1, padx=4, pady=2, sticky="w")
+        ttk.Radiobutton(
+            options_frame,
+            text="Встановити факт = qty",
+            variable=mode_var,
+            value="set",
+        ).grid(row=2, column=1, padx=4, pady=2, sticky="w")
+
+        preview_columns = ["status", "code", "sku", "name", "qty", "action", "note"]
+        preview_tree = ttk.Treeview(
+            preview_dlg,
+            columns=preview_columns,
+            show="headings",
+            height=8,
+        )
+        preview_headings = {
+            "status": ("Статус", 110),
+            "code": ("Код", 120),
+            "sku": ("SKU", 90),
+            "name": ("Назва", 200),
+            "qty": ("К-сть", 80),
+            "action": ("Дія", 90),
+            "note": ("Примітка", 180),
+        }
+        for col, (title, width) in preview_headings.items():
+            preview_tree.heading(col, text=title)
+            preview_tree.column(col, width=width, anchor="w")
+        preview_tree.grid(row=3, column=0, padx=8, pady=6, sticky="nsew")
+        preview_dlg.rowconfigure(3, weight=1)
+
+        preview_state: list[dict] = []
+
+        def _resolve_product(code: str) -> Optional[sqlite3.Row]:
+            prefix = _sanitize_barcode_prefix(settings.get("defaults", "product", "barcode_prefix") or "")
+            product = db.find_product_by_scan_code(code, barcode_prefix=prefix)
+            if product:
+                return product
+            return db.find_product_by_sku_or_name(sku=code, name=None, supplier_sku=None)
+
+        def _render_preview(rows: list[dict]) -> None:
+            preview_tree.delete(*preview_tree.get_children())
+            for idx, row in enumerate(rows):
+                preview_tree.insert(
+                    "",
+                    "end",
+                    iid=str(idx),
+                    values=(
+                        row["status"],
+                        row["code"],
+                        row.get("sku", ""),
+                        row.get("name", ""),
+                        f"{row['qty']:.2f}" if row.get("qty") is not None else "",
+                        row.get("action", ""),
+                        row.get("note", ""),
+                    ),
+                )
+
+        def _run_preview() -> None:
+            nonlocal preview_state
+            preview_state = []
+            raw_text = input_text.get("1.0", "end")
+            parsed = parse_paste_lines(raw_text)
+            merged: dict[int, dict] = {}
+            action_label = "+qty" if mode_var.get() == "add" else "set=qty"
+            for entry in parsed:
+                code = (entry.get("code") or "").strip()
+                if not code:
+                    continue
+                qty = entry.get("qty")
+                if qty is None:
+                    if default_qty_var.get():
+                        qty_val = 1.0
+                    else:
+                        preview_state.append(
+                            {
+                                "status": "NOT FOUND",
+                                "code": code,
+                                "note": "qty invalid",
+                            }
+                        )
+                        continue
+                else:
+                    qty_val = float(qty)
+                if qty_val < 0:
+                    preview_state.append(
+                        {
+                            "status": "NOT FOUND",
+                            "code": code,
+                            "note": "qty invalid",
+                        }
+                    )
+                    continue
+                product = _resolve_product(code)
+                if not product:
+                    preview_state.append(
+                        {
+                            "status": "NOT FOUND",
+                            "code": code,
+                            "note": "не знайдено код",
+                        }
+                    )
+                    continue
+                if not _is_allowed_product(int(product["id"])):
+                    preview_state.append(
+                        {
+                            "status": "SKIPPED (category)",
+                            "code": code,
+                            "sku": product["sku"],
+                            "name": product["name"],
+                            "qty": qty_val,
+                            "action": action_label,
+                            "note": "поза категорією",
+                        }
+                    )
+                    continue
+                row = {
+                    "status": "OK",
+                    "code": code,
+                    "sku": product["sku"],
+                    "name": product["name"],
+                    "qty": qty_val,
+                    "action": action_label,
+                    "product_id": int(product["id"]),
+                    "product_row": product,
+                    "note": "",
+                }
+                if merge_var.get():
+                    existing = merged.get(row["product_id"])
+                    if existing:
+                        existing["qty"] += row["qty"]
+                        merged[row["product_id"]] = existing
+                    else:
+                        merged[row["product_id"]] = row
+                else:
+                    preview_state.append(row)
+            if merge_var.get():
+                preview_state.extend(merged.values())
+            ok_count = sum(1 for row in preview_state if row.get("status") == "OK")
+            add_btn.config(state="normal" if ok_count > 0 else "disabled")
+            _render_preview(preview_state)
+
+        def _confirm_add() -> None:
+            ok_rows = [row for row in preview_state if row.get("status") == "OK"]
+            if not ok_rows:
+                return
+            added = 0
+            updated = 0
+            for row in ok_rows:
+                product = row["product_row"]
+                qty_val = float(row["qty"])
+                existing = next((ln for ln in line_data if ln["product_id"] == product["id"]), None)
+                if mode_var.get() == "add":
+                    _add_line(product, counted_delta=qty_val)
+                    if existing:
+                        updated += 1
+                    else:
+                        added += 1
+                else:
+                    if existing:
+                        existing["counted_qty"] = qty_val
+                        updated += 1
+                    else:
+                        _add_line(product, counted_delta=0.0)
+                        new_line = next((ln for ln in line_data if ln["product_id"] == product["id"]), None)
+                        if new_line:
+                            new_line["counted_qty"] = qty_val
+                        added += 1
+            refresh_lines()
+            skipped = sum(1 for row in preview_state if row.get("status") == "SKIPPED (category)")
+            not_found = sum(1 for row in preview_state if row.get("status") == "NOT FOUND")
+            messagebox.showinfo(
+                "Вставка списку",
+                f"Додано: {added}, оновлено: {updated}, пропущено: {skipped}, не знайдено: {not_found}",
+            )
+            preview_dlg.destroy()
+
+        btns_frame = ttk.Frame(preview_dlg)
+        btns_frame.grid(row=4, column=0, padx=8, pady=(0, 8), sticky="e")
+        ttk.Button(btns_frame, text="Preview", command=_run_preview).pack(side=tk.LEFT, padx=4)
+        add_btn = ttk.Button(btns_frame, text="Додати", command=_confirm_add, state="disabled")
+        add_btn.pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns_frame, text="Закрити", command=preview_dlg.destroy).pack(side=tk.LEFT, padx=4)
+
     def _import_lines_csv() -> None:
         if not editable:
             return
@@ -694,6 +922,12 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
     ttk.Button(btn_row, text="Додати товар…", command=_add_product, state="normal" if editable else "disabled").pack(
         side=tk.LEFT, padx=4
     )
+    ttk.Button(
+        btn_row,
+        text="Вставити список…",
+        command=_open_paste_preview,
+        state="normal" if editable else "disabled",
+    ).pack(side=tk.LEFT, padx=4)
     ttk.Button(
         btn_row,
         text="Редагувати рядок…",

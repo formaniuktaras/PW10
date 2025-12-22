@@ -22,6 +22,59 @@ def _parse_num(text: str) -> float | None:
         return None
 
 
+def parse_paste_lines(text: str) -> list[dict]:
+    """
+    Приймає довільний текст зі строками.
+    Кожен рядок може мати:
+      CODE
+      CODE qty
+      CODE;qty;price
+      CODE\tqty\tprice
+    Розділювачі: пробіл(и), таб, ; , |
+    Ігнорувати порожні рядки.
+    Ігнорувати рядки, що починаються з # або //
+    Повертає список dict:
+      {
+        "raw": original_line,
+        "code": str,
+        "qty": float|None,
+        "price": float|None
+      }
+    qty/price парсити з підтримкою коми як десяткового розділювача.
+    Якщо qty не вказано -> None (не підставляти тут дефолт).
+    Якщо в рядку 2+ чисел — перше трактувати як qty, друге як price.
+    """
+    results: list[dict] = []
+    if not text:
+        return results
+    for raw_line in text.splitlines():
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#") or stripped.startswith("//"):
+            continue
+        parts = [part for part in re.split(r"[;\t|]|\s+", stripped) if part]
+        if not parts:
+            continue
+        code = parts[0]
+        qty = None
+        price = None
+        numbers: list[float] = []
+        for token in parts[1:]:
+            parsed = _parse_num(token)
+            if parsed is None:
+                continue
+            numbers.append(parsed)
+            if len(numbers) >= 2:
+                break
+        if numbers:
+            qty = numbers[0]
+        if len(numbers) >= 2:
+            price = numbers[1]
+        results.append({"raw": raw_line, "code": code, "qty": qty, "price": price})
+    return results
+
+
 def _read_rate_two_way(cur: str, base: str, v_direct: str, v_inverse: str) -> float:
     """
     Returns canonical rate: 1 cur = rate base

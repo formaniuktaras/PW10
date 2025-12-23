@@ -5,6 +5,7 @@ import datetime
 import json
 import logging
 import os
+import sqlite3
 import shutil
 import sys
 import tempfile
@@ -498,15 +499,23 @@ class SingleInstance:
     def release(self) -> None:
         try:
             if self.handle:
-                if msvcrt:
+                try:
+                    if msvcrt:
+                        try:
+                            msvcrt.locking(self.handle.fileno(), msvcrt.LK_UNLCK, 1)
+                        except OSError:
+                            pass
+                    elif fcntl:
+                        fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+                finally:
                     try:
-                        msvcrt.locking(self.handle.fileno(), msvcrt.LK_UNLCK, 1)
-                    except OSError:
+                        self.handle.close()
+                    except Exception:
                         pass
-                elif fcntl:
-                    fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
-                self.handle.close()
-                self.lock_path.unlink(missing_ok=True)
+                try:
+                    self.lock_path.unlink(missing_ok=True)
+                except Exception:
+                    logging.warning("Failed to remove lock file: %s", self.lock_path, exc_info=True)
         finally:
             self.handle = None
 
@@ -515,8 +524,14 @@ class SingleInstance:
             raise RuntimeError("Application is already running.")
         return self
 
-def __exit__(self, exc_type, exc, tb) -> None:
-    self.release()
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.release()
+
+    def __del__(self) -> None:  # pragma: no cover - best-effort cleanup
+        try:
+            self.release()
+        except Exception:
+            pass
 
 
 def _is_relative_to(path: Path, base: Path) -> bool:
@@ -547,13 +562,40 @@ def prune_old_files(folder: Path, *, prefix: str, suffix: str, keep_last: int) -
             logging.warning("Failed to delete old backup: %s", old, exc_info=True)
 
 
-def backup_database(db_path: Path, *, keep_last: int = 30) -> Path:
+def backup_database_consistent(db_path: Path, target: Path, *, timeout: float = 5.0) -> None:
+    """
+    Create a consistent database snapshot using SQLite backup API.
+    Works even when the database is open under normal circumstances.
+    """
+    src = sqlite3.connect(db_path, timeout=timeout)
+    try:
+        dst = sqlite3.connect(target, timeout=timeout)
+        try:
+            src.backup(dst)
+            dst.commit()
+        finally:
+            dst.close()
+    finally:
+        src.close()
+
+
+def backup_database(
+    db_path: Path, *, keep_last: int = 30, conn: sqlite3.Connection | None = None
+) -> Path:
     """Create timestamped copy of the database in the backups folder."""
     backups_dir = get_backups_dir()
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     target = backups_dir / f"data_{timestamp}.db"
     backups_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy(db_path, target)
+    if conn is not None:
+        dst_conn = sqlite3.connect(target, timeout=5.0)
+        try:
+            conn.backup(dst_conn)
+            dst_conn.commit()
+        finally:
+            dst_conn.close()
+    else:
+        backup_database_consistent(db_path, target)
     prune_old_files(backups_dir, prefix="data_", suffix=".db", keep_last=keep_last)
     logging.info("Database backup created: %s", target)
     return target
@@ -570,14 +612,26 @@ def backup_all_data(target: Path | None = None) -> Path:
         target = backups_dir / f"{APP_NAME}_backup_{timestamp}.zip"
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for path in data_dir.rglob("*"):
-            if path.is_dir():
-                continue
-            if target.resolve() == path.resolve():
-                # Skip the archive file itself if it lives in the data directory.
-                continue
-            archive.write(path, path.relative_to(data_dir))
+    with tempfile.TemporaryDirectory() as tmp:
+        snapshot_path = Path(tmp) / "data.db"
+        backup_database_consistent(get_db_path(), snapshot_path)
+        with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.write(snapshot_path, "data.db")
+            for path in data_dir.rglob("*"):
+                if path.is_dir():
+                    continue
+                if target.resolve() == path.resolve():
+                    # Skip the archive file itself if it lives in the data directory.
+                    continue
+                if path == data_dir / "data.db":
+                    continue
+                if _is_relative_to(path, backups_dir):
+                    continue
+                if path.name == "app.lock":
+                    continue
+                if path.suffix == ".log":
+                    continue
+                archive.write(path, path.relative_to(data_dir))
 
     prune_old_files(backups_dir, prefix=f"{APP_NAME}_backup_", suffix=".zip", keep_last=30)
     logging.info("Full data backup created: %s", target)

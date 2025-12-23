@@ -58,6 +58,19 @@ py -3.13 -m PyInstaller --onedir --noconsole inventorylite/app.py
   ```
   Логи пишуться у `%LOCALAPPDATA%\InventoryLite\app.log`.
 
+## Самоперевірка (manual)
+Запустити базові self-check скрипти можна локально перед змінами:
+
+```bash
+python -m compileall -q inventorylite
+python -m inventorylite.self_check_headless_import
+python -m inventorylite.self_check_backup_restore
+python -m inventorylite.self_check_inventory
+python -m inventorylite.self_check_atomicity_and_uniques
+python -m inventorylite.self_check_extracost_variant_b
+python -m inventorylite.self_check_normalization_edges
+```
+
 ## Структура даних і резервні копії
 - **Основні файли**: `data.db` (SQLite), `app.log` (логи), `settings.json` (налаштування), `backups/*.zip` (повні бекапи), `exports/*.csv` (експортовані таблиці).
 - **Резервне копіювання**: меню «Файл» → «Резервна копія всіх даних» створює ZIP із БД, бекапами та експортами; «Резервна копія БД» — тільки `data.db`.

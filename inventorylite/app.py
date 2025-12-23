@@ -31,7 +31,7 @@ from inventorylite.helpers import (
     _parse_float_value,
     _parse_num,
 )
-from inventorylite.error_handling import install_tk_exception_handler, setup_logging
+from inventorylite.error_handling import setup_logging
 from inventorylite.dialogs_labels import open_labels_print_dialog
 from inventorylite.tabs.categories import CategoriesTab
 from inventorylite.tabs.brands import BrandsTab
@@ -864,14 +864,40 @@ def main() -> None:
         with SingleInstance(get_lock_path()):
             settings = Settings()
             apply_base_currency_settings(settings)
-            db.init_db()
+            try:
+                db.init_db()
+            except ValueError as exc:
+                logging.exception("Database schema version is incompatible")
+                messagebox.showerror("Несумісна база даних", str(exc))
+                return
             app = InventoryApp(settings, log_path=log_path)
-            install_tk_exception_handler(app, log_path)
+
+            def _tk_report_callback_exception(exc, val, tb):
+                logging.exception("Unhandled Tk exception", exc_info=(exc, val, tb))
+                try:
+                    messagebox.showerror(
+                        "Помилка",
+                        "Сталася помилка. Деталі записані в лог.\n"
+                        f"Лог: {log_path.parent}\n\n"
+                        "Спробуйте перезапустити програму. Якщо помилка повторюється — надішліть лог.",
+                    )
+                except tk.TclError:
+                    print(
+                        "Сталася помилка. Деталі записані в лог.",
+                        f"Лог: {log_path.parent}",
+                        file=sys.stderr,
+                    )
+
+            app.report_callback_exception = _tk_report_callback_exception  # type: ignore[attr-defined]
             app.mainloop()
     except RuntimeError:
         messagebox.showwarning(APP_NAME, "Програма вже запущена.")
     except ValueError as exc:
-        messagebox.showerror(APP_NAME, str(exc))
+        logging.exception("Unhandled value error during startup")
+        try:
+            messagebox.showerror(APP_NAME, str(exc))
+        except tk.TclError:
+            print(str(exc), file=sys.stderr)
     except Exception:
         logging.exception("Fatal error")
         try:

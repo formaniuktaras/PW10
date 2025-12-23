@@ -62,10 +62,16 @@ def normalize_supplier_sku(raw: str | None) -> str | None:
 
 def get_connection() -> sqlite3.Connection:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=5.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
+    apply_connection_pragmas(conn)
     return conn
+
+
+def apply_connection_pragmas(conn: sqlite3.Connection) -> None:
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("PRAGMA temp_store = MEMORY")
 
 
 @contextmanager

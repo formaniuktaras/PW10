@@ -542,6 +542,15 @@ def _is_relative_to(path: Path, base: Path) -> bool:
         return False
 
 
+def is_wal_file(path: Path) -> bool:
+    return (
+        path.name.endswith("-wal")
+        or path.name.endswith("-shm")
+        or path.name.endswith(".db-wal")
+        or path.name.endswith(".db-shm")
+    )
+
+
 def prune_old_files(folder: Path, *, prefix: str, suffix: str, keep_last: int) -> None:
     if keep_last < 0:
         return
@@ -567,10 +576,14 @@ def backup_database_consistent(db_path: Path, target: Path, *, timeout: float = 
     Create a consistent database snapshot using SQLite backup API.
     Works even when the database is open under normal circumstances.
     """
+    from inventorylite import db as db_module
+
     src = sqlite3.connect(db_path, timeout=timeout)
+    db_module.apply_connection_pragmas(src)
     try:
         dst = sqlite3.connect(target, timeout=timeout)
         try:
+            db_module.apply_connection_pragmas(dst)
             src.backup(dst)
             dst.commit()
         finally:
@@ -590,6 +603,9 @@ def backup_database(
     if conn is not None:
         dst_conn = sqlite3.connect(target, timeout=5.0)
         try:
+            from inventorylite import db as db_module
+
+            db_module.apply_connection_pragmas(dst_conn)
             conn.backup(dst_conn)
             dst_conn.commit()
         finally:
@@ -627,15 +643,28 @@ def backup_all_data(target: Path | None = None) -> Path:
                     continue
                 if _is_relative_to(path, backups_dir):
                     continue
+                if is_wal_file(path):
+                    continue
                 if path.name == "app.lock":
                     continue
                 if path.suffix == ".log":
+                    continue
+                if path.name.endswith(".tmp") or path.name.endswith(".journal"):
                     continue
                 archive.write(path, path.relative_to(data_dir))
 
     prune_old_files(backups_dir, prefix=f"{APP_NAME}_backup_", suffix=".zip", keep_last=30)
     logging.info("Full data backup created: %s", target)
     return target
+
+
+def _remove_wal_shm_files(base: Path) -> None:
+    for pattern in ("*.db-wal", "*.db-shm", "*-wal", "*-shm"):
+        for path in base.glob(pattern):
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                logging.warning("Failed to delete WAL/SHM file: %s", path, exc_info=True)
 
 
 def restore_all_data(archive_path: Path) -> None:
@@ -676,6 +705,8 @@ def restore_all_data(archive_path: Path) -> None:
             else:
                 item.unlink(missing_ok=True)
 
+        _remove_wal_shm_files(data_dir)
+
         for source in temp_dir.rglob("*"):
             target = data_dir / source.relative_to(temp_dir)
             if source.is_dir():
@@ -683,6 +714,8 @@ def restore_all_data(archive_path: Path) -> None:
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
+
+    _remove_wal_shm_files(data_dir)
 
     logging.info("Pre-restore backup: %s", pre_restore_backup)
     prune_old_files(backups_dir, prefix=f"{APP_NAME}_pre_restore_", suffix=".zip", keep_last=10)

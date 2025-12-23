@@ -474,23 +474,28 @@ def init_db() -> None:
             """
         )
         _apply_migrations(conn)
-        assert _get_user_version(conn) == LATEST_SCHEMA_VERSION
+        final = _get_user_version(conn)
+        if final != LATEST_SCHEMA_VERSION:
+            raise ValueError(f"Schema version mismatch: db={final}, app={LATEST_SCHEMA_VERSION}")
     logging.info("Database initialized at %s", db_path)
 
 
 def _apply_migrations(conn: sqlite3.Connection) -> None:
     current = _get_user_version(conn)
     if current > LATEST_SCHEMA_VERSION:
-        logging.warning("DB schema version %s is newer than app supports %s", current, LATEST_SCHEMA_VERSION)
-        return
+        raise ValueError(
+            f"База даних новішої версії (schema v{current}), ніж ця програма (v{LATEST_SCHEMA_VERSION}). "
+            "Оновіть програму або відновіть стару копію БД."
+        )
 
     if current == LATEST_SCHEMA_VERSION:
         return
 
-    try:
-        utils.backup_database(get_db_path())
-    except Exception:
-        logging.exception("Pre-migration backup failed (continuing)")
+    if current != 0:
+        try:
+            utils.backup_database(get_db_path())
+        except Exception:
+            logging.exception("Pre-migration backup failed (continuing)")
 
     for v in range(current + 1, LATEST_SCHEMA_VERSION + 1):
         logging.info("Applying DB migration v%s", v)

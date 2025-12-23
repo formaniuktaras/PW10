@@ -112,6 +112,12 @@ def get_data_dir() -> Path:
     return path
 
 
+def get_backups_dir() -> Path:
+    d = get_data_dir() / "backups"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def get_db_path() -> Path:
     return get_data_dir() / "data.db"
 
@@ -509,17 +515,8 @@ class SingleInstance:
             raise RuntimeError("Application is already running.")
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> None:
-        self.release()
-
-
-def backup_database(db_path: Path) -> Path:
-    """Create timestamped copy of the database in the same folder."""
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    target = db_path.with_name(f"data_{timestamp}.db")
-    shutil.copy(db_path, target)
-    logging.info("Database backup created: %s", target)
-    return target
+def __exit__(self, exc_type, exc, tb) -> None:
+    self.release()
 
 
 def _is_relative_to(path: Path, base: Path) -> bool:
@@ -530,14 +527,47 @@ def _is_relative_to(path: Path, base: Path) -> bool:
         return False
 
 
+def prune_old_files(folder: Path, *, prefix: str, suffix: str, keep_last: int) -> None:
+    if keep_last < 0:
+        return
+    try:
+        candidates = [
+            path
+            for path in folder.iterdir()
+            if path.is_file() and path.name.startswith(prefix) and path.name.endswith(suffix)
+        ]
+    except FileNotFoundError:
+        return
+
+    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    for old in candidates[keep_last:]:
+        try:
+            old.unlink(missing_ok=True)
+        except Exception:
+            logging.warning("Failed to delete old backup: %s", old, exc_info=True)
+
+
+def backup_database(db_path: Path, *, keep_last: int = 30) -> Path:
+    """Create timestamped copy of the database in the backups folder."""
+    backups_dir = get_backups_dir()
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    target = backups_dir / f"data_{timestamp}.db"
+    backups_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy(db_path, target)
+    prune_old_files(backups_dir, prefix="data_", suffix=".db", keep_last=keep_last)
+    logging.info("Database backup created: %s", target)
+    return target
+
+
 def backup_all_data(target: Path | None = None) -> Path:
     """Archive the entire data directory into a single zip file."""
 
     data_dir = get_data_dir()
     data_dir.mkdir(parents=True, exist_ok=True)
+    backups_dir = get_backups_dir()
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     if target is None:
-        target = data_dir / f"{APP_NAME}_backup_{timestamp}.zip"
+        target = backups_dir / f"{APP_NAME}_backup_{timestamp}.zip"
     target.parent.mkdir(parents=True, exist_ok=True)
 
     with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -549,6 +579,7 @@ def backup_all_data(target: Path | None = None) -> Path:
                 continue
             archive.write(path, path.relative_to(data_dir))
 
+    prune_old_files(backups_dir, prefix=f"{APP_NAME}_backup_", suffix=".zip", keep_last=30)
     logging.info("Full data backup created: %s", target)
     return target
 
@@ -562,6 +593,16 @@ def restore_all_data(archive_path: Path) -> None:
 
     data_dir = get_data_dir()
     data_dir.mkdir(parents=True, exist_ok=True)
+    backups_dir = get_backups_dir()
+
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    pre_restore_path = backups_dir / f"{APP_NAME}_pre_restore_{timestamp}.zip"
+    try:
+        pre_restore_backup = backup_all_data(pre_restore_path)
+    except Exception as exc:
+        raise RuntimeError(
+            "Не вдалося створити резервну копію перед відновленням. Restore скасовано."
+        ) from exc
 
     with tempfile.TemporaryDirectory() as tmp:
         temp_dir = Path(tmp)
@@ -573,6 +614,8 @@ def restore_all_data(archive_path: Path) -> None:
         for item in list(data_dir.iterdir()):
             # Skip the archive file and its parent directories to avoid deleting the source during restore.
             if skip_path and (item.resolve() == skip_path or _is_relative_to(skip_path, item)):
+                continue
+            if item.resolve() == backups_dir.resolve():
                 continue
             if item.is_dir():
                 shutil.rmtree(item)
@@ -587,6 +630,8 @@ def restore_all_data(archive_path: Path) -> None:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
 
+    logging.info("Pre-restore backup: %s", pre_restore_backup)
+    prune_old_files(backups_dir, prefix=f"{APP_NAME}_pre_restore_", suffix=".zip", keep_last=10)
     logging.info("Data directory restored from: %s", archive_path)
 
 

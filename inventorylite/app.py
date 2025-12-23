@@ -690,9 +690,9 @@ class InventoryApp(tk.Tk):
             restore_all_data(Path(archive_path))
             messagebox.showinfo(
                 "Відновлення даних",
-                "Дані відновлено. Перезапустіть додаток, щоб застосувати зміни.",
+                "Дані відновлено. Програма буде закрита — запустіть знову.",
             )
-            self.refresh_all()
+            self.root.after(100, self.root.destroy)
         except Exception as exc:
             logging.exception("Restore failed")
             show_error("Відновлення даних", str(exc))

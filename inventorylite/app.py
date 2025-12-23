@@ -264,6 +264,7 @@ class InventoryApp(tk.Tk):
         results = diagnostics.run_db_healthcheck()
         lines = [
             f"DB: {results['db_path']}",
+            f"schema_version: {results['schema_version']}",
             f"integrity_check: {results['integrity']}",
             f"foreign_key_check: {results['foreign_key_issues']} issues",
             "counts:",

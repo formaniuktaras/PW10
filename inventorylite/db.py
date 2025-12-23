@@ -15,7 +15,7 @@ import logging
 import math
 import re
 import sqlite3
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime
 from collections import deque
 from itertools import count
@@ -25,6 +25,9 @@ from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from inventorylite import utils
 from inventorylite.utils import get_db_path
+
+
+LATEST_SCHEMA_VERSION = 1
 
 
 def _strip_weird(value: str | None) -> str:
@@ -103,6 +106,14 @@ def safe_transaction(conn: sqlite3.Connection) -> Iterable[None]:
         raise
     else:
         conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+
+
+def _get_user_version(conn: sqlite3.Connection) -> int:
+    return int(conn.execute("PRAGMA user_version").fetchone()[0])
+
+
+def _set_user_version(conn: sqlite3.Connection, v: int) -> None:
+    conn.execute(f"PRAGMA user_version = {int(v)}")
 
 
 def init_db() -> None:
@@ -462,12 +473,33 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_label_elements_template_sort ON LabelTemplateElements(template_id, sort_order);
             """
         )
-        _migrate_schema(conn)
-        with safe_transaction(conn):
-            _normalize_existing_codes(conn)
-            _ensure_case_insensitive_uniques(conn)
-        _ensure_label_templates(conn)
+        _apply_migrations(conn)
+        assert _get_user_version(conn) == LATEST_SCHEMA_VERSION
     logging.info("Database initialized at %s", db_path)
+
+
+def _apply_migrations(conn: sqlite3.Connection) -> None:
+    current = _get_user_version(conn)
+    if current > LATEST_SCHEMA_VERSION:
+        logging.warning("DB schema version %s is newer than app supports %s", current, LATEST_SCHEMA_VERSION)
+        return
+
+    if current == LATEST_SCHEMA_VERSION:
+        return
+
+    try:
+        utils.backup_database(get_db_path())
+    except Exception:
+        logging.exception("Pre-migration backup failed (continuing)")
+
+    for v in range(current + 1, LATEST_SCHEMA_VERSION + 1):
+        logging.info("Applying DB migration v%s", v)
+        with safe_transaction(conn):
+            if v == 1:
+                _migration_v1_baseline(conn)
+            else:
+                raise RuntimeError(f"Unknown migration step: {v}")
+            _set_user_version(conn, v)
 
 
 def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
@@ -481,7 +513,14 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
-def _migrate_schema(conn: sqlite3.Connection) -> None:
+def _migration_v1_baseline(conn: sqlite3.Connection) -> None:
+    _migrate_schema(conn, commit=False)
+    _normalize_existing_codes(conn, use_transaction=False)
+    _ensure_case_insensitive_uniques(conn, use_transaction=False)
+    _ensure_label_templates(conn)
+
+
+def _migrate_schema(conn: sqlite3.Connection, *, commit: bool = True) -> None:
     """Ensure legacy databases get new columns required by current version."""
 
     _ensure_column(conn, "Products", "unit", "TEXT NOT NULL DEFAULT 'pcs'")
@@ -689,8 +728,11 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         """
     )
 
+    if commit:
+        conn.commit()
 
-def _normalize_existing_codes(conn: sqlite3.Connection) -> None:
+
+def _normalize_existing_codes(conn: sqlite3.Connection, *, use_transaction: bool = True) -> None:
     product_rows = conn.execute("SELECT id, sku, supplier_sku FROM Products").fetchall()
     barcode_rows = conn.execute("SELECT id, code FROM ProductBarcodes").fetchall()
     supplier_rows = conn.execute(
@@ -770,7 +812,8 @@ def _normalize_existing_codes(conn: sqlite3.Connection) -> None:
     if not (product_updates or barcode_updates or supplier_updates):
         return
 
-    with safe_transaction(conn):
+    context = safe_transaction(conn) if use_transaction else nullcontext()
+    with context:
         if product_updates:
             conn.executemany(
                 "UPDATE Products SET sku=?, supplier_sku=? WHERE id=?",
@@ -784,7 +827,7 @@ def _normalize_existing_codes(conn: sqlite3.Connection) -> None:
             )
 
 
-def _ensure_case_insensitive_uniques(conn: sqlite3.Connection) -> None:
+def _ensure_case_insensitive_uniques(conn: sqlite3.Connection, *, use_transaction: bool = True) -> None:
     conflicts: List[str] = []
 
     sku_rows = conn.execute(
@@ -833,7 +876,8 @@ def _ensure_case_insensitive_uniques(conn: sqlite3.Connection) -> None:
             + "\n".join(conflicts)
         )
 
-    with safe_transaction(conn):
+    context = safe_transaction(conn) if use_transaction else nullcontext()
+    with context:
         conn.execute("DROP INDEX IF EXISTS idx_products_sku_lower")
         conn.execute("DROP INDEX IF EXISTS idx_pb_code_lower")
         conn.execute("DROP INDEX IF EXISTS idx_psc_supplier_sku_lower")
@@ -1068,8 +1112,6 @@ def _ensure_label_templates(conn: sqlite3.Connection) -> None:
     _migrate_stock_balances(conn)
 
     _ensure_currency_tables(conn)
-
-    conn.commit()
 
 
 def _ensure_currency_tables(conn: sqlite3.Connection) -> None:

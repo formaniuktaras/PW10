@@ -33,6 +33,9 @@ def run_db_healthcheck() -> dict:
         foreign_key_issues = conn.execute("PRAGMA foreign_key_check;").fetchall()
         foreign_key_count = len(foreign_key_issues)
 
+        schema_version_row = conn.execute("PRAGMA user_version").fetchone()
+        schema_version = int(schema_version_row[0]) if schema_version_row else 0
+
         tables = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
         ).fetchall()
@@ -60,4 +63,5 @@ def run_db_healthcheck() -> dict:
         "foreign_key_issues": foreign_key_count,
         "counts": counts,
         "db_path": str(get_db_path()),
+        "schema_version": schema_version,
     }

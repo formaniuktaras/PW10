@@ -22,7 +22,7 @@ def _parse_num(text: str) -> float | None:
         return None
 
 
-def parse_paste_lines(text: str) -> list[dict]:
+def parse_paste_lines(text: str, *, comma_as_delimiter: bool = False) -> list[dict]:
     """
     Приймає довільний текст зі строками.
     Кожен рядок може мати:
@@ -53,7 +53,21 @@ def parse_paste_lines(text: str) -> list[dict]:
             continue
         if stripped.startswith("#") or stripped.startswith("//"):
             continue
-        parts = [part for part in re.split(r"[;\t|]|\s+", stripped) if part]
+        if comma_as_delimiter:
+            try:
+                row = next(csv.reader([stripped], delimiter=",", skipinitialspace=True))
+            except csv.Error:
+                row = [stripped]
+            parts: list[str] = []
+            for token in row:
+                token = token.strip()
+                if not token:
+                    continue
+                subparts = [part for part in re.split(r"[\t ]+", token) if part]
+                if subparts:
+                    parts.extend(subparts)
+        else:
+            parts = [part for part in re.split(r"[;\t|]|\s+", stripped) if part]
         if not parts:
             continue
         code = parts[0]

@@ -568,6 +568,7 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
         merge_var = tk.BooleanVar(value=True)
         default_qty_var = tk.BooleanVar(value=True)
         mode_var = tk.StringVar(value="add")
+        comma_mode_var = tk.BooleanVar(value=False)
 
         ttk.Checkbutton(
             options_frame,
@@ -592,6 +593,11 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
             variable=mode_var,
             value="set",
         ).grid(row=2, column=1, padx=4, pady=2, sticky="w")
+        ttk.Checkbutton(
+            options_frame,
+            text="CSV режим (кома як розділювач)",
+            variable=comma_mode_var,
+        ).grid(row=3, column=0, padx=4, pady=2, sticky="w")
 
         preview_columns = ["status", "code", "sku", "name", "qty", "action", "note"]
         preview_tree = ttk.Treeview(
@@ -646,8 +652,9 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
             nonlocal preview_state
             preview_state = []
             raw_text = input_text.get("1.0", "end")
-            parsed = parse_paste_lines(raw_text)
-            merged: dict[int, dict] = {}
+            parsed = parse_paste_lines(raw_text, comma_as_delimiter=comma_mode_var.get())
+            merged_by_code: dict[str, dict] = {}
+            entries: list[dict] = []
             action_label = "+qty" if mode_var.get() == "add" else "set=qty"
             for entry in parsed:
                 code = (entry.get("code") or "").strip()
@@ -662,6 +669,7 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
                             {
                                 "status": "NOT FOUND",
                                 "code": code,
+                                "action": "-",
                                 "note": "qty invalid",
                             }
                         )
@@ -673,16 +681,36 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
                         {
                             "status": "NOT FOUND",
                             "code": code,
+                            "action": "-",
                             "note": "qty invalid",
                         }
                     )
                     continue
-                product = _resolve_product(code)
+                if merge_var.get():
+                    existing = merged_by_code.get(code)
+                    if existing:
+                        existing["qty"] += qty_val
+                    else:
+                        merged_by_code[code] = {"code": code, "qty": qty_val}
+                else:
+                    entries.append({"code": code, "qty": qty_val})
+            if merge_var.get():
+                entries.extend(merged_by_code.values())
+            cache: dict[str, sqlite3.Row | None] = {}
+            for entry in entries:
+                code = entry["code"]
+                if code not in cache:
+                    cache[code] = _resolve_product(code)
+            for entry in entries:
+                code = entry["code"]
+                qty_val = float(entry["qty"])
+                product = cache.get(code)
                 if not product:
                     preview_state.append(
                         {
                             "status": "NOT FOUND",
                             "code": code,
+                            "action": "-",
                             "note": "не знайдено код",
                         }
                     )
@@ -700,30 +728,25 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
                         }
                     )
                     continue
-                row = {
-                    "status": "OK",
-                    "code": code,
-                    "sku": product["sku"],
-                    "name": product["name"],
-                    "qty": qty_val,
-                    "action": action_label,
-                    "product_id": int(product["id"]),
-                    "product_row": product,
-                    "note": "",
-                }
-                if merge_var.get():
-                    existing = merged.get(row["product_id"])
-                    if existing:
-                        existing["qty"] += row["qty"]
-                        merged[row["product_id"]] = existing
-                    else:
-                        merged[row["product_id"]] = row
-                else:
-                    preview_state.append(row)
-            if merge_var.get():
-                preview_state.extend(merged.values())
+                preview_state.append(
+                    {
+                        "status": "OK",
+                        "code": code,
+                        "sku": product["sku"],
+                        "name": product["name"],
+                        "qty": qty_val,
+                        "action": action_label,
+                        "product_id": int(product["id"]),
+                        "product_row": product,
+                        "note": "",
+                    }
+                )
             ok_count = sum(1 for row in preview_state if row.get("status") == "OK")
             add_btn.config(state="normal" if ok_count > 0 else "disabled")
+            not_found_count = sum(1 for row in preview_state if row.get("status") == "NOT FOUND")
+            skipped_count = sum(1 for row in preview_state if row.get("status") == "SKIPPED (category)")
+            copy_nf_btn.config(state="normal" if not_found_count > 0 else "disabled")
+            copy_skipped_btn.config(state="normal" if skipped_count > 0 else "disabled")
             _render_preview(preview_state)
 
         def _confirm_add() -> None:
@@ -763,10 +786,54 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
 
         btns_frame = ttk.Frame(preview_dlg)
         btns_frame.grid(row=4, column=0, padx=8, pady=(0, 8), sticky="e")
+
+        def _copy_not_found() -> None:
+            codes = [row["code"] for row in preview_state if row.get("status") == "NOT FOUND"]
+            if not codes:
+                return
+            preview_dlg.clipboard_clear()
+            preview_dlg.clipboard_append("\n".join(codes))
+
+        def _copy_skipped() -> None:
+            codes = [row["code"] for row in preview_state if row.get("status") == "SKIPPED (category)"]
+            if not codes:
+                return
+            preview_dlg.clipboard_clear()
+            preview_dlg.clipboard_append("\n".join(codes))
+
         ttk.Button(btns_frame, text="Preview", command=_run_preview).pack(side=tk.LEFT, padx=4)
+        copy_nf_btn = ttk.Button(
+            btns_frame,
+            text="Скопіювати NOT FOUND",
+            command=_copy_not_found,
+            state="disabled",
+        )
+        copy_nf_btn.pack(side=tk.LEFT, padx=4)
+        copy_skipped_btn = ttk.Button(
+            btns_frame,
+            text="Скопіювати SKIPPED",
+            command=_copy_skipped,
+            state="disabled",
+        )
+        copy_skipped_btn.pack(side=tk.LEFT, padx=4)
         add_btn = ttk.Button(btns_frame, text="Додати", command=_confirm_add, state="disabled")
         add_btn.pack(side=tk.LEFT, padx=4)
         ttk.Button(btns_frame, text="Закрити", command=preview_dlg.destroy).pack(side=tk.LEFT, padx=4)
+
+        def _on_preview_enter(event=None):
+            _run_preview()
+            return "break"
+
+        def _on_preview_confirm(event=None):
+            if add_btn["state"] == "normal":
+                _confirm_add()
+            return "break"
+
+        preview_dlg.bind("<Return>", _on_preview_enter)
+        preview_dlg.bind("<KP_Enter>", _on_preview_enter)
+        preview_dlg.bind("<Control-Return>", _on_preview_confirm)
+        preview_dlg.bind("<Control-KP_Enter>", _on_preview_confirm)
+        preview_dlg.bind("<Escape>", lambda event: preview_dlg.destroy())
 
     def _import_lines_csv() -> None:
         if not editable:

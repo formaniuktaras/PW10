@@ -65,6 +65,7 @@ py -3.13 -m PyInstaller --onedir --noconsole inventorylite/app.py
 python -m compileall -q inventorylite
 python -m inventorylite.self_check_headless_import
 python -m inventorylite.self_check_backup_restore
+python -m inventorylite.self_check_wal_safe_backup
 python -m inventorylite.self_check_inventory
 python -m inventorylite.self_check_atomicity_and_uniques
 python -m inventorylite.self_check_extracost_variant_b

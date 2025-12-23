@@ -478,6 +478,7 @@ def document_prompt(
         update_price_var = tk.BooleanVar(value=False)
         default_qty_var = tk.BooleanVar(value=True)
         use_avg_cost_var = tk.BooleanVar(value=scan_use_avg_cost_var.get())
+        comma_mode_var = tk.BooleanVar(value=False)
 
         ttk.Checkbutton(
             options_frame,
@@ -499,8 +500,13 @@ def document_prompt(
             text='Для відсутньої ціни брати "Ціна зі середньої собівартості"',
             variable=use_avg_cost_var,
         ).grid(row=1, column=1, padx=4, pady=2, sticky="w")
+        ttk.Checkbutton(
+            options_frame,
+            text="CSV режим (кома як розділювач)",
+            variable=comma_mode_var,
+        ).grid(row=2, column=0, padx=4, pady=2, sticky="w")
 
-        preview_columns = ["status", "code", "sku", "name", "qty", "price", "note"]
+        preview_columns = ["status", "action", "code", "sku", "name", "qty", "price", "note"]
         preview_tree = ttk.Treeview(
             preview_dlg,
             columns=preview_columns,
@@ -509,6 +515,7 @@ def document_prompt(
         )
         preview_headings = {
             "status": ("Статус", 90),
+            "action": ("Дія", 110),
             "code": ("Код", 120),
             "sku": ("SKU", 90),
             "name": ("Назва", 200),
@@ -563,6 +570,7 @@ def document_prompt(
                     iid=str(idx),
                     values=(
                         row["status"],
+                        row.get("action", ""),
                         row["code"],
                         row.get("sku", ""),
                         row.get("name", ""),
@@ -576,8 +584,9 @@ def document_prompt(
             nonlocal preview_state
             preview_state = []
             raw_text = input_text.get("1.0", "end")
-            parsed = parse_paste_lines(raw_text)
-            merged: dict[int, dict] = {}
+            parsed = parse_paste_lines(raw_text, comma_as_delimiter=comma_mode_var.get())
+            merged_by_code: dict[str, dict] = {}
+            entries: list[dict] = []
             for entry in parsed:
                 code = (entry.get("code") or "").strip()
                 if not code:
@@ -590,6 +599,7 @@ def document_prompt(
                         preview_state.append(
                             {
                                 "status": "NOT FOUND",
+                                "action": "-",
                                 "code": code,
                                 "note": "qty invalid",
                             }
@@ -601,16 +611,59 @@ def document_prompt(
                     preview_state.append(
                         {
                             "status": "NOT FOUND",
+                            "action": "-",
                             "code": code,
                             "note": "qty invalid",
                         }
                     )
                     continue
-                product = _scan_resolve_product(code)
+                if merge_var.get():
+                    existing = merged_by_code.get(code)
+                    price_val = entry.get("price")
+                    if price_val is not None:
+                        price_val = float(price_val)
+                    if existing:
+                        existing["qty"] += qty_val
+                        if (
+                            existing.get("price") is not None
+                            and price_val is not None
+                            and abs(existing["price"] - price_val) > 1e-9
+                        ):
+                            existing["note"] = _append_note(
+                                existing.get("note", ""),
+                                "ціни різні, взято першу",
+                            )
+                    else:
+                        merged_by_code[code] = {
+                            "code": code,
+                            "qty": qty_val,
+                            "price": price_val,
+                            "note": "",
+                        }
+                else:
+                    entries.append(
+                        {
+                            "code": code,
+                            "qty": qty_val,
+                            "price": float(entry["price"]) if entry.get("price") is not None else None,
+                            "note": "",
+                        }
+                    )
+            if merge_var.get():
+                entries.extend(merged_by_code.values())
+            cache: dict[str, sqlite3.Row | None] = {}
+            for entry in entries:
+                code = entry["code"]
+                if code not in cache:
+                    cache[code] = _scan_resolve_product(code)
+            for entry in entries:
+                code = entry["code"]
+                product = cache.get(code)
                 if not product:
                     preview_state.append(
                         {
                             "status": "NOT FOUND",
+                            "action": "-",
                             "code": code,
                             "note": "не знайдено код",
                         }
@@ -621,39 +674,29 @@ def document_prompt(
                     price_val = _resolve_missing_price(product)
                 else:
                     price_val = float(price_val)
-                row = {
-                    "status": "OK",
-                    "code": code,
-                    "sku": product["sku"],
-                    "name": product["name"],
-                    "qty": qty_val,
-                    "price": price_val,
-                    "product_id": int(product["id"]),
-                    "product_row": product,
-                    "note": "",
-                }
-                if merge_var.get():
-                    existing = merged.get(row["product_id"])
-                    if existing:
-                        existing["qty"] += row["qty"]
-                        if (
-                            existing.get("price") is not None
-                            and row.get("price") is not None
-                            and abs(existing["price"] - row["price"]) > 1e-9
-                        ):
-                            existing["note"] = _append_note(
-                                existing.get("note", ""),
-                                "ціни різні, взято першу",
-                            )
-                        merged[row["product_id"]] = existing
-                    else:
-                        merged[row["product_id"]] = row
+                existing = next((ln for ln in line_data if ln["product_id"] == product["id"]), None)
+                if existing:
+                    action = "UPDATE+PRICE" if update_price_var.get() else "UPDATE"
                 else:
-                    preview_state.append(row)
-            if merge_var.get():
-                preview_state.extend(merged.values())
+                    action = "ADD"
+                preview_state.append(
+                    {
+                        "status": "OK",
+                        "action": action,
+                        "code": code,
+                        "sku": product["sku"],
+                        "name": product["name"],
+                        "qty": float(entry["qty"]),
+                        "price": price_val,
+                        "product_id": int(product["id"]),
+                        "product_row": product,
+                        "note": entry.get("note", ""),
+                    }
+                )
             ok_count = sum(1 for row in preview_state if row.get("status") == "OK")
             add_btn.config(state="normal" if ok_count > 0 else "disabled")
+            not_found_count = sum(1 for row in preview_state if row.get("status") == "NOT FOUND")
+            copy_nf_btn.config(state="normal" if not_found_count > 0 else "disabled")
             _render_preview(preview_state)
 
         def _confirm_add() -> None:
@@ -661,6 +704,7 @@ def document_prompt(
             if not ok_rows:
                 return
             added_count = 0
+            updated_count = 0
             for row in ok_rows:
                 product = row["product_row"]
                 qty_val = float(row["qty"])
@@ -671,6 +715,7 @@ def document_prompt(
                     if update_price_var.get():
                         existing["price"] = price_val
                     existing["amount"] = existing["quantity"] * existing["price"]
+                    updated_count += 1
                 else:
                     try:
                         exp0 = float(expense_var.get() or 0)
@@ -687,11 +732,15 @@ def document_prompt(
                             "amount": qty_val * price_val,
                         }
                     )
-                added_count += 1
+                    added_count += 1
             refresh_lines()
             not_found = [row["code"] for row in preview_state if row.get("status") != "OK"]
             preview_list = ", ".join(not_found[:20])
-            summary = f"Додано: {added_count}, не знайдено: {len(not_found)}"
+            summary = (
+                f"Added new: {added_count}\n"
+                f"Updated: {updated_count}\n"
+                f"Not found: {len(not_found)}"
+            )
             if preview_list:
                 summary += f"\nКоди: {preview_list}"
             messagebox.showinfo("Вставка списку", summary)
@@ -699,7 +748,21 @@ def document_prompt(
 
         btns_frame = ttk.Frame(preview_dlg)
         btns_frame.grid(row=4, column=0, padx=8, pady=(0, 8), sticky="e")
+        def _copy_not_found() -> None:
+            codes = [row["code"] for row in preview_state if row.get("status") == "NOT FOUND"]
+            if not codes:
+                return
+            preview_dlg.clipboard_clear()
+            preview_dlg.clipboard_append("\n".join(codes))
+
         ttk.Button(btns_frame, text="Preview", command=_run_preview).pack(side=tk.LEFT, padx=4)
+        copy_nf_btn = ttk.Button(
+            btns_frame,
+            text="Скопіювати NOT FOUND",
+            command=_copy_not_found,
+            state="disabled",
+        )
+        copy_nf_btn.pack(side=tk.LEFT, padx=4)
         add_btn = ttk.Button(btns_frame, text="Додати", command=_confirm_add, state="disabled")
         add_btn.pack(side=tk.LEFT, padx=4)
         ttk.Button(btns_frame, text="Закрити", command=preview_dlg.destroy).pack(side=tk.LEFT, padx=4)

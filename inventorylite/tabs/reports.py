@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox
 from collections import defaultdict
 
 from inventorylite import db
@@ -195,6 +195,37 @@ class ReportsTab:
         self.cash_report_table = TableFrame(cash_tab, cash_columns)
         self.cash_report_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
+        # Audit log
+        audit_tab = ttk.Frame(notebook)
+        notebook.add(audit_tab, text="Журнал")
+        audit_filters = ttk.Frame(audit_tab)
+        audit_filters.pack(fill=tk.X, padx=8, pady=6)
+        ttk.Label(audit_filters, text="Тип:").pack(side=tk.LEFT)
+        self.audit_event_type_var = tk.StringVar()
+        self.audit_event_type_combo = ttk.Combobox(
+            audit_filters,
+            textvariable=self.audit_event_type_var,
+            values=["(всі)", "DOC_POST", "DOC_UNPOST", "BACKUP_DB", "BACKUP_ZIP", "RESTORE_ZIP", "DB_MIGRATION"],
+            width=18,
+        )
+        self.audit_event_type_combo.pack(side=tk.LEFT, padx=2)
+        self.audit_event_type_combo.current(0)
+        ttk.Label(audit_filters, text="Текст:").pack(side=tk.LEFT, padx=(10, 2))
+        self.audit_text_var = tk.StringVar()
+        ttk.Entry(audit_filters, textvariable=self.audit_text_var, width=26).pack(side=tk.LEFT, padx=2)
+        ttk.Button(audit_filters, text="Оновити", command=self.refresh_audit_log).pack(side=tk.LEFT, padx=6)
+        ttk.Button(audit_filters, text="Очистити старі", command=self.purge_audit_log).pack(side=tk.LEFT)
+
+        audit_columns = [
+            ("created_at", "Час", 140),
+            ("event_type", "Тип", 120),
+            ("message", "Подія", 380),
+            ("related", "Документ", 140),
+            ("actor", "Хто", 120),
+        ]
+        self.audit_table = TableFrame(audit_tab, audit_columns)
+        self.audit_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
         self.frame.after_idle(self.refresh_all)
 
     def refresh_all(self) -> None:
@@ -203,6 +234,7 @@ class ReportsTab:
         self.refresh_abc_xyz()
         self.refresh_cash_counterparties()
         self.refresh_cash_flow_report()
+        self.refresh_audit_log()
 
     def refresh_dashboard(self) -> None:
         metrics = db.dashboard_metrics(
@@ -344,6 +376,35 @@ class ReportsTab:
             title="Сума за обраний період",
             bar_color="#0ea5e9",
         )
+
+    def refresh_audit_log(self) -> None:
+        event_type_value = self.audit_event_type_var.get().strip()
+        event_type = None if not event_type_value or event_type_value == "(всі)" else event_type_value
+        text_value = self.audit_text_var.get().strip() or None
+        rows = db.list_audit_events(event_type=event_type, text=text_value)
+        table_rows = []
+        for row in rows:
+            related = ""
+            if row.get("related_doc_type") and row.get("related_doc_id") is not None:
+                related = f"{row['related_doc_type']}#{row['related_doc_id']}"
+            table_rows.append(
+                {
+                    "id": row.get("id"),
+                    "created_at": row.get("created_at", ""),
+                    "event_type": row.get("event_type", ""),
+                    "message": row.get("message", ""),
+                    "related": related,
+                    "actor": row.get("actor") or "",
+                }
+            )
+        self.audit_table.set_rows(table_rows)
+
+    def purge_audit_log(self) -> None:
+        if not messagebox.askyesno("Журнал подій", "Видалити старі записи журналу, залишивши останні 20000?"):
+            return
+        deleted = db.purge_audit_log()
+        messagebox.showinfo("Журнал подій", f"Видалено записів: {deleted}")
+        self.refresh_audit_log()
 
     def update_dashboard_trend(self) -> None:
         trend = db.dashboard_trends(

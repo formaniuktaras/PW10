@@ -668,6 +668,11 @@ class InventoryApp(tk.Tk):
             return
         try:
             target = backup_all_data(Path(target_path))
+            db.audit_event(
+                "BACKUP_ZIP",
+                "ZIP backup created",
+                details={"path": str(target)},
+            )
             messagebox.showinfo("Резервна копія", f"Створено: {target}")
         except Exception:
             logging.exception("Full backup failed")
@@ -688,6 +693,13 @@ class InventoryApp(tk.Tk):
             return
         try:
             restore_all_data(Path(archive_path))
+            with db.get_connection() as conn:
+                db.audit_event(
+                    "RESTORE_ZIP",
+                    "Data restored from ZIP",
+                    details={"path": str(archive_path)},
+                    conn=conn,
+                )
             messagebox.showinfo(
                 "Відновлення даних",
                 "Дані відновлено. Програма буде закрита — запустіть знову.",
@@ -701,6 +713,12 @@ class InventoryApp(tk.Tk):
         try:
             with db.get_connection() as conn:
                 target = backup_database(get_db_path(), conn=conn)
+                db.audit_event(
+                    "BACKUP_DB",
+                    "Database backup created",
+                    details={"path": str(target)},
+                    conn=conn,
+                )
             messagebox.showinfo("Резервна копія", f"Створено: {target}")
         except Exception as exc:
             logging.exception("Backup failed")

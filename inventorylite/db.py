@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
+import platform
 import re
 import sqlite3
 from contextlib import contextmanager, nullcontext
@@ -27,7 +29,7 @@ from inventorylite import utils
 from inventorylite.utils import get_db_path
 
 
-LATEST_SCHEMA_VERSION = 1
+LATEST_SCHEMA_VERSION = 2
 
 
 def _strip_weird(value: str | None) -> str:
@@ -120,6 +122,92 @@ def _get_user_version(conn: sqlite3.Connection) -> int:
 
 def _set_user_version(conn: sqlite3.Connection, v: int) -> None:
     conn.execute(f"PRAGMA user_version = {int(v)}")
+
+
+def _audit_table_exists(conn: sqlite3.Connection) -> bool:
+    row = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='AuditLog'").fetchone()
+    return row is not None
+
+
+def audit_event(
+    event_type: str,
+    message: str,
+    *,
+    level: str = "INFO",
+    details: dict | None = None,
+    related_doc_type: str | None = None,
+    related_doc_id: int | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> None:
+    """
+    Пише подію в AuditLog.
+    Гарантія: не кидає exception назовні. Якщо не може записати — тільки logging.warning.
+    Якщо conn передали і він у транзакції — вставка робиться через SAVEPOINT і не ламає основний транзакційний блок.
+    """
+
+    try:
+        if conn is None:
+            with get_connection() as new_conn:
+                audit_event(
+                    event_type,
+                    message,
+                    level=level,
+                    details=details,
+                    related_doc_type=related_doc_type,
+                    related_doc_id=related_doc_id,
+                    conn=new_conn,
+                )
+            return
+
+        if not _audit_table_exists(conn):
+            return
+
+        details_json = json.dumps(details, ensure_ascii=False) if details else None
+        actor = os.getenv("USERNAME") or os.getenv("USER") or None
+        host = platform.node() or None
+        pid = os.getpid()
+        params = (
+            event_type,
+            level,
+            message,
+            details_json,
+            related_doc_type,
+            related_doc_id,
+            actor,
+            host,
+            pid,
+        )
+
+        if conn.in_transaction:
+            savepoint = f"audit_{next(_SAVEPOINT_COUNTER)}"
+            conn.execute(f"SAVEPOINT {savepoint}")
+            try:
+                conn.execute(
+                    "INSERT INTO AuditLog (event_type, level, message, details_json, related_doc_type, related_doc_id, actor, host, pid) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    params,
+                )
+                conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            except Exception:
+                try:
+                    conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                    conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+                except Exception:
+                    logging.debug("Failed to rollback audit savepoint", exc_info=True)
+                logging.warning("Failed to write audit event (transactional)", exc_info=True)
+            return
+
+        try:
+            with safe_transaction(conn):
+                conn.execute(
+                    "INSERT INTO AuditLog (event_type, level, message, details_json, related_doc_type, related_doc_id, actor, host, pid) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    params,
+                )
+        except Exception:
+            logging.warning("Failed to write audit event", exc_info=True)
+    except Exception:
+        logging.warning("Audit event logging encountered an unexpected error", exc_info=True)
 
 
 def init_db() -> None:
@@ -508,9 +596,20 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
         with safe_transaction(conn):
             if v == 1:
                 _migration_v1_baseline(conn)
+            elif v == 2:
+                _migration_v2_audit_log(conn)
             else:
                 raise RuntimeError(f"Unknown migration step: {v}")
             _set_user_version(conn, v)
+            try:
+                audit_event(
+                    "DB_MIGRATION",
+                    f"Applied DB migration v{v}",
+                    details={"from_version": v - 1, "to_version": v},
+                    conn=conn,
+                )
+            except Exception:
+                logging.warning("Audit logging for migration v%s failed", v, exc_info=True)
 
 
 def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
@@ -522,6 +621,29 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition
     if not _column_exists(conn, table, column):
         logging.info("Adding missing column %s.%s", table, column)
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _migration_v2_audit_log(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS AuditLog(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          event_type TEXT NOT NULL,
+          level TEXT NOT NULL DEFAULT 'INFO',
+          message TEXT NOT NULL,
+          details_json TEXT,
+          related_doc_type TEXT,
+          related_doc_id INTEGER,
+          actor TEXT,
+          host TEXT,
+          pid INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_audit_created_at ON AuditLog(created_at);
+        CREATE INDEX IF NOT EXISTS idx_audit_event_type ON AuditLog(event_type);
+        CREATE INDEX IF NOT EXISTS idx_audit_related ON AuditLog(related_doc_type, related_doc_id);
+        """
+    )
 
 
 def _migration_v1_baseline(conn: sqlite3.Connection) -> None:
@@ -2739,12 +2861,26 @@ def post_extra_cost(doc_id: int, purchase_ids: Sequence[int]) -> None:
             conn.execute("UPDATE ExtraCostDocuments SET status='posted' WHERE id=?", (doc_id,))
             _allocate_extra_costs(conn, doc_id, purchase_ids)
             recalc_stock(conn=conn)
+            audit_event(
+                "DOC_POST",
+                "Extra cost posted",
+                details={
+                    "doc_date": doc["doc_date"],
+                    "lines_count": int(has_lines),
+                    "total_amount": float(totals or 0.0),
+                },
+                related_doc_type="extra_cost",
+                related_doc_id=doc_id,
+                conn=conn,
+            )
 
 
 def unpost_extra_cost(doc_id: int) -> None:
     with get_connection() as conn:
         with transaction(conn):
-            doc = conn.execute("SELECT status FROM ExtraCostDocuments WHERE id=?", (doc_id,)).fetchone()
+            doc = conn.execute(
+                "SELECT status, doc_date FROM ExtraCostDocuments WHERE id=?", (doc_id,)
+            ).fetchone()
             if not doc:
                 raise ValueError("Документ не знайдено")
             status = (doc["status"] or "draft").strip()
@@ -2753,6 +2889,17 @@ def unpost_extra_cost(doc_id: int) -> None:
             _revert_extra_cost_allocations(conn, doc_id)
             conn.execute("UPDATE ExtraCostDocuments SET status='draft' WHERE id=?", (doc_id,))
             recalc_stock(conn=conn)
+            lines_count = conn.execute(
+                "SELECT COUNT(*) FROM ExtraCostLines WHERE extra_cost_id=?", (doc_id,)
+            ).fetchone()[0]
+            audit_event(
+                "DOC_UNPOST",
+                "Extra cost unposted",
+                details={"doc_date": doc["doc_date"], "lines_count": int(lines_count)},
+                related_doc_type="extra_cost",
+                related_doc_id=doc_id,
+                conn=conn,
+            )
 
 
 # Sales
@@ -3203,15 +3350,30 @@ def post_purchase(purchase_id: int) -> None:
                     ),
                 )
             recalc_stock(conn=conn)
+            audit_event(
+                "DOC_POST",
+                "Purchase posted",
+                details={
+                    "doc_date": doc_row["doc_date"],
+                    "warehouse_id": doc_row["warehouse_id"],
+                    "lines_count": int(has_lines),
+                    "total_amount": float(total or 0.0),
+                },
+                related_doc_type="purchase",
+                related_doc_id=purchase_id,
+                conn=conn,
+            )
 
 
 def unpost_purchase(purchase_id: int) -> None:
     with get_connection() as conn:
         with transaction(conn):
-            status = conn.execute("SELECT status FROM PurchaseDocuments WHERE id=?", (purchase_id,)).fetchone()
-            if not status:
+            doc_row = conn.execute(
+                "SELECT status, doc_date, warehouse_id FROM PurchaseDocuments WHERE id=?", (purchase_id,)
+            ).fetchone()
+            if not doc_row:
                 raise ValueError("Документ не знайдено")
-            if status[0] != "posted":
+            if doc_row["status"] != "posted":
                 raise ValueError("Документ не проведено")
             blocking = conn.execute(
                 """
@@ -3235,13 +3397,26 @@ def unpost_purchase(purchase_id: int) -> None:
             conn.execute("UPDATE PurchaseDocuments SET status='draft' WHERE id=?", (purchase_id,))
             _remove_cash_links(conn, "purchase", purchase_id)
             recalc_stock(conn=conn)
+            lines_count = conn.execute("SELECT COUNT(*) FROM PurchaseLines WHERE purchase_id=?", (purchase_id,)).fetchone()[0]
+            audit_event(
+                "DOC_UNPOST",
+                "Purchase unposted",
+                details={
+                    "doc_date": doc_row["doc_date"],
+                    "warehouse_id": doc_row["warehouse_id"],
+                    "lines_count": int(lines_count),
+                },
+                related_doc_type="purchase",
+                related_doc_id=purchase_id,
+                conn=conn,
+            )
 
 
 def post_sale(sale_id: int, allow_negative: bool = False) -> None:
     with get_connection() as conn:
         with transaction(conn):
             doc_row = conn.execute(
-                "SELECT status, customer_id, doc_date, channel FROM SalesDocuments WHERE id=?",
+                "SELECT status, customer_id, doc_date, channel, warehouse_id FROM SalesDocuments WHERE id=?",
                 (sale_id,),
             ).fetchone()
             if not doc_row:
@@ -3270,19 +3445,47 @@ def post_sale(sale_id: int, allow_negative: bool = False) -> None:
                     ),
                 )
             recalc_stock(allow_negative=allow_negative, conn=conn)
+            audit_event(
+                "DOC_POST",
+                "Sale posted",
+                details={
+                    "doc_date": doc_row["doc_date"],
+                    "warehouse_id": doc_row["warehouse_id"],
+                    "lines_count": int(has_lines),
+                    "total_amount": float(total or 0.0),
+                },
+                related_doc_type="sale",
+                related_doc_id=sale_id,
+                conn=conn,
+            )
 
 
 def unpost_sale(sale_id: int) -> None:
     with get_connection() as conn:
         with transaction(conn):
-            status = conn.execute("SELECT status FROM SalesDocuments WHERE id=?", (sale_id,)).fetchone()
-            if not status:
+            doc_row = conn.execute(
+                "SELECT status, doc_date, warehouse_id FROM SalesDocuments WHERE id=?", (sale_id,)
+            ).fetchone()
+            if not doc_row:
                 raise ValueError("Документ не знайдено")
-            if status[0] != "posted":
+            if doc_row["status"] != "posted":
                 raise ValueError("Документ не проведено")
             conn.execute("UPDATE SalesDocuments SET status='draft' WHERE id=?", (sale_id,))
             _remove_cash_links(conn, "sale", sale_id)
             recalc_stock(conn=conn)
+            lines_count = conn.execute("SELECT COUNT(*) FROM SalesLines WHERE sale_id=?", (sale_id,)).fetchone()[0]
+            audit_event(
+                "DOC_UNPOST",
+                "Sale unposted",
+                details={
+                    "doc_date": doc_row["doc_date"],
+                    "warehouse_id": doc_row["warehouse_id"],
+                    "lines_count": int(lines_count),
+                },
+                related_doc_type="sale",
+                related_doc_id=sale_id,
+                conn=conn,
+            )
 
 
 # Inventory documents
@@ -3476,18 +3679,47 @@ def post_inventory(doc_id: int) -> None:
                         raise ValueError("Для надлишку потрібна собівартість")
             conn.execute("UPDATE InventoryDocuments SET status='posted', updated_at=CURRENT_TIMESTAMP WHERE id=?", (doc_id,))
             recalc_stock(conn=conn)
+            audit_event(
+                "DOC_POST",
+                "Inventory posted",
+                details={
+                    "doc_date": doc["doc_date"],
+                    "warehouse_id": doc["warehouse_id"],
+                    "lines_count": len(lines),
+                },
+                related_doc_type="inventory",
+                related_doc_id=doc_id,
+                conn=conn,
+            )
 
 
 def unpost_inventory(doc_id: int) -> None:
     with get_connection() as conn:
         with transaction(conn):
-            status = conn.execute("SELECT status FROM InventoryDocuments WHERE id=?", (doc_id,)).fetchone()
-            if not status:
+            doc = conn.execute(
+                "SELECT status, doc_date, warehouse_id FROM InventoryDocuments WHERE id=?", (doc_id,)
+            ).fetchone()
+            if not doc:
                 raise ValueError("Документ не знайдено")
-            if status[0] != "posted":
+            if doc["status"] != "posted":
                 raise ValueError("Документ не проведено")
             conn.execute("UPDATE InventoryDocuments SET status='draft', updated_at=CURRENT_TIMESTAMP WHERE id=?", (doc_id,))
             recalc_stock(conn=conn)
+            lines_count = conn.execute(
+                "SELECT COUNT(*) FROM InventoryLines WHERE inventory_id=?", (doc_id,)
+            ).fetchone()[0]
+            audit_event(
+                "DOC_UNPOST",
+                "Inventory unposted",
+                details={
+                    "doc_date": doc["doc_date"],
+                    "warehouse_id": doc["warehouse_id"],
+                    "lines_count": int(lines_count),
+                },
+                related_doc_type="inventory",
+                related_doc_id=doc_id,
+                conn=conn,
+            )
 
 
 # Stock listing
@@ -3548,6 +3780,37 @@ def list_cash(date_from: Optional[str] = None, date_to: Optional[str] = None) ->
     query += " ORDER BY ct.date, ct.id"
     with get_connection() as conn:
         return list(conn.execute(query, params))
+
+
+def list_audit_events(limit: int = 500, *, event_type: str | None = None, text: str | None = None) -> List[dict]:
+    with get_connection() as conn:
+        if not _audit_table_exists(conn):
+            return []
+        params = {"limit": int(limit), "event_type": event_type, "text": text}
+        rows = conn.execute(
+            """
+            SELECT id, created_at, event_type, level, message, details_json, related_doc_type, related_doc_id, actor, host, pid
+            FROM AuditLog
+            WHERE (:event_type IS NULL OR event_type = :event_type)
+              AND (:text IS NULL OR message LIKE '%' || :text || '%')
+            ORDER BY created_at DESC, id DESC
+            LIMIT :limit
+            """,
+            params,
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def purge_audit_log(keep_last: int = 20000) -> int:
+    with get_connection() as conn:
+        if not _audit_table_exists(conn):
+            return 0
+        with safe_transaction(conn):
+            cur = conn.execute(
+                "DELETE FROM AuditLog WHERE id NOT IN (SELECT id FROM AuditLog ORDER BY id DESC LIMIT ?)",
+                (int(keep_last),),
+            )
+            return int(cur.rowcount or 0)
 
 
 # Reporting helpers

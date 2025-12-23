@@ -699,7 +699,8 @@ class InventoryApp(tk.Tk):
 
     def on_backup(self) -> None:
         try:
-            target = backup_database(get_db_path())
+            with db.get_connection() as conn:
+                target = backup_database(get_db_path(), conn=conn)
             messagebox.showinfo("Резервна копія", f"Створено: {target}")
         except Exception as exc:
             logging.exception("Backup failed")

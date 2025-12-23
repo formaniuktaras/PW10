@@ -493,7 +493,7 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
 
     if current != 0:
         try:
-            utils.backup_database(get_db_path())
+            utils.backup_database(get_db_path(), conn=conn)
         except Exception:
             logging.exception("Pre-migration backup failed (continuing)")
 

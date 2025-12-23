@@ -8,6 +8,13 @@ from datetime import date, datetime
 from functools import cmp_to_key
 from typing import TYPE_CHECKING, Any, Callable, List, Optional
 
+from inventorylite.helpers import (
+    RATE_DECIMALS,
+    bind_two_way_rate,
+    format_rate,
+    parse_decimal,
+)
+
 if TYPE_CHECKING:
     from inventorylite.utils import Settings
 
@@ -417,5 +424,103 @@ def simple_prompt(title: str, fields: List[str], initial: Optional[List[str]] = 
     ttk.Button(btn_frame, text="Скасувати", command=on_cancel).pack(side=tk.LEFT, padx=4)
     root.bind("<Return>", lambda e: on_ok())
     root.bind("<Escape>", lambda e: on_cancel())
+    root.wait_window()
+    return result
+
+
+def rate_prompt(
+    title: str,
+    currency_code: str,
+    base_currency: str,
+    *,
+    initial_date: Optional[str] = None,
+    initial_direct: str = "",
+    initial_inverse: str = "",
+    decimals: int = RATE_DECIMALS,
+) -> Optional[dict[str, Optional[str] | float]]:
+    root = tk.Toplevel()
+    root.title(title)
+    root.grab_set()
+
+    row = 0
+    date_var = None
+    if initial_date is not None:
+        ttk.Label(root, text="Дата").grid(row=row, column=0, padx=6, pady=4, sticky="w")
+        date_var = tk.StringVar(value=initial_date)
+        ttk.Entry(root, textvariable=date_var, width=15).grid(row=row, column=1, padx=6, pady=4)
+        row += 1
+
+    ttk.Label(root, text=f"1 {currency_code} = ? {base_currency}").grid(
+        row=row, column=0, padx=6, pady=4, sticky="w"
+    )
+    direct_var = tk.StringVar()
+    direct_entry = ttk.Entry(root, textvariable=direct_var, width=30)
+    direct_entry.grid(row=row, column=1, padx=6, pady=4)
+    row += 1
+
+    ttk.Label(root, text=f"1 {base_currency} = ? {currency_code}").grid(
+        row=row, column=0, padx=6, pady=4, sticky="w"
+    )
+    inverse_var = tk.StringVar()
+    inverse_entry = ttk.Entry(root, textvariable=inverse_var, width=30)
+    inverse_entry.grid(row=row, column=1, padx=6, pady=4)
+
+    sync = bind_two_way_rate(
+        direct_entry,
+        direct_var,
+        inverse_entry,
+        inverse_var,
+        decimals=decimals,
+    )
+
+    if initial_direct and initial_inverse:
+        sync["last"]["field"] = "direct"
+        direct_var.set(initial_direct)
+        inverse_var.set(initial_inverse)
+    elif initial_direct:
+        sync["last"]["field"] = "direct"
+        direct_var.set(initial_direct)
+    elif initial_inverse:
+        sync["last"]["field"] = "inverse"
+        inverse_var.set(initial_inverse)
+
+    result: Optional[dict[str, Optional[str] | float]] = None
+
+    def on_ok() -> None:
+        nonlocal result
+        date_value = None
+        if date_var is not None:
+            date_value = date_var.get().strip()
+            if not date_value:
+                messagebox.showerror("Курси", "Вкажіть дату")
+                return
+        last_field = sync["last"]["field"]
+        if last_field == "direct":
+            direct = parse_decimal(direct_var.get())
+            if direct is None:
+                messagebox.showerror("Курси", "Введи коректний курс")
+                return
+            inverse = 1.0 / direct
+        else:
+            inverse = parse_decimal(inverse_var.get())
+            if inverse is None:
+                messagebox.showerror("Курси", "Введи коректний курс")
+                return
+            direct = 1.0 / inverse
+        direct_var.set(format_rate(direct, decimals))
+        inverse_var.set(format_rate(inverse, decimals))
+        result = {"date": date_value, "direct": direct, "inverse": inverse}
+        root.destroy()
+
+    def on_cancel() -> None:
+        root.destroy()
+
+    btn_frame = ttk.Frame(root)
+    btn_frame.grid(row=row + 1, column=0, columnspan=2, pady=8)
+    ttk.Button(btn_frame, text="OK", command=on_ok).pack(side=tk.LEFT, padx=4)
+    ttk.Button(btn_frame, text="Скасувати", command=on_cancel).pack(side=tk.LEFT, padx=4)
+    root.bind("<Return>", lambda e: on_ok())
+    root.bind("<Escape>", lambda e: on_cancel())
+    direct_entry.focus_set()
     root.wait_window()
     return result

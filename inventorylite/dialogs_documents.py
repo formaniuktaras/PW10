@@ -7,8 +7,8 @@ from tkinter import ttk, messagebox
 from typing import Optional
 
 from inventorylite import db
-from inventorylite.helpers import _read_rate_two_way, parse_paste_lines
-from inventorylite.ui_components import simple_prompt
+from inventorylite.helpers import format_rate, parse_paste_lines
+from inventorylite.ui_components import rate_prompt
 from inventorylite.utils import Settings, get_base_currency_code
 
 
@@ -27,28 +27,23 @@ def ensure_rate_for_date(currency_code: str, rate_date: str) -> float:
         suggestion = None
     while True:
         if suggestion:
-            direct_default = f"{suggestion:.6f}"
-            inverse_default = f"{(1.0 / suggestion):.6f}"
+            direct_default = format_rate(suggestion)
+            inverse_default = format_rate(1.0 / suggestion)
         else:
             direct_default = ""
             inverse_default = ""
-        values = simple_prompt(
+        result = rate_prompt(
             "Курс валюти",
-            [
-                f"1 {currency_code} = ? {base_currency}",
-                f"1 {base_currency} = ? {currency_code}",
-            ],
-            [direct_default, inverse_default],
+            currency_code,
+            base_currency,
+            initial_direct=direct_default,
+            initial_inverse=inverse_default,
         )
-        if not values:
+        if not result:
             raise ValueError("Курс не вказано")
-        try:
-            rate = _read_rate_two_way(currency_code, base_currency, values[0], values[1])
-            db.add_currency_rate(currency_code, rate_date, rate)
-            return rate
-        except ValueError as exc:
-            messagebox.showerror("Курс", str(exc))
-            continue
+        rate = float(result["direct"])
+        db.add_currency_rate(currency_code, rate_date, rate)
+        return rate
 
 
 def document_prompt(

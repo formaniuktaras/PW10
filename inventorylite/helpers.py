@@ -7,7 +7,90 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 
+import tkinter as tk
+
 from openpyxl import load_workbook
+
+RATE_DECIMALS = 6
+
+
+def parse_decimal(text: str) -> float | None:
+    if text is None:
+        return None
+    s = str(text).strip().replace(" ", "").replace(",", ".")
+    if not s or s == ".":
+        return None
+    try:
+        value = float(s)
+    except ValueError:
+        return None
+    if value <= 0:
+        return None
+    return value
+
+
+def format_rate(value: float, decimals: int = RATE_DECIMALS) -> str:
+    formatted = f"{value:.{decimals}f}".rstrip("0").rstrip(".")
+    return formatted
+
+
+def bind_two_way_rate(
+    entry_direct: tk.Entry,
+    var_direct: tk.StringVar,
+    entry_inverse: tk.Entry,
+    var_inverse: tk.StringVar,
+    *,
+    decimals: int = RATE_DECIMALS,
+) -> dict[str, dict[str, str]]:
+    updating = {"on": False}
+    last = {"field": "direct"}
+
+    def update_from_direct() -> None:
+        if updating["on"]:
+            return
+        value = parse_decimal(var_direct.get())
+        updating["on"] = True
+        try:
+            if value is None:
+                var_inverse.set("")
+            else:
+                var_inverse.set(format_rate(1.0 / value, decimals))
+        finally:
+            updating["on"] = False
+
+    def update_from_inverse() -> None:
+        if updating["on"]:
+            return
+        value = parse_decimal(var_inverse.get())
+        updating["on"] = True
+        try:
+            if value is None:
+                var_direct.set("")
+            else:
+                var_direct.set(format_rate(1.0 / value, decimals))
+        finally:
+            updating["on"] = False
+
+    def on_direct_write(*_: object) -> None:
+        if last["field"] == "direct":
+            update_from_direct()
+
+    def on_inverse_write(*_: object) -> None:
+        if last["field"] == "inverse":
+            update_from_inverse()
+
+    def on_direct_focus(_: tk.Event) -> None:
+        last["field"] = "direct"
+
+    def on_inverse_focus(_: tk.Event) -> None:
+        last["field"] = "inverse"
+
+    entry_direct.bind("<FocusIn>", on_direct_focus)
+    entry_inverse.bind("<FocusIn>", on_inverse_focus)
+    var_direct.trace_add("write", on_direct_write)
+    var_inverse.trace_add("write", on_inverse_write)
+
+    return {"last": last}
 
 
 def _parse_num(text: str) -> float | None:

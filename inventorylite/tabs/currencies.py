@@ -7,8 +7,8 @@ from datetime import datetime
 from tkinter import ttk, messagebox
 
 from inventorylite import db
-from inventorylite.helpers import _read_rate_two_way
-from inventorylite.ui_components import TableFrame, simple_prompt
+from inventorylite.helpers import format_rate
+from inventorylite.ui_components import TableFrame, rate_prompt, simple_prompt
 from inventorylite.utils import (
     Settings,
     get_base_currency_code,
@@ -180,17 +180,19 @@ class CurrenciesTab:
             show_error("Курси", "Оберіть валюту")
             return
         base = get_base_currency_code()
-        defaults = [datetime.now().strftime("%Y-%m-%d"), "1", ""]
-        values = simple_prompt(
+        result = rate_prompt(
             "Новий курс",
-            ["Дата", f"1 {code} = ? {base}", f"1 {base} = ? {code}"],
-            defaults,
+            code,
+            base,
+            initial_date=datetime.now().strftime("%Y-%m-%d"),
+            initial_direct="1",
+            initial_inverse="",
         )
-        if not values:
+        if not result:
             return
         try:
-            rate = _read_rate_two_way(code, base, values[1], values[2])
-            db.add_currency_rate(code, values[0], rate)
+            rate = float(result["direct"])
+            db.add_currency_rate(code, str(result["date"]), rate)
             self.refresh_rates()
         except Exception as exc:
             logging.exception("Add rate error")
@@ -212,18 +214,21 @@ class CurrenciesTab:
             return
         current = rates[0]
         base = get_base_currency_code()
-        direct_default = f"{current['rate']:.6f}"
-        inverse_default = f"{(1.0 / current['rate']):.6f}" if current["rate"] > 0 else ""
-        values = simple_prompt(
+        direct_default = format_rate(current["rate"])
+        inverse_default = format_rate(1.0 / current["rate"]) if current["rate"] > 0 else ""
+        result = rate_prompt(
             "Змінити курс",
-            ["Дата", f"1 {code} = ? {base}", f"1 {base} = ? {code}"],
-            [current["rate_date"], direct_default, inverse_default],
+            code,
+            base,
+            initial_date=current["rate_date"],
+            initial_direct=direct_default,
+            initial_inverse=inverse_default,
         )
-        if not values:
+        if not result:
             return
         try:
-            rate = _read_rate_two_way(code, base, values[1], values[2])
-            db.update_currency_rate(rate_id, values[0], rate)
+            rate = float(result["direct"])
+            db.update_currency_rate(rate_id, str(result["date"]), rate)
             self.refresh_rates()
         except Exception as exc:
             logging.exception("Edit rate error")

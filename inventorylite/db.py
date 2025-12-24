@@ -1357,14 +1357,6 @@ def delete_brand(brand_id: int) -> None:
 
 # Category CRUD with hierarchy and flags
 
-def _next_sort_order(conn: sqlite3.Connection, parent_id: Optional[int]) -> int:
-    if parent_id is None:
-        row = conn.execute("SELECT IFNULL(MAX(sort_order),0) FROM Categories WHERE parent_id IS NULL").fetchone()
-    else:
-        row = conn.execute("SELECT IFNULL(MAX(sort_order),0) FROM Categories WHERE parent_id=?", (parent_id,)).fetchone()
-    return int(row[0]) + 1
-
-
 def list_categories(include_hidden: bool = True) -> List[sqlite3.Row]:
     query = "SELECT id, name, parent_id, sort_order, is_service, is_hidden, color, icon, typical_attributes FROM Categories"
     if not include_hidden:
@@ -1372,6 +1364,73 @@ def list_categories(include_hidden: bool = True) -> List[sqlite3.Row]:
     query += " ORDER BY parent_id NULLS FIRST, sort_order, name"
     with get_connection() as conn:
         return list(conn.execute(query))
+
+
+def list_categories_tree(include_hidden: bool = True) -> list[dict]:
+    """
+    Повертає категорії у вигляді плоского списку в pre-order (дерево),
+    кожен елемент: dict з полями Categories + depth + label.
+    label = "    " * depth + name
+    """
+    rows = list_categories(include_hidden=include_hidden)
+    items = [dict(r) for r in rows]
+
+    by_id = {c["id"]: c for c in items}
+    children: dict[object, list[dict]] = {}
+    for c in items:
+        pid = c.get("parent_id", None)
+        if pid == 0:
+            pid = None
+            c["parent_id"] = None
+        children.setdefault(pid, []).append(c)
+
+    def sort_key(x: dict):
+        return (int(x.get("sort_order") or 0), (x.get("name") or "").lower())
+
+    for pid, arr in children.items():
+        arr.sort(key=sort_key)
+
+    roots = list(children.get(None, []))
+    for c in items:
+        pid = c.get("parent_id")
+        if pid is not None and pid not in by_id:
+            roots.append(c)
+
+    seen_root = set()
+    uniq_roots = []
+    for r in roots:
+        if r["id"] in seen_root:
+            continue
+        seen_root.add(r["id"])
+        uniq_roots.append(r)
+    uniq_roots.sort(key=sort_key)
+
+    result: list[dict] = []
+    visited: set[int] = set()
+
+    def walk(node: dict, depth: int) -> None:
+        nid = node["id"]
+        if nid in visited:
+            return
+        visited.add(nid)
+        out = dict(node)
+        out["depth"] = depth
+        out["label"] = ("    " * depth) + (out.get("name") or "")
+        result.append(out)
+        for ch in children.get(nid, []):
+            walk(ch, depth + 1)
+
+    for r in uniq_roots:
+        walk(r, 0)
+
+    for c in items:
+        if c["id"] not in visited:
+            out = dict(c)
+            out["depth"] = 0
+            out["label"] = out.get("name") or ""
+            result.append(out)
+
+    return result
 
 
 def _next_sort_order(conn: sqlite3.Connection, parent_id: Optional[int]) -> int:

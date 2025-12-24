@@ -866,7 +866,7 @@ def document_prompt(
                 **c,
                 "label": c.get("label") or ("    " * c.get("depth", 0) + c.get("name", "")),
             }
-            for c in db.list_categories_tree()
+            for c in db.list_categories_tree(include_hidden=False)
         ]
         if not brands or not categories:
             messagebox.showerror(

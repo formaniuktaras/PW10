@@ -7,7 +7,7 @@ from tkinter import ttk, messagebox
 from typing import Optional
 
 from inventorylite import db
-from inventorylite.helpers import format_rate, parse_paste_lines
+from inventorylite.helpers import format_rate, parse_paste_lines, _find_index_by_name
 from inventorylite.ui_components import rate_prompt
 from inventorylite.utils import Settings, get_base_currency_code
 
@@ -339,6 +339,20 @@ def document_prompt(
     selected_idx: list[int] = []
 
     refresh_currency_ui()
+
+    def _get_default_product_setting(key: str, default: str = "") -> str:
+        nonlocal settings
+        if settings is None:
+            return default
+        try:
+            if isinstance(settings, Settings):
+                return (settings.get("defaults", "product", key) or default)
+        except Exception:
+            pass
+        try:
+            return (settings.get("defaults", {}).get("product", {}).get(key) or default)
+        except Exception:
+            return default
 
     def refresh_lines():
         tree.delete(*tree.get_children())
@@ -898,7 +912,8 @@ def document_prompt(
         )
         brand_combo.grid(row=2, column=1, padx=6, pady=4, sticky="w")
 
-        preferred_brand = _find_index_by_name([b["name"] for b in brands], self.settings.get("defaults", "product", "brand"))
+        brand_default = _get_default_product_setting("brand", "")
+        preferred_brand = _find_index_by_name([b["name"] for b in brands], brand_default)
         if preferred_brand is not None:
             brand_combo.current(preferred_brand)
         else:
@@ -914,14 +929,16 @@ def document_prompt(
             width=28,
         )
         category_combo.grid(row=3, column=1, padx=6, pady=4, sticky="w")
-        default_category = self.settings.get("defaults", "product", "category") or ""
+        default_category = _get_default_product_setting("category", "")
         preferred_category = _find_index_by_name([c["label"] for c in categories], default_category)
+        if preferred_category is None:
+            preferred_category = _find_index_by_name([c.get("name", "") for c in categories], default_category)
         if preferred_category is not None:
             category_combo.current(preferred_category)
         else:
             category_combo.current(0)
 
-        default_unit = self.settings.get("defaults", "product", "unit") or "pcs"
+        default_unit = _get_default_product_setting("unit", "pcs")
         ttk.Label(dlg_product, text="Одиниця").grid(row=4, column=0, padx=6, pady=4, sticky="e")
         unit_var = tk.StringVar(value=default_unit)
         ttk.Entry(dlg_product, textvariable=unit_var, width=30).grid(row=4, column=1, padx=6, pady=4, sticky="w")

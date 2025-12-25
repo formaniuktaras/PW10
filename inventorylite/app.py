@@ -431,6 +431,9 @@ class InventoryApp(tk.Tk):
                             "fieldbackground": palette["surface"],
                             "foreground": palette["text"],
                             "insertcolor": palette["text"],
+                            "insertwidth": 3,
+                            "selectbackground": palette["accent"],
+                            "selectforeground": palette["surface"],
                         }
                     },
                     "TCombobox": {
@@ -439,6 +442,10 @@ class InventoryApp(tk.Tk):
                             "foreground": palette["text"],
                             "background": palette["surface_alt"],
                             "arrowsize": 14,
+                            "insertcolor": palette["text"],
+                            "insertwidth": 3,
+                            "selectbackground": palette["accent"],
+                            "selectforeground": palette["surface"],
                         },
                         "map": {
                             "fieldbackground": [("readonly", palette["surface"])],
@@ -543,7 +550,10 @@ class InventoryApp(tk.Tk):
                         "configure": {
                             "fieldbackground": palette["surface_alt"],
                             "foreground": palette["text"],
-                            "insertcolor": palette["text"],
+                            "insertcolor": "#ffffff",
+                            "insertwidth": 4,
+                            "selectbackground": "#6e6e6e",
+                            "selectforeground": "#ffffff",
                         }
                     },
                     "TCombobox": {
@@ -552,6 +562,10 @@ class InventoryApp(tk.Tk):
                             "foreground": palette["text"],
                             "background": palette["surface_alt"],
                             "arrowsize": 14,
+                            "insertcolor": "#ffffff",
+                            "insertwidth": 4,
+                            "selectbackground": "#6e6e6e",
+                            "selectforeground": "#ffffff",
                         },
                         "map": {
                             "fieldbackground": [("readonly", palette["surface_alt"])],

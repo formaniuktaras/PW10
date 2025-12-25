@@ -4,7 +4,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from typing import Optional
 
-from inventorylite import db
+from inventorylite import db, sku_gen
 from inventorylite.helpers import _find_index_by_name, _sanitize_barcode_prefix
 from inventorylite.utils import Settings
 
@@ -49,9 +49,14 @@ def product_prompt(brands, categories, title: str, initial=None, settings: Setti
     dlg.grab_set()
     dlg.columnconfigure(1, weight=1)
 
-    ttk.Label(dlg, text="SKU").grid(row=0, column=0, padx=6, pady=4, sticky="w")
+    ttk.Label(dlg, text="Артикул (SKU)").grid(row=0, column=0, padx=6, pady=4, sticky="w")
     sku_var = tk.StringVar(value=normalized_initial.get("sku", ""))
-    ttk.Entry(dlg, textvariable=sku_var, width=30).grid(row=0, column=1, padx=6, pady=4, sticky="ew")
+    sku_frame = ttk.Frame(dlg)
+    sku_frame.grid(row=0, column=1, padx=6, pady=4, sticky="ew")
+    sku_frame.columnconfigure(0, weight=1)
+    ttk.Entry(sku_frame, textvariable=sku_var, width=30).grid(row=0, column=0, padx=(0, 4), pady=0, sticky="ew")
+    generate_btn = ttk.Button(sku_frame, text="Згенерувати")
+    generate_btn.grid(row=0, column=1, padx=0, pady=0)
 
     ttk.Label(dlg, text="Артикул постачальника (legacy)").grid(row=1, column=0, padx=6, pady=4, sticky="w")
     supplier_sku_var = tk.StringVar(value=normalized_initial.get("supplier_sku", ""))
@@ -71,6 +76,35 @@ def product_prompt(brands, categories, title: str, initial=None, settings: Setti
     category_var = tk.StringVar()
     category_combo = ttk.Combobox(dlg, textvariable=category_var, values=[c["label"] for c in categories])
     category_combo.grid(row=4, column=1, padx=6, pady=4, sticky="ew")
+
+    generator_enabled = bool(settings.get("defaults", "product", "sku_generator", "enabled") if settings else False)
+
+    def _selected_brand():
+        try:
+            idx = brand_combo.current()
+            if idx is None or idx < 0:
+                return None
+            return brands[idx]
+        except Exception:
+            return None
+
+    def _selected_category():
+        label = category_var.get()
+        return next((c for c in categories if c.get("label") == label), None)
+
+    def _generate_sku() -> None:
+        if not generator_enabled or not settings:
+            return
+        brand_row = _selected_brand()
+        category_row = _selected_category()
+        try:
+            sku_value = sku_gen.generate_next_sku(settings, brand_row, category_row, name_var.get())
+        except Exception as exc:
+            messagebox.showerror("SKU", f"Не вдалося згенерувати SKU: {exc}")
+            return
+        sku_var.set(sku_value)
+
+    generate_btn.configure(command=_generate_sku, state="normal" if generator_enabled else "disabled")
 
     def refresh_category_options(*_args):
         search = category_var.get().strip().lower()
@@ -364,6 +398,9 @@ def product_prompt(brands, categories, title: str, initial=None, settings: Setti
         nonlocal result
         sku = sku_var.get().strip()
         name = name_var.get().strip()
+        if not sku and generator_enabled and settings:
+            _generate_sku()
+            sku = sku_var.get().strip()
         if not sku or not name:
             messagebox.showerror("Валідація", "Заповніть SKU та назву")
             return

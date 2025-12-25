@@ -95,6 +95,11 @@ DEFAULT_SETTINGS = {
             "brand": "",
             "category": "",
             "barcode_prefix": "",
+            "sku_generator": {
+                "enabled": True,
+                "default": {"prefix_template": "", "digits": 5, "start_from": 1},
+                "rules": [],
+            },
         },
         "currency": {
             "base_code": BASE_CURRENCY,

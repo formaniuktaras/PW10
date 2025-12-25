@@ -1712,6 +1712,11 @@ def list_products(
         return list(conn.execute(query, tuple(params)))
 
 
+def list_skus_by_prefix(prefix: str) -> List[sqlite3.Row]:
+    with get_connection() as conn:
+        return list(conn.execute("SELECT sku FROM Products WHERE sku LIKE ?", (f"{prefix}%",)))
+
+
 def add_product(
     sku: str,
     name: str,

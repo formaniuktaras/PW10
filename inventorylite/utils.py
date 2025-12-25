@@ -268,6 +268,21 @@ def _enable_undo(widget: tk.Widget) -> None:
         return
 
 
+def _tune_text_input_caret(widget: tk.Widget) -> None:
+    """Make text input caret thicker and more visible."""
+
+    if tk is None:
+        return
+    try:
+        widget.configure(insertwidth=2)
+    except Exception:
+        pass
+    try:
+        widget.configure(insertontime=600, insertofftime=350)
+    except Exception:
+        pass
+
+
 def _select_all_text(widget: tk.Widget) -> bool:
     """Select all content for entry-like and text widgets."""
 
@@ -302,11 +317,16 @@ def bind_common_shortcuts(root: tk.Tk) -> None:
             current = getattr(current, "master", None)
         return None
 
+    def on_focus_in(event: tk.Event) -> None:
+        w = event.widget
+        if _is_text_input(w):
+            _enable_undo(w)
+            _tune_text_input_caret(w)
+
     def handle_copy(event: tk.Event) -> str | None:
         widget = event.widget
         if _is_text_input(widget):
-            widget.event_generate("<<Copy>>")
-            return "break"
+            return None
         tableframe = _find_tableframe_from_widget(widget)
         if tableframe:
             tableframe.copy_selection_to_clipboard(include_headers=False)
@@ -316,15 +336,13 @@ def bind_common_shortcuts(root: tk.Tk) -> None:
     def handle_cut(event: tk.Event) -> str | None:
         widget = event.widget
         if _is_text_input(widget):
-            widget.event_generate("<<Cut>>")
-            return "break"
+            return None
         return None
 
     def handle_paste(event: tk.Event) -> str | None:
         widget = event.widget
         if _is_text_input(widget):
-            widget.event_generate("<<Paste>>")
-            return "break"
+            return None
         return None
 
     def handle_select_all(event: tk.Event) -> str | None:
@@ -336,17 +354,13 @@ def bind_common_shortcuts(root: tk.Tk) -> None:
     def handle_undo(event: tk.Event) -> str | None:
         widget = event.widget
         if _is_text_input(widget):
-            _enable_undo(widget)
-            widget.event_generate("<<Undo>>")
-            return "break"
+            return None
         return None
 
     def handle_redo(event: tk.Event) -> str | None:
         widget = event.widget
         if _is_text_input(widget):
-            _enable_undo(widget)
-            widget.event_generate("<<Redo>>")
-            return "break"
+            return None
         return None
 
     def handle_copy_with_headers(event: tk.Event) -> str | None:
@@ -465,6 +479,7 @@ def bind_common_shortcuts(root: tk.Tk) -> None:
     ):
         root.bind_all(sequence, handler, add="+")
 
+    root.bind_all("<FocusIn>", on_focus_in, add="+")
     root.bind_all("<Control-Shift-C>", handle_copy_with_headers, add=True)
     root.bind_all("<Control-f>", handle_find, add=True)
 

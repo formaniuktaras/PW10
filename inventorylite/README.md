@@ -70,6 +70,7 @@ python -m inventorylite.self_check_inventory
 python -m inventorylite.self_check_atomicity_and_uniques
 python -m inventorylite.self_check_extracost_variant_b
 python -m inventorylite.self_check_normalization_edges
+python -m inventorylite.self_check_sku_gen
 ```
 
 ## Структура даних і резервні копії

@@ -274,7 +274,15 @@ def _tune_text_input_caret(widget: tk.Widget) -> None:
     if tk is None:
         return
     try:
-        widget.configure(insertwidth=2)
+        widget.configure(insertwidth=4)
+    except Exception:
+        pass
+    try:
+        widget.configure(insertbackground="#ffffff")
+    except Exception:
+        pass
+    try:
+        widget.configure(insertcolor="#ffffff")
     except Exception:
         pass
     try:

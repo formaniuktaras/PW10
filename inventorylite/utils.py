@@ -110,6 +110,22 @@ DEFAULT_SETTINGS = {
 }
 
 
+def setup_logging(app_name: str = "InventoryLite") -> Path:
+    base = Path.home() / app_name / "logs"
+    base.mkdir(parents=True, exist_ok=True)
+    log_path = base / f"{app_name.lower()}_{datetime.datetime.now().strftime('%Y%m%d')}.log"
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers=[
+            logging.FileHandler(log_path, encoding="utf-8"),
+        ],
+    )
+    logging.info("Logging started: %s", log_path)
+    return log_path
+
+
 def get_data_dir() -> Path:
     """Return the data directory under LOCALAPPDATA."""
     local_appdata = os.environ.get("LOCALAPPDATA") or os.path.join(Path.home(), ".local", "share")

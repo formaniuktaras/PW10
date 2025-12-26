@@ -8,8 +8,12 @@ The app focuses on a lightweight workflow for a trading business:
 """
 from __future__ import annotations
 
+import argparse
 import csv
+import json
 import logging
+import subprocess
+import time
 import traceback
 import webbrowser
 from datetime import date, datetime
@@ -31,7 +35,6 @@ from inventorylite.helpers import (
     _parse_float_value,
     _parse_num,
 )
-from inventorylite.error_handling import setup_logging
 from inventorylite.dialogs_labels import open_labels_print_dialog
 from inventorylite.tabs.categories import CategoriesTab
 from inventorylite.tabs.brands import BrandsTab
@@ -60,11 +63,12 @@ from inventorylite.utils import (
     Settings,
     apply_base_currency_settings,
     open_data_folder,
-    restore_all_data,
     show_error,
     backup_database,
     bind_common_shortcuts,
+    setup_logging,
 )
+from inventorylite.restore_helper import helper_restore_main
 
 
 class InventoryApp(tk.Tk):
@@ -758,22 +762,22 @@ class InventoryApp(tk.Tk):
         ):
             return
         try:
-            restore_all_data(Path(archive_path))
-            with db.get_connection() as conn:
-                db.audit_event(
-                    "RESTORE_ZIP",
-                    "Data restored from ZIP",
-                    details={"path": str(archive_path)},
-                    conn=conn,
-                )
-            messagebox.showinfo(
-                "Відновлення даних",
-                "Дані відновлено. Програма буде закрита — запустіть знову.",
-            )
-            self.root.after(100, self.root.destroy)
-        except Exception as exc:
-            logging.exception("Restore failed")
-            show_error("Відновлення даних", str(exc))
+            archive = Path(archive_path).expanduser().resolve()
+            if getattr(sys, "frozen", False):
+                cmd = [sys.executable, "--helper-restore", str(archive)]
+            else:
+                cmd = [sys.executable, "-m", "inventorylite.app", "--helper-restore", str(archive)]
+            subprocess.Popen(cmd, close_fds=True)
+        except Exception:
+            logging.exception("Restore helper failed to start")
+            show_error("Відновлення даних", "Не вдалося запустити процес відновлення.")
+            return
+
+        messagebox.showinfo(
+            "Відновлення даних",
+            "Програма зараз закриється для відновлення і запуститься знову.",
+        )
+        self.after(50, self.destroy)
 
     def on_backup(self) -> None:
         try:
@@ -936,7 +940,26 @@ class InventoryApp(tk.Tk):
         self.reports_tab.refresh_all()
 
 
-def main() -> None:
+def main(argv: Optional[list[str]] = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    parser = argparse.ArgumentParser(prog="inventorylite.app")
+    parser.add_argument("--helper-restore", dest="helper_restore", help="Запустити режим відновлення")
+    parser.add_argument("--no-relaunch", action="store_true", help="Не перезапускати після відновлення")
+    parser.add_argument(
+        "--wait-timeout",
+        type=int,
+        default=60,
+        help="Час очікування (сек.) на звільнення lock перед відновленням",
+    )
+    args = parser.parse_args(argv)
+
+    if args.helper_restore:
+        return helper_restore_main(
+            args.helper_restore,
+            relaunch=not args.no_relaunch,
+            timeout=args.wait_timeout,
+        )
+
     log_path = setup_logging(APP_NAME)
 
     def _sys_hook(exc, val, tb):
@@ -953,7 +976,7 @@ def main() -> None:
             except ValueError as exc:
                 logging.exception("Database schema version is incompatible")
                 messagebox.showerror("Несумісна база даних", str(exc))
-                return
+                return 1
             app = InventoryApp(settings, log_path=log_path)
 
             def _tk_report_callback_exception(exc, val, tb):
@@ -972,16 +995,46 @@ def main() -> None:
                         file=sys.stderr,
                     )
 
+            def check_restore_marker() -> None:
+                marker = get_data_dir() / "restore_last.json"
+                if not marker.exists():
+                    return
+                try:
+                    content = json.loads(marker.read_text(encoding="utf-8"))
+                except Exception:
+                    logging.exception("Failed to read restore marker")
+                    try:
+                        marker.unlink(missing_ok=True)
+                    except Exception:
+                        logging.exception("Failed to remove restore marker")
+                    return
+
+                try:
+                    marker.unlink(missing_ok=True)
+                except Exception:
+                    logging.exception("Failed to remove restore marker")
+
+                ok = bool(content.get("ok"))
+                log_hint = content.get("log_path") or ""
+                if ok:
+                    messagebox.showinfo("Відновлення", "Дані успішно відновлено.")
+                else:
+                    details = f" Див. логи: {log_hint}" if log_hint else ""
+                    messagebox.showerror("Відновлення", f"Помилка відновлення.{details}")
+
             app.report_callback_exception = _tk_report_callback_exception  # type: ignore[attr-defined]
+            app.after(250, check_restore_marker)
             app.mainloop()
     except RuntimeError:
         messagebox.showwarning(APP_NAME, "Програма вже запущена.")
+        return 1
     except ValueError as exc:
         logging.exception("Unhandled value error during startup")
         try:
             messagebox.showerror(APP_NAME, str(exc))
         except tk.TclError:
             print(str(exc), file=sys.stderr)
+        return 1
     except Exception:
         logging.exception("Fatal error")
         try:
@@ -989,7 +1042,10 @@ def main() -> None:
         except tk.TclError:
             print("Критична помилка. Деталі у логах:", log_path, file=sys.stderr)
         traceback.print_exc()
+        return 1
+
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

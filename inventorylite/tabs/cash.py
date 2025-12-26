@@ -5,7 +5,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from typing import Optional
 
-from inventorylite import db
+from inventorylite import db, dates
 from inventorylite.ui_components import TableFrame
 from inventorylite.utils import Settings, show_error
 from inventorylite.dialogs_documents import cash_prompt
@@ -52,10 +52,14 @@ class CashTab:
     def refresh_cash(self) -> None:
         if not self.cash_table:
             return
-        rows = db.list_cash(
-            self.cash_date_from_var.get().strip() or None,
-            self.cash_date_to_var.get().strip() or None,
-        )
+        try:
+            rows = db.list_cash(
+                self.cash_date_from_var.get().strip() or None,
+                self.cash_date_to_var.get().strip() or None,
+            )
+        except ValueError as exc:
+            show_error("Каса", str(exc))
+            return
         type_labels = {
             "sale_payment": "Оплата від клієнта",
             "purchase_payment": "Оплата постачальнику",
@@ -67,7 +71,7 @@ class CashTab:
             [
                 {
                     "id": r["id"],
-                    "date": r["date"],
+                    "date": dates.format_iso_to_dmy(r["date"]),
                     "type": type_labels.get(r["type"], r["type"]),
                     "amount": f"{r['amount']:.2f}",
                     "counterparty": r["counterparty"] or "-",

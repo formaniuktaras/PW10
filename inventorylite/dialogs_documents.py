@@ -6,14 +6,15 @@ from datetime import datetime
 from tkinter import ttk, messagebox
 from typing import Optional
 
-from inventorylite import db, sku_gen
+from inventorylite import db, sku_gen, dates
 from inventorylite.helpers import format_rate, parse_paste_lines, _find_index_by_name
-from inventorylite.ui_components import rate_prompt
+from inventorylite.ui_components import DatePicker, rate_prompt
 from inventorylite.utils import Settings, get_base_currency_code
 
 
 def ensure_rate_for_date(currency_code: str, rate_date: str) -> float:
     currency_code = currency_code.strip().upper()
+    rate_date = dates.normalize_date_to_iso(rate_date, field_label="Дата")
     base_currency = get_base_currency_code()
     if not currency_code or currency_code == base_currency:
         return 1.0
@@ -77,9 +78,13 @@ def document_prompt(
     ttk.Label(content, text=doc_type_label).grid(row=row_idx, column=1, padx=6, pady=4, sticky="w")
 
     row_idx += 1
-    ttk.Label(content, text="Дата (YYYY-MM-DD)").grid(row=row_idx, column=0, padx=6, pady=4, sticky="e")
-    date_var = tk.StringVar(value=doc["doc_date"] if doc else datetime.now().strftime("%Y-%m-%d"))
-    ttk.Entry(content, textvariable=date_var, width=15, state="normal" if editable else "disabled").grid(row=row_idx, column=1, padx=6, pady=4, sticky="w")
+    ttk.Label(content, text="Дата (ДД.ММ.РРРР)").grid(row=row_idx, column=0, padx=6, pady=4, sticky="e")
+    date_picker = DatePicker(
+        content,
+        initial=doc["doc_date"] if doc else datetime.now().strftime("%Y-%m-%d"),
+        state="normal" if editable else "disabled",
+    )
+    date_picker.grid(row=row_idx, column=1, padx=6, pady=4, sticky="w")
 
     row_idx += 1
     ttk.Label(content, text="Валюта").grid(row=row_idx, column=0, padx=6, pady=4, sticky="e")
@@ -98,7 +103,7 @@ def document_prompt(
     row_idx += 1
     ttk.Label(content, text="Курс до базової").grid(row=row_idx, column=0, padx=6, pady=4, sticky="e")
     try:
-        default_rate = doc["exchange_rate"] if doc else ensure_rate_for_date(curr_var.get(), date_var.get())
+        default_rate = doc["exchange_rate"] if doc else ensure_rate_for_date(curr_var.get(), date_picker.get())
     except Exception:
         default_rate = doc["exchange_rate"] if doc else 1.0
     rate_var = tk.StringVar(value=f"{default_rate:.4f}")
@@ -231,7 +236,7 @@ def document_prompt(
         nonlocal last_currency
         if editable:
             try:
-                rate_val = ensure_rate_for_date(curr_var.get(), date_var.get())
+                rate_val = ensure_rate_for_date(curr_var.get(), date_picker.get())
             except ValueError as exc:
                 messagebox.showerror("Курс", str(exc))
                 curr_var.set(last_currency)
@@ -1168,9 +1173,9 @@ def document_prompt(
     def on_ok():
         nonlocal result
         try:
-            datetime.fromisoformat(date_var.get())
-        except ValueError:
-            messagebox.showerror("Валідація", "Невірний формат дати (YYYY-MM-DD)")
+            doc_date = dates.normalize_date_to_iso(date_picker.get(), field_label="Дата")
+        except ValueError as exc:
+            messagebox.showerror("Валідація", str(exc))
             return
         if editable and not line_data:
             messagebox.showerror("Валідація", "Додайте хоча б один рядок")
@@ -1198,8 +1203,8 @@ def document_prompt(
         cp_id = None
         if cp_name and cp_name != "-":
             cp_id = next((c["id"] for c in filtered_counterparties if c["name"] == cp_name), None)
-        if currency_code != get_base_currency_code() and not db.rate_on_date(currency_code, date_var.get()):
-            db.add_currency_rate(currency_code, date_var.get(), rate)
+        if currency_code != get_base_currency_code() and not db.rate_on_date(currency_code, doc_date):
+            db.add_currency_rate(currency_code, doc_date, rate)
         try:
             warehouse_id = warehouses[wh_combo.current()]["id"]
         except Exception:
@@ -1210,7 +1215,7 @@ def document_prompt(
             channel_name = ch_var.get() if ch_var.get() else (channels[0]["name"] if channels else "")
         info = {
             "doc_type": doc_type,
-            "doc_date": date_var.get().strip(),
+            "doc_date": doc_date,
             "counterparty_id": cp_id,
             "warehouse_id": warehouse_id,
             "channel": channel_name,
@@ -1271,9 +1276,9 @@ def cash_prompt(counterparties, channels):
     dlg.title("Рух коштів")
     dlg.grab_set()
 
-    ttk.Label(dlg, text="Дата (YYYY-MM-DD)").grid(row=0, column=0, padx=6, pady=4, sticky="w")
-    date_var = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
-    ttk.Entry(dlg, textvariable=date_var, width=15).grid(row=0, column=1, padx=6, pady=4, sticky="w")
+    ttk.Label(dlg, text="Дата (ДД.ММ.РРРР)").grid(row=0, column=0, padx=6, pady=4, sticky="w")
+    date_picker = DatePicker(dlg, initial=datetime.now().strftime("%Y-%m-%d"))
+    date_picker.grid(row=0, column=1, padx=6, pady=4, sticky="w")
 
     ttk.Label(dlg, text="Тип").grid(row=1, column=0, padx=6, pady=4, sticky="w")
     type_var = tk.StringVar()
@@ -1316,7 +1321,7 @@ def cash_prompt(counterparties, channels):
     def on_ok():
         nonlocal result
         try:
-            datetime.fromisoformat(date_var.get())
+            normalized_date = dates.normalize_date_to_iso(date_picker.get(), field_label="Дата")
             amount = float(amount_var.get())
         except ValueError:
             messagebox.showerror("Валідація", "Невірні значення дати або суми")
@@ -1326,10 +1331,10 @@ def cash_prompt(counterparties, channels):
         cp_id = None
         if cp_name and cp_name != "-":
             cp_id = next((c["id"] for c in counterparties if c["name"] == cp_name), None)
-        channel = ch_var.get() if ch_var.get() else ""
-        result = [
-            {
-                "date": date_var.get().strip(),
+            channel = ch_var.get() if ch_var.get() else ""
+            result = [
+                {
+                    "date": normalized_date,
                 "amount": amount,
                 "ctype": ctype,
                 "counterparty_id": cp_id,

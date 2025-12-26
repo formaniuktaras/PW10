@@ -30,19 +30,13 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
     content.columnconfigure(1, weight=1)
 
     row_idx = 0
-    ttk.Label(content, text="Дата (YYYY-MM-DD)").grid(row=row_idx, column=0, padx=6, pady=4, sticky="e")
-    if editable:
-        date_picker = DatePicker(
-            content,
-            initial=datetime.strptime(doc["doc_date"], "%Y-%m-%d").date() if doc else date.today(),
-        )
-        date_picker.grid(row=row_idx, column=1, padx=6, pady=4, sticky="w")
-        date_entry = None
-    else:
-        date_var = tk.StringVar(value=doc["doc_date"] if doc else datetime.now().strftime("%Y-%m-%d"))
-        date_entry = ttk.Entry(content, textvariable=date_var, width=15, state="disabled")
-        date_entry.grid(row=row_idx, column=1, padx=6, pady=4, sticky="w")
-        date_picker = None
+    ttk.Label(content, text="Дата (ДД.ММ.РРРР)").grid(row=row_idx, column=0, padx=6, pady=4, sticky="e")
+    date_picker = DatePicker(
+        content,
+        initial=datetime.strptime(doc["doc_date"], "%Y-%m-%d").date() if doc else date.today(),
+        state="normal" if editable else "disabled",
+    )
+    date_picker.grid(row=row_idx, column=1, padx=6, pady=4, sticky="w")
 
     row_idx += 1
     ttk.Label(content, text="Склад").grid(row=row_idx, column=0, padx=6, pady=4, sticky="e")
@@ -184,11 +178,7 @@ def inventory_prompt(warehouses, products, settings: Settings, doc=None, lines=N
     balance_cache: dict[int, tuple[float, float]] = {}
 
     def _current_date() -> str:
-        if date_picker:
-            return date_picker.get()
-        if date_entry:
-            return date_entry.get().strip()
-        return datetime.now().strftime("%Y-%m-%d")
+        return date_picker.get()
 
     def _current_warehouse_id() -> Optional[int]:
         name = wh_var.get()

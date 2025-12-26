@@ -8,7 +8,7 @@ from typing import Callable, Optional
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-from inventorylite import db
+from inventorylite import db, dates
 from inventorylite.helpers import (
     SALES_FIELDS,
     _normalize_sales_records,
@@ -112,16 +112,20 @@ class SalesTab:
             return
         status_filter = self.sales_status_var.get()
         status_value = "draft" if status_filter == "Чернетка" else "posted" if status_filter == "Проведений" else None
-        rows = db.list_sales(
-            status_value,
-            self.sales_date_from_var.get().strip() or None,
-            self.sales_date_to_var.get().strip() or None,
-        )
+        try:
+            rows = db.list_sales(
+                status_value,
+                self.sales_date_from_var.get().strip() or None,
+                self.sales_date_to_var.get().strip() or None,
+            )
+        except ValueError as exc:
+            show_error("Продажі", str(exc))
+            return
         self.sales_table.set_rows(
             [
                 {
                     "id": r["id"],
-                    "doc_date": r["doc_date"],
+                    "doc_date": dates.format_iso_to_dmy(r["doc_date"]),
                     "customer": r["customer"] or "-",
                     "warehouse": r["warehouse"] or "-",
                     "channel": r["channel"] or "-",

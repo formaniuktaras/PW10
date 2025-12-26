@@ -8,7 +8,7 @@ from typing import Callable, Optional
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-from inventorylite import db
+from inventorylite import db, dates
 from inventorylite.dialogs_inventory import inventory_prompt
 from inventorylite.ui_components import TableFrame
 from inventorylite.utils import Settings, show_error
@@ -131,17 +131,21 @@ class InventoryTab:
         if warehouse_name and warehouse_name != "Усі":
             match = next((w["id"] for w in self.inventory_warehouse_options if w["name"] == warehouse_name), None)
             warehouse_id = match
-        rows = db.list_inventory_documents(
-            status_value,
-            self.inventory_date_from_var.get().strip() or None,
-            self.inventory_date_to_var.get().strip() or None,
-            warehouse_id,
-        )
+        try:
+            rows = db.list_inventory_documents(
+                status_value,
+                self.inventory_date_from_var.get().strip() or None,
+                self.inventory_date_to_var.get().strip() or None,
+                warehouse_id,
+            )
+        except ValueError as exc:
+            show_error("Інвентаризація", str(exc))
+            return
         self.inventory_table.set_rows(
             [
                 {
                     "id": r["id"],
-                    "doc_date": r["doc_date"],
+                    "doc_date": dates.format_iso_to_dmy(r["doc_date"]),
                     "warehouse": r["warehouse_name"] or "-",
                     "status": "Чернетка" if r["status"] == "draft" else "Проведений",
                     "lines_count": r["lines_count"],

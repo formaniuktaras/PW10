@@ -426,6 +426,32 @@ class InventoryApp(tk.Tk):
                             ]
                         },
                     },
+                    "Success.TButton": {
+                        "configure": {
+                            "background": "#bff3c9",
+                            "foreground": "#102a10",
+                            "padding": (10, 6),
+                        },
+                        "map": {
+                            "background": [
+                                ("pressed", "#90e8a3"),
+                                ("active", "#a9eeb7"),
+                            ]
+                        },
+                    },
+                    "Danger.TButton": {
+                        "configure": {
+                            "background": "#ffc6c6",
+                            "foreground": "#3a0b0b",
+                            "padding": (10, 6),
+                        },
+                        "map": {
+                            "background": [
+                                ("pressed", "#ff9f9f"),
+                                ("active", "#ffb1b1"),
+                            ]
+                        },
+                    },
                     "TEntry": {
                         "configure": {
                             "fieldbackground": palette["surface"],
@@ -543,6 +569,32 @@ class InventoryApp(tk.Tk):
                             "background": [
                                 ("pressed", palette["accent"]),
                                 ("active", palette["surface"]),
+                            ]
+                        },
+                    },
+                    "Success.TButton": {
+                        "configure": {
+                            "background": "#166534",
+                            "foreground": "#ffffff",
+                            "padding": (10, 6),
+                        },
+                        "map": {
+                            "background": [
+                                ("pressed", "#14532d"),
+                                ("active", "#15803d"),
+                            ]
+                        },
+                    },
+                    "Danger.TButton": {
+                        "configure": {
+                            "background": "#991b1b",
+                            "foreground": "#ffffff",
+                            "padding": (10, 6),
+                        },
+                        "map": {
+                            "background": [
+                                ("pressed", "#7f1d1d"),
+                                ("active", "#b91c1c"),
                             ]
                         },
                     },

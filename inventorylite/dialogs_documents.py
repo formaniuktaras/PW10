@@ -370,6 +370,84 @@ def document_prompt(
                 ),
             )
 
+    editor = {"w": None, "row": None, "col": None}
+
+    editable_keys = {"quantity", "price", "expense"}
+    col_to_key = {"#1": "product", "#2": "quantity", "#3": "price", "#4": "expense", "#5": "amount"}
+
+    def _close_editor(save: bool):
+        w = editor["w"]
+        if not w:
+            return
+        try:
+            if save:
+                row_iid = editor["row"]
+                col_id = editor["col"]
+                key = col_to_key.get(col_id)
+                if key in editable_keys:
+                    idx = int(row_iid)
+                    raw = w.get().strip().replace(",", ".")
+                    try:
+                        val = float(raw)
+                    except ValueError:
+                        messagebox.showerror("Валідація", "Невірне число")
+                        return
+                    if key == "quantity" and val <= 0:
+                        messagebox.showerror("Валідація", "Кількість повинна бути > 0")
+                        return
+                    if key in ("price", "expense") and val < 0:
+                        messagebox.showerror("Валідація", "Значення не може бути від'ємним")
+                        return
+
+                    line_data[idx][key] = val
+                    if key in ("quantity", "price"):
+                        q = float(line_data[idx]["quantity"])
+                        p = float(line_data[idx]["price"])
+                        line_data[idx]["amount"] = q * p
+
+                    refresh_lines()
+                    tree.selection_set(row_iid)
+                    tree.focus(row_iid)
+                    tree.see(row_iid)
+        finally:
+            try:
+                w.destroy()
+            except Exception:
+                pass
+            editor["w"] = None
+            editor["row"] = None
+            editor["col"] = None
+
+    def _begin_edit(row_iid: str, col_id: str):
+        key = col_to_key.get(col_id)
+        if key not in editable_keys:
+            return
+        if not editable:
+            return
+        if editor["w"]:
+            _close_editor(save=True)
+
+        bbox = tree.bbox(row_iid, col_id)
+        if not bbox:
+            return
+        x, y, w_, h_ = bbox
+
+        e = ttk.Entry(tree)
+        idx = int(row_iid)
+        e.insert(0, str(line_data[idx].get(key, "")))
+        e.select_range(0, "end")
+        e.focus_set()
+        e.place(x=x, y=y, width=w_, height=h_)
+
+        editor["w"] = e
+        editor["row"] = row_iid
+        editor["col"] = col_id
+
+        e.bind("<Return>", lambda ev: (_close_editor(True), "break"))
+        e.bind("<KP_Enter>", lambda ev: (_close_editor(True), "break"))
+        e.bind("<Escape>", lambda ev: (_close_editor(False), "break"))
+        e.bind("<FocusOut>", lambda ev: _close_editor(True))
+
     def _scan_get_counterparty_id() -> Optional[int]:
         cp_name = cp_var.get()
         if not cp_name or cp_name == "-":
@@ -810,16 +888,53 @@ def document_prompt(
         if sel:
             idx = int(sel[0])
             selected_idx.append(idx)
-            ln = line_data[idx]
-            product_name = products_by_id.get(ln["product_id"], ln["product_name"])
-            product_var.set(product_name)
-            qty_var.set(str(ln["quantity"]))
-            price_var.set(str(ln["price"]))
-            expense_var.set(str(ln.get("expense", 0.0)))
 
     tree.bind("<<TreeviewSelect>>", on_select)
 
-    def add_or_update_line():
+    last_col_id: str | None = None
+
+    def _remember_col(ev):
+        nonlocal last_col_id
+        col = tree.identify_column(ev.x)
+        if col:
+            last_col_id = col
+
+    def _on_tree_dbl(ev):
+        row = tree.identify_row(ev.y)
+        col = tree.identify_column(ev.x)
+        if row:
+            tree.selection_set(row)
+            _begin_edit(row, col)
+
+    def _on_tree_f2(ev):
+        sel = tree.selection()
+        if not sel:
+            return
+        row = sel[0]
+        col = last_col_id or tree.identify_column(ev.x)
+        if not col:
+            return
+        _begin_edit(row, col)
+
+    def _on_tree_click_empty(ev):
+        row = tree.identify_row(ev.y)
+        if not row:
+            tree.selection_remove(tree.selection())
+            selected_idx.clear()
+
+    def _on_tree_escape(ev):
+        tree.selection_remove(tree.selection())
+        selected_idx.clear()
+        return "break"
+
+    tree.bind("<Double-1>", _on_tree_dbl, add="+")
+    tree.bind("<F2>", _on_tree_f2, add="+")
+    tree.bind("<Motion>", _remember_col, add="+")
+    tree.bind("<Button-1>", _remember_col, add="+")
+    tree.bind("<Button-1>", _on_tree_click_empty, add="+")
+    tree.bind("<Escape>", _on_tree_escape, add="+")
+
+    def add_line():
         if not editable:
             return
         try:
@@ -855,11 +970,9 @@ def document_prompt(
             "expense": expense_value,
             "amount": qty * price,
         }
-        if selected_idx:
-            line_data[selected_idx[0]] = data
-        else:
-            line_data.append(data)
+        line_data.append(data)
         refresh_lines()
+        tree.selection_remove(tree.selection())
         selected_idx.clear()
 
     def delete_line():
@@ -1028,8 +1141,8 @@ def document_prompt(
     btn_line = ttk.Frame(entry_frame)
     btn_line.grid(row=0, column=8, padx=6)
     ttk.Button(btn_line, text="Новий товар", command=lambda: add_new_product(product_var.get()), state="normal" if editable else "disabled").pack(side=tk.LEFT, padx=4)
-    ttk.Button(btn_line, text="Додати/Оновити", command=add_or_update_line, state="normal" if editable else "disabled").pack(side=tk.LEFT)
-    ttk.Button(btn_line, text="Видалити", command=delete_line, state="normal" if editable else "disabled").pack(side=tk.LEFT, padx=4)
+    ttk.Button(btn_line, text="Додати", command=add_line, style="Success.TButton", state="normal" if editable else "disabled").pack(side=tk.LEFT)
+    ttk.Button(btn_line, text="Видалити", command=delete_line, style="Danger.TButton", state="normal" if editable else "disabled").pack(side=tk.LEFT, padx=4)
 
     refresh_lines()
 

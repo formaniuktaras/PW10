@@ -722,16 +722,32 @@ def restore_all_data(archive_path: Path) -> None:
 
         # Remove existing data files except for the archive itself if it is stored under data_dir.
         skip_path = archive_path if _is_relative_to(archive_path, data_dir) else None
+        busy_file_hint = "Файл зайнятий іншим процесом. Закрийте інші копії програми і повторіть."
         for item in list(data_dir.iterdir()):
             # Skip the archive file and its parent directories to avoid deleting the source during restore.
             if skip_path and (item.resolve() == skip_path or _is_relative_to(skip_path, item)):
                 continue
             if item.resolve() == backups_dir.resolve():
                 continue
-            if item.is_dir():
-                shutil.rmtree(item)
-            else:
-                item.unlink(missing_ok=True)
+            if item.name == "app.lock":
+                continue
+            if item.suffix == ".log":
+                continue
+            if item.name.endswith(".tmp") or item.name.endswith(".journal"):
+                continue
+            if is_wal_file(item):
+                continue
+            try:
+                if item.is_dir():
+                    shutil.rmtree(item)
+                else:
+                    item.unlink(missing_ok=True)
+            except PermissionError as exc:
+                raise RuntimeError(busy_file_hint) from exc
+            except OSError as exc:
+                if getattr(exc, "winerror", None) == 32:
+                    raise RuntimeError(busy_file_hint) from exc
+                raise
 
         _remove_wal_shm_files(data_dir)
 
@@ -740,8 +756,19 @@ def restore_all_data(archive_path: Path) -> None:
             if source.is_dir():
                 target.mkdir(parents=True, exist_ok=True)
                 continue
+            if target.name == "app.lock":
+                continue
+            if target.suffix == ".log":
+                continue
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
+            try:
+                shutil.copy2(source, target)
+            except PermissionError as exc:
+                raise RuntimeError(busy_file_hint) from exc
+            except OSError as exc:
+                if getattr(exc, "winerror", None) == 32:
+                    raise RuntimeError(busy_file_hint) from exc
+                raise
 
     _remove_wal_shm_files(data_dir)
 

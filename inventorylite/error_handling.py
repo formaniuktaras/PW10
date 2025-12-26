@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import datetime as _dt
 import logging
 import traceback
 from pathlib import Path
@@ -8,23 +7,7 @@ from pathlib import Path
 import tkinter as tk
 
 from inventorylite import diagnostics
-
-
-def setup_logging(app_name: str = "InventoryLite") -> Path:
-    # Логи в домашній теці користувача: %USERPROFILE%/InventoryLite/logs або ~/.InventoryLite/logs
-    base = Path.home() / app_name / "logs"
-    base.mkdir(parents=True, exist_ok=True)
-    log_path = base / f"{app_name.lower()}_{_dt.datetime.now().strftime('%Y%m%d')}.log"
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        handlers=[
-            logging.FileHandler(log_path, encoding="utf-8"),
-        ],
-    )
-    logging.info("Logging started: %s", log_path)
-    return log_path
+from inventorylite.utils import setup_logging
 
 
 def install_tk_exception_handler(root: tk.Tk, log_path: Path) -> None:

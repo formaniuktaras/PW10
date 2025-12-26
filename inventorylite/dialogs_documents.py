@@ -269,17 +269,20 @@ def document_prompt(
 
     ttk.Label(entry_frame, text="Кількість").grid(row=0, column=2, padx=4, pady=2, sticky="e")
     qty_var = tk.StringVar(value="1")
-    ttk.Entry(entry_frame, textvariable=qty_var, width=10).grid(row=0, column=3, padx=4, pady=2, sticky="w")
+    qty_entry = ttk.Entry(entry_frame, textvariable=qty_var, width=10)
+    qty_entry.grid(row=0, column=3, padx=4, pady=2, sticky="w")
 
     price_label = ttk.Label(entry_frame, text="Ціна")
     price_label.grid(row=0, column=4, padx=4, pady=2, sticky="e")
     price_var = tk.StringVar(value="0")
-    ttk.Entry(entry_frame, textvariable=price_var, width=10).grid(row=0, column=5, padx=4, pady=2, sticky="w")
+    price_entry = ttk.Entry(entry_frame, textvariable=price_var, width=10)
+    price_entry.grid(row=0, column=5, padx=4, pady=2, sticky="w")
 
     expense_label = ttk.Label(entry_frame, text="Витрата/од.")
     expense_label.grid(row=0, column=6, padx=4, pady=2, sticky="e")
     expense_var = tk.StringVar(value="0")
-    ttk.Entry(entry_frame, textvariable=expense_var, width=10).grid(row=0, column=7, padx=4, pady=2, sticky="w")
+    expense_entry = ttk.Entry(entry_frame, textvariable=expense_var, width=10)
+    expense_entry.grid(row=0, column=7, padx=4, pady=2, sticky="w")
 
     line_data = []
     if lines:
@@ -386,9 +389,8 @@ def document_prompt(
                 key = col_to_key.get(col_id)
                 if key in editable_keys:
                     idx = int(row_iid)
-                    raw = w.get().strip().replace(",", ".")
                     try:
-                        val = float(raw)
+                        val = _parse_float(w.get())
                     except ValueError:
                         messagebox.showerror("Валідація", "Невірне число")
                         return
@@ -502,7 +504,7 @@ def document_prompt(
                 _, avg_cost = db.get_stock_balance(int(product_row["id"]), int(wh_id))
                 if doc_type == "sale":
                     try:
-                        rate = float(rate_var.get() or 1)
+                        rate = _parse_float(rate_var.get(), default=1.0)
                     except ValueError:
                         rate = 1.0
                     if rate <= 0:
@@ -512,11 +514,11 @@ def document_prompt(
                     price0 = avg_cost
         if price0 <= 0:
             try:
-                price0 = float(price_var.get() or 0)
+                price0 = _parse_float(price_var.get(), default=0.0)
             except ValueError:
                 price0 = 0.0
         try:
-            exp0 = float(expense_var.get() or 0)
+            exp0 = _parse_float(expense_var.get(), default=0.0)
         except ValueError:
             exp0 = 0.0
         product_name = f"{product_row['name']} ({product_row['sku']})"
@@ -626,7 +628,7 @@ def document_prompt(
                     _, avg_cost = db.get_stock_balance(int(product_row["id"]), int(wh_id))
                     if doc_type == "sale":
                         try:
-                            rate = float(rate_var.get() or 1)
+                            rate = _parse_float(rate_var.get(), default=1.0)
                         except ValueError:
                             rate = 1.0
                         if rate <= 0:
@@ -636,7 +638,7 @@ def document_prompt(
                         price0 = avg_cost
             if price0 <= 0:
                 try:
-                    price0 = float(price_var.get() or 0)
+                    price0 = _parse_float(price_var.get(), default=0.0)
                 except ValueError:
                     price0 = 0.0
             return price0
@@ -805,7 +807,7 @@ def document_prompt(
                     updated_count += 1
                 else:
                     try:
-                        exp0 = float(expense_var.get() or 0)
+                        exp0 = _parse_float(expense_var.get(), default=0.0)
                     except ValueError:
                         exp0 = 0.0
                     product_name = f"{product['name']} ({product['sku']})"
@@ -934,13 +936,21 @@ def document_prompt(
     tree.bind("<Button-1>", _on_tree_click_empty, add="+")
     tree.bind("<Escape>", _on_tree_escape, add="+")
 
+    def _parse_float(s: str, default: float | None = None) -> float:
+        t = (s or "").strip().replace(" ", "").replace(",", ".")
+        if t == "":
+            if default is None:
+                raise ValueError("empty")
+            return float(default)
+        return float(t)
+
     def add_line():
         if not editable:
             return
         try:
-            qty = float(qty_var.get())
-            price = float(price_var.get())
-            expense_value = float(expense_var.get() or 0)
+            qty = _parse_float(qty_var.get())
+            price = _parse_float(price_var.get())
+            expense_value = _parse_float(expense_var.get(), default=0.0)
         except ValueError:
             messagebox.showerror("Валідація", "Невірні числові значення")
             return
@@ -983,6 +993,11 @@ def document_prompt(
         line_data.pop(selected_idx[0])
         selected_idx.clear()
         refresh_lines()
+
+    if editable:
+        qty_entry.bind("<Return>", lambda ev: (add_line(), "break"))
+        price_entry.bind("<Return>", lambda ev: (add_line(), "break"))
+        expense_entry.bind("<Return>", lambda ev: (add_line(), "break"))
 
     def add_new_product(default_name: str = ""):
         if not editable:
@@ -1161,7 +1176,7 @@ def document_prompt(
             messagebox.showerror("Валідація", "Додайте хоча б один рядок")
             return
         try:
-            rate = float(rate_var.get())
+            rate = _parse_float(rate_var.get())
         except ValueError:
             messagebox.showerror("Валідація", "Невірний курс")
             return
@@ -1172,7 +1187,7 @@ def document_prompt(
         order_expense = 0.0
         if doc_type == "sale":
             try:
-                order_expense = float(order_expense_var.get() or 0)
+                order_expense = _parse_float(order_expense_var.get(), default=0.0)
             except ValueError:
                 messagebox.showerror("Валідація", "Невірна сума витрат замовлення")
                 return

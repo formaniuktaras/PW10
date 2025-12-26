@@ -1,13 +1,14 @@
 """Reusable Tkinter UI components."""
 from __future__ import annotations
 
-import tkinter as tk
-from tkinter import messagebox, ttk
 import calendar
 from datetime import date, datetime
 from functools import cmp_to_key
 from typing import TYPE_CHECKING, Any, Callable, List, Optional
+import tkinter as tk
+from tkinter import messagebox, ttk
 
+from inventorylite import dates
 from inventorylite.helpers import (
     RATE_DECIMALS,
     bind_two_way_rate,
@@ -268,8 +269,9 @@ class TableFrame(ttk.Frame):
             return True, (2, "")
 
         try:
-            parsed_dt = datetime.fromisoformat(raw_text)
-            return False, (0, parsed_dt)
+            parsed_dt = dates.try_parse_date_any(raw_text)
+            if parsed_dt:
+                return False, (0, datetime.combine(parsed_dt, datetime.min.time()))
         except ValueError:
             pass
 
@@ -294,44 +296,72 @@ class TableFrame(ttk.Frame):
 class DatePicker(ttk.Frame):
     """Date picker with a popup calendar."""
 
-    def __init__(self, master: tk.Widget, initial: date | None = None, **kwargs):
+    def __init__(
+        self,
+        master: tk.Widget,
+        initial: date | datetime | str | None = None,
+        *,
+        state: str = "normal",
+        **kwargs,
+    ):
         super().__init__(master, **kwargs)
-        initial_date = initial or date.today()
+        initial_date = self._coerce_to_date(initial)
         self.selected_date = initial_date
         self.var = tk.StringVar(value=self._format_date(initial_date))
 
-        entry = ttk.Entry(self, textvariable=self.var, width=12)
+        entry = ttk.Entry(self, textvariable=self.var, width=12, state=state)
         entry.grid(row=0, column=0, sticky="w")
         entry.bind("<FocusOut>", self._on_entry_change)
+        entry.bind("<Return>", self._on_entry_change)
 
-        ttk.Button(self, text="…", width=3, command=self._open_calendar).grid(row=0, column=1, padx=(4, 0))
+        btn_state = state if state == "normal" else "disabled"
+        ttk.Button(self, text="…", width=3, command=self._open_calendar, state=btn_state).grid(
+            row=0, column=1, padx=(4, 0)
+        )
+        self._entry = entry
+        self._state = state
 
     def get(self) -> str:
-        return self.var.get().strip()
+        return self.selected_date.strftime("%Y-%m-%d")
 
-    def set(self, value: date | str) -> None:
-        if isinstance(value, str):
-            try:
-                parsed = datetime.strptime(value, "%Y-%m-%d").date()
-            except ValueError:
-                return
-        else:
-            parsed = value
-        self.selected_date = parsed
-        self.var.set(self._format_date(parsed))
+    def get_display(self) -> str:
+        return self._format_date(self.selected_date)
 
-    def _format_date(self, value: date) -> str:
-        return value.strftime("%Y-%m-%d")
-
-    def _on_entry_change(self, _event: tk.Event) -> None:
+    def set(self, value: date | datetime | str) -> None:
         try:
-            parsed = datetime.strptime(self.var.get().strip(), "%Y-%m-%d").date()
+            parsed = self._coerce_to_date(value)
         except ValueError:
             return
         self.selected_date = parsed
         self.var.set(self._format_date(parsed))
 
+    def _format_date(self, value: date) -> str:
+        return value.strftime("%d.%m.%Y")
+
+    def _coerce_to_date(self, value: date | datetime | str | None) -> date:
+        if value is None:
+            return date.today()
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        parsed_iso = dates.normalize_date_to_iso(str(value), field_label="Дата")
+        return datetime.strptime(parsed_iso, "%Y-%m-%d").date()
+
+    def _on_entry_change(self, _event: tk.Event) -> None:
+        try:
+            parsed_iso = dates.normalize_date_to_iso(self.var.get(), field_label="Дата")
+            parsed = datetime.strptime(parsed_iso, "%Y-%m-%d").date()
+        except ValueError:
+            # Roll back to last valid value
+            self.var.set(self._format_date(self.selected_date))
+            return
+        self.selected_date = parsed
+        self.var.set(self._format_date(parsed))
+
     def _open_calendar(self) -> None:
+        if self._state != "normal":
+            return
         top = tk.Toplevel(self)
         top.title("Оберіть дату")
         top.grab_set()
@@ -443,11 +473,11 @@ def rate_prompt(
     root.grab_set()
 
     row = 0
-    date_var = None
+    date_picker: DatePicker | None = None
     if initial_date is not None:
         ttk.Label(root, text="Дата").grid(row=row, column=0, padx=6, pady=4, sticky="w")
-        date_var = tk.StringVar(value=initial_date)
-        ttk.Entry(root, textvariable=date_var, width=15).grid(row=row, column=1, padx=6, pady=4)
+        date_picker = DatePicker(root, initial=initial_date)
+        date_picker.grid(row=row, column=1, padx=6, pady=4, sticky="w")
         row += 1
 
     ttk.Label(root, text=f"1 {currency_code} = ? {base_currency}").grid(
@@ -489,9 +519,10 @@ def rate_prompt(
     def on_ok() -> None:
         nonlocal result
         date_value = None
-        if date_var is not None:
-            date_value = date_var.get().strip()
-            if not date_value:
+        if date_picker is not None:
+            try:
+                date_value = dates.normalize_date_to_iso(date_picker.get(), field_label="Дата")
+            except ValueError:
                 messagebox.showerror("Курси", "Вкажіть дату")
                 return
         last_field = sync["last"]["field"]

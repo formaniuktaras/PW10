@@ -6,7 +6,7 @@ import tkinter as tk
 from datetime import datetime
 from tkinter import ttk, messagebox
 
-from inventorylite import db
+from inventorylite import db, dates
 from inventorylite.helpers import format_rate
 from inventorylite.ui_components import TableFrame, rate_prompt, simple_prompt
 from inventorylite.utils import (
@@ -104,7 +104,7 @@ class CurrenciesTab:
             [
                 {
                     "id": r["id"],
-                    "rate_date": r["rate_date"],
+                    "rate_date": dates.format_iso_to_dmy(r["rate_date"]),
                     "rate": f"{r['rate']:.4f}",
                 }
                 for r in rates

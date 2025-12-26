@@ -25,7 +25,7 @@ from pathlib import Path
 from statistics import mean, pstdev
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-from inventorylite import utils
+from inventorylite import utils, dates
 from inventorylite.utils import get_db_path
 
 
@@ -60,6 +60,14 @@ def normalize_supplier_sku(raw: str | None) -> str | None:
     if not cleaned:
         return None
     return cleaned
+
+
+def _normalize_date(raw: str, field_label: str = "Дата") -> str:
+    return dates.normalize_date_to_iso(raw, field_label=field_label)
+
+
+def _normalize_optional_date(raw: str | None, field_label: str = "Дата") -> str | None:
+    return dates.normalize_optional_date_to_iso(raw, field_label=field_label)
 
 
 def get_connection() -> sqlite3.Connection:
@@ -2205,6 +2213,7 @@ def delete_currency(code: str) -> None:
 
 def add_currency_rate(currency_code: str, rate_date: str, rate: float) -> int:
     currency_code = currency_code.strip().upper()
+    rate_date = _normalize_date(rate_date, field_label="Дата")
     if rate <= 0:
         raise ValueError("Курс має бути більшим за 0")
     with get_connection() as conn:
@@ -2223,6 +2232,7 @@ def add_currency_rate(currency_code: str, rate_date: str, rate: float) -> int:
 
 
 def update_currency_rate(rate_id: int, rate_date: str, rate: float) -> None:
+    rate_date = _normalize_date(rate_date, field_label="Дата")
     if rate <= 0:
         raise ValueError("Курс має бути більшим за 0")
     with get_connection() as conn:
@@ -2248,6 +2258,7 @@ def update_currency_rate(rate_id: int, rate_date: str, rate: float) -> None:
 
 def rate_on_date(currency_code: str, rate_date: str) -> Optional[float]:
     currency_code = currency_code.strip().upper()
+    rate_date = _normalize_date(rate_date, field_label="Дата")
     with get_connection() as conn:
         row = conn.execute(
             "SELECT rate FROM CurrencyRates WHERE currency_code=? AND rate_date=? ORDER BY id DESC LIMIT 1",
@@ -2289,6 +2300,7 @@ def latest_rate(currency_code: str) -> float:
 
 def rate_on_or_before(currency_code: str, rate_date: str) -> float:
     currency_code = currency_code.strip().upper()
+    rate_date = _normalize_date(rate_date, field_label="Дата")
     if currency_code == utils.get_base_currency_code():
         return 1.0
     with get_connection() as conn:
@@ -2537,11 +2549,8 @@ def _document_total(conn: sqlite3.Connection, table: str, fk_field: str, doc_id:
     )
 
 
-def _validate_iso_date(doc_date: str) -> None:
-    try:
-        datetime.strptime(doc_date, "%Y-%m-%d")
-    except (TypeError, ValueError) as exc:
-        raise ValueError("Невірний формат дати. Використовуйте YYYY-MM-DD") from exc
+def _validate_iso_date(doc_date: str) -> str:
+    return _normalize_date(doc_date, field_label="Дата")
 
 
 def _remove_cash_links(conn: sqlite3.Connection, doc_type: str, doc_id: int) -> None:
@@ -2562,7 +2571,7 @@ def create_purchase(
     currency_code: Optional[str] = None,
     exchange_rate: float = 1.0,
 ) -> int:
-    _validate_iso_date(doc_date)
+    doc_date = _validate_iso_date(doc_date)
     currency_value = (currency_code or utils.get_base_currency_code()).strip().upper()
     with get_connection() as conn:
         cur = conn.execute(
@@ -2584,7 +2593,7 @@ def update_purchase(
     currency_code: str,
     exchange_rate: float,
 ) -> None:
-    _validate_iso_date(doc_date)
+    doc_date = _validate_iso_date(doc_date)
     with get_connection() as conn:
         status = conn.execute("SELECT status FROM PurchaseDocuments WHERE id=?", (purchase_id,)).fetchone()
         if not status:
@@ -2632,6 +2641,8 @@ def replace_purchase_lines(purchase_id: int, lines: Iterable[Tuple[int, float, f
 
 
 def list_purchases(status: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None) -> List[sqlite3.Row]:
+    date_from = _normalize_optional_date(date_from, field_label="Дата з")
+    date_to = _normalize_optional_date(date_to, field_label="Дата по")
     query = (
         "SELECT p.id, p.doc_date, p.status, p.comment, p.channel, p.supplier_id, c.name as supplier, w.name as warehouse, p.currency_code, p.exchange_rate, "
         "IFNULL(SUM(pl.amount),0) as total, IFNULL(SUM(pl.amount_doc),0) as total_doc, IFNULL(SUM(pl.extra_cost_allocated_base),0) as total_extra_base "
@@ -2684,7 +2695,7 @@ def create_extra_cost_document(
     partner_id: Optional[int] = None,
     comment: str = "",
 ) -> int:
-    _validate_iso_date(doc_date)
+    doc_date = _validate_iso_date(doc_date)
     currency_value = (currency_code or utils.get_base_currency_code()).strip().upper()
     with get_connection() as conn:
         cur = conn.execute(
@@ -2703,7 +2714,7 @@ def update_extra_cost_document(
     partner_id: Optional[int],
     comment: str,
 ) -> None:
-    _validate_iso_date(doc_date)
+    doc_date = _validate_iso_date(doc_date)
     with get_connection() as conn:
         status = conn.execute("SELECT status FROM ExtraCostDocuments WHERE id=?", (doc_id,)).fetchone()
         if not status:
@@ -2764,6 +2775,8 @@ def list_extra_cost_documents(
     date_to: Optional[str] = None,
     partner_id: Optional[int] = None,
 ) -> List[sqlite3.Row]:
+    date_from = _normalize_optional_date(date_from, field_label="Дата з")
+    date_to = _normalize_optional_date(date_to, field_label="Дата по")
     query = (
         "SELECT e.id, e.doc_date, e.currency_code, e.exchange_rate, e.partner_id, e.status, e.total_amount_doc, e.total_amount_base, e.comment, c.name as partner "
         "FROM ExtraCostDocuments e "
@@ -2978,7 +2991,7 @@ def create_sale(
     exchange_rate: float = 1.0,
     order_expense_doc: float = 0.0,
 ) -> int:
-    _validate_iso_date(doc_date)
+    doc_date = _validate_iso_date(doc_date)
     currency_value = (currency_code or utils.get_base_currency_code()).strip().upper()
     with get_connection() as conn:
         order_expense_base = order_expense_doc * exchange_rate
@@ -3012,7 +3025,7 @@ def update_sale(
     exchange_rate: float,
     order_expense_doc: float = 0.0,
 ) -> None:
-    _validate_iso_date(doc_date)
+    doc_date = _validate_iso_date(doc_date)
     with get_connection() as conn:
         status = conn.execute("SELECT status FROM SalesDocuments WHERE id=?", (sale_id,)).fetchone()
         if not status:
@@ -3079,6 +3092,8 @@ def replace_sale_lines(
 
 
 def list_sales(status: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None) -> List[sqlite3.Row]:
+    date_from = _normalize_optional_date(date_from, field_label="Дата з")
+    date_to = _normalize_optional_date(date_to, field_label="Дата по")
     query = (
         "SELECT s.id, s.doc_date, s.status, s.comment, s.channel, s.customer_id, c.name as customer, w.name as warehouse, s.currency_code, s.exchange_rate, "
         "IFNULL(SUM(sl.amount),0) as total, IFNULL(SUM(sl.amount_doc),0) as total_doc "
@@ -3560,6 +3575,8 @@ def list_inventory_documents(
     date_to: Optional[str] = None,
     warehouse_id: Optional[int] = None,
 ) -> List[sqlite3.Row]:
+    date_from = _normalize_optional_date(date_from, field_label="Дата з")
+    date_to = _normalize_optional_date(date_to, field_label="Дата по")
     query = (
         "SELECT i.id, i.doc_date, w.name as warehouse_name, i.status, "
         "COUNT(il.id) as lines_count, IFNULL(SUM(ABS(il.counted_qty - il.expected_qty)),0) as diff_total, "
@@ -3625,7 +3642,7 @@ def list_inventory_lines(doc_id: int) -> List[sqlite3.Row]:
 
 
 def create_inventory_document(doc_date: str, warehouse_id: int, comment: str = "") -> int:
-    _validate_iso_date(doc_date)
+    doc_date = _validate_iso_date(doc_date)
     with get_connection() as conn:
         with transaction(conn):
             cur = conn.execute(
@@ -3636,7 +3653,7 @@ def create_inventory_document(doc_date: str, warehouse_id: int, comment: str = "
 
 
 def update_inventory_document(doc_id: int, doc_date: str, warehouse_id: int, comment: str) -> None:
-    _validate_iso_date(doc_date)
+    doc_date = _validate_iso_date(doc_date)
     with get_connection() as conn:
         with transaction(conn):
             status = conn.execute("SELECT status FROM InventoryDocuments WHERE id=?", (doc_id,)).fetchone()
@@ -3816,6 +3833,7 @@ def add_cash_transaction(
     channel: str = "",
     comment: str = "",
 ) -> int:
+    date = _normalize_date(date, field_label="Дата")
     with get_connection() as conn:
         cur = conn.execute(
             "INSERT INTO CashTransactions (date, amount, type, counterparty_id, related_doc_type, related_doc_id, channel, comment) "
@@ -3827,6 +3845,8 @@ def add_cash_transaction(
 
 
 def list_cash(date_from: Optional[str] = None, date_to: Optional[str] = None) -> List[sqlite3.Row]:
+    date_from = _normalize_optional_date(date_from, field_label="Дата з")
+    date_to = _normalize_optional_date(date_to, field_label="Дата по")
     query = (
         "SELECT ct.id, ct.date, ct.amount, ct.type, ct.counterparty_id, cp.name as counterparty, ct.related_doc_type, ct.related_doc_id, ct.channel, ct.comment "
         "FROM CashTransactions ct LEFT JOIN Counterparties cp ON cp.id = ct.counterparty_id"
@@ -3881,6 +3901,8 @@ def purge_audit_log(keep_last: int = 20000) -> int:
 
 def _sale_income_by_product(date_from: Optional[str], date_to: Optional[str]) -> Dict[int, float]:
     """Distribute sale payments across products proportionally to line amounts."""
+    date_from = _normalize_optional_date(date_from, field_label="Дата з")
+    date_to = _normalize_optional_date(date_to, field_label="Дата по")
     result: Dict[int, float] = {}
     with get_connection() as conn:
         payments = conn.execute(
@@ -3904,6 +3926,8 @@ def _sale_income_by_product(date_from: Optional[str], date_to: Optional[str]) ->
 
 
 def _sale_expenses_by_product(date_from: Optional[str], date_to: Optional[str]) -> Dict[int, float]:
+    date_from = _normalize_optional_date(date_from, field_label="Дата з")
+    date_to = _normalize_optional_date(date_to, field_label="Дата по")
     clauses = ["s.status='posted'"]
     params: List[object] = []
     if date_from:
@@ -3923,6 +3947,8 @@ def _sale_expenses_by_product(date_from: Optional[str], date_to: Optional[str]) 
 
 
 def profit_by_product(date_from: Optional[str] = None, date_to: Optional[str] = None) -> List[dict]:
+    date_from = _normalize_optional_date(date_from, field_label="Дата з")
+    date_to = _normalize_optional_date(date_to, field_label="Дата по")
     income_map = _sale_income_by_product(date_from, date_to)
     expense_map = _sale_expenses_by_product(date_from, date_to)
     with get_connection() as conn:
@@ -3975,6 +4001,8 @@ def profit_by_product(date_from: Optional[str] = None, date_to: Optional[str] = 
 
 
 def cash_flow_summary(date_from: Optional[str] = None, date_to: Optional[str] = None) -> List[dict]:
+    date_from = _normalize_optional_date(date_from, field_label="Дата з")
+    date_to = _normalize_optional_date(date_to, field_label="Дата по")
     clauses: List[str] = []
     params: List[object] = []
     if date_from:
@@ -3992,6 +4020,8 @@ def cash_flow_summary(date_from: Optional[str] = None, date_to: Optional[str] = 
 
 def dashboard_trends(date_from: Optional[str] = None, date_to: Optional[str] = None) -> List[dict]:
     """Monthly turnover and gross profit for trend charts."""
+    date_from = _normalize_optional_date(date_from, field_label="Дата з")
+    date_to = _normalize_optional_date(date_to, field_label="Дата по")
 
     def _date_clause(field: str) -> tuple[str, List[object]]:
         clauses: List[str] = []
@@ -4061,6 +4091,8 @@ def dashboard_trends(date_from: Optional[str] = None, date_to: Optional[str] = N
 
 def dashboard_metrics(date_from: Optional[str] = None, date_to: Optional[str] = None) -> dict:
     """Key metrics: turnover, gross profit, margin, stock value."""
+    date_from = _normalize_optional_date(date_from, field_label="Дата з")
+    date_to = _normalize_optional_date(date_to, field_label="Дата по")
     clauses: List[str] = []
     params: List[object] = []
     if date_from:
@@ -4092,6 +4124,8 @@ def sales_analysis(
     date_from: Optional[str] = None, date_to: Optional[str] = None
 ) -> dict:
     """Sales by channels and categories with revenue and gross profit."""
+    date_from = _normalize_optional_date(date_from, field_label="Дата з")
+    date_to = _normalize_optional_date(date_to, field_label="Дата по")
 
     def _date_clause(prefix: str) -> Tuple[str, List[object]]:
         clauses: List[str] = []
@@ -4213,6 +4247,8 @@ def sales_analysis(
 
 def abc_xyz_report(date_from: Optional[str] = None, date_to: Optional[str] = None) -> List[dict]:
     """ABC by revenue and XYZ by demand variability (monthly quantities)."""
+    date_from = _normalize_optional_date(date_from, field_label="Дата з")
+    date_to = _normalize_optional_date(date_to, field_label="Дата по")
     data: Dict[int, dict] = {}
     clauses: List[str] = ["s.status='posted'"]
     params: List[object] = []
@@ -4299,6 +4335,8 @@ def cash_flow_detailed(
     channel: Optional[str] = None,
     counterparty_id: Optional[int] = None,
 ) -> List[dict]:
+    date_from = _normalize_optional_date(date_from, field_label="Дата з")
+    date_to = _normalize_optional_date(date_to, field_label="Дата по")
     clauses: List[str] = []
     params: List[object] = []
     if date_from:

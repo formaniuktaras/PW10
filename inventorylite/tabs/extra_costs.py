@@ -9,8 +9,8 @@ from typing import Callable, Optional
 import tkinter as tk
 from tkinter import ttk, messagebox
 
-from inventorylite import db
-from inventorylite.ui_components import TableFrame
+from inventorylite import db, dates
+from inventorylite.ui_components import DatePicker, TableFrame
 from inventorylite.utils import Settings, show_error, get_base_currency_code
 from inventorylite.dialogs_documents import ensure_rate_for_date
 
@@ -86,12 +86,18 @@ class ExtraCostsTab:
             return
         status_filter = self.extra_status_var.get()
         status_value = "draft" if status_filter == "Чернетка" else "posted" if status_filter == "Проведений" else None
-        rows = db.list_extra_cost_documents(status_value, self.extra_date_from_var.get().strip() or None, self.extra_date_to_var.get().strip() or None)
+        try:
+            rows = db.list_extra_cost_documents(
+                status_value, self.extra_date_from_var.get().strip() or None, self.extra_date_to_var.get().strip() or None
+            )
+        except ValueError as exc:
+            show_error("Супутні витрати", str(exc))
+            return
         self.extra_table.set_rows(
             [
                 {
                     "id": r["id"],
-                    "doc_date": r["doc_date"],
+                    "doc_date": dates.format_iso_to_dmy(r["doc_date"]),
                     "partner": r["partner"] or "-",
                     "currency": r["currency_code"],
                     "rate": f"{r['exchange_rate']:.4f}",
@@ -249,9 +255,13 @@ def extra_cost_prompt(counterparties, currencies, purchases, doc=None, lines=Non
     dlg.rowconfigure(0, weight=1)
 
     row_idx = 0
-    ttk.Label(frame, text="Дата (YYYY-MM-DD)").grid(row=row_idx, column=0, sticky="e", padx=4, pady=2)
-    date_var = tk.StringVar(value=doc["doc_date"] if doc else datetime.now().strftime("%Y-%m-%d"))
-    ttk.Entry(frame, textvariable=date_var, width=14, state="normal" if allow_edit else "disabled").grid(row=row_idx, column=1, sticky="w")
+    ttk.Label(frame, text="Дата (ДД.ММ.РРРР)").grid(row=row_idx, column=0, sticky="e", padx=4, pady=2)
+    date_picker = DatePicker(
+        frame,
+        initial=doc["doc_date"] if doc else datetime.now().strftime("%Y-%m-%d"),
+        state="normal" if allow_edit else "disabled",
+    )
+    date_picker.grid(row=row_idx, column=1, sticky="w")
 
     row_idx += 1
     ttk.Label(frame, text="Валюта").grid(row=row_idx, column=0, sticky="e", padx=4, pady=2)
@@ -267,7 +277,7 @@ def extra_cost_prompt(counterparties, currencies, purchases, doc=None, lines=Non
     row_idx += 1
     ttk.Label(frame, text="Курс").grid(row=row_idx, column=0, sticky="e", padx=4, pady=2)
     try:
-        default_rate = doc["exchange_rate"] if doc else ensure_rate_for_date(curr_var.get(), date_var.get())
+        default_rate = doc["exchange_rate"] if doc else ensure_rate_for_date(curr_var.get(), date_picker.get())
     except Exception:
         default_rate = doc["exchange_rate"] if doc else 1.0
     rate_var = tk.StringVar(value=f"{default_rate:.4f}")
@@ -278,7 +288,7 @@ def extra_cost_prompt(counterparties, currencies, purchases, doc=None, lines=Non
         if not allow_edit:
             return
         try:
-            rate_val = ensure_rate_for_date(curr_var.get(), date_var.get())
+            rate_val = ensure_rate_for_date(curr_var.get(), date_picker.get())
         except ValueError as exc:
             messagebox.showerror("Курс", str(exc))
             curr_var.set(last_currency)
@@ -395,14 +405,19 @@ def extra_cost_prompt(counterparties, currencies, purchases, doc=None, lines=Non
 
     purchase_lookup = {p["id"]: p for p in purchases}
     for p in purchases:
-        available_tree.insert("", "end", iid=str(p["id"]), values=(p["doc_date"], p["supplier"] or "-", f"{p['total']:.2f}"))
+        available_tree.insert(
+            "", "end", iid=str(p["id"]), values=(dates.format_iso_to_dmy(p["doc_date"]), p["supplier"] or "-", f"{p['total']:.2f}")
+        )
 
     def refresh_selected():
         selected_list.delete(0, tk.END)
         for pid in selected_purchase_ids:
             p = purchase_lookup.get(pid)
             if p:
-                selected_list.insert(tk.END, f"{p['id']} | {p['doc_date']} | {p['supplier'] or '-'} | {p['total']:.2f}")
+                selected_list.insert(
+                    tk.END,
+                    f"{p['id']} | {dates.format_iso_to_dmy(p['doc_date'])} | {p['supplier'] or '-'} | {p['total']:.2f}",
+                )
 
     def add_purchase():
         if not allow_edit:
@@ -446,6 +461,11 @@ def extra_cost_prompt(counterparties, currencies, purchases, doc=None, lines=Non
 
     def on_ok():
         try:
+            doc_date = dates.normalize_date_to_iso(date_picker.get(), field_label="Дата")
+        except ValueError as exc:
+            show_error("Валідація", str(exc))
+            return
+        try:
             rate_val = float(rate_var.get())
         except ValueError:
             show_error("Валідація", "Невірний курс")
@@ -458,12 +478,12 @@ def extra_cost_prompt(counterparties, currencies, purchases, doc=None, lines=Non
         if partner_name and partner_name != "-":
             found = next((c for c in filtered_counterparties if c["name"] == partner_name), None)
             partner_id = found["id"] if found else None
-        if curr_var.get().strip().upper() != get_base_currency_code() and not db.rate_on_date(curr_var.get(), date_var.get()):
-            db.add_currency_rate(curr_var.get(), date_var.get(), rate_val)
+        if curr_var.get().strip().upper() != get_base_currency_code() and not db.rate_on_date(curr_var.get(), doc_date):
+            db.add_currency_rate(curr_var.get(), doc_date, rate_val)
         result.append(
             (
                 {
-                    "doc_date": date_var.get(),
+                    "doc_date": doc_date,
                     "currency": curr_var.get(),
                     "rate": rate_val,
                     "partner_id": partner_id,

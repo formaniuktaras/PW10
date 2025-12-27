@@ -6,6 +6,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 
 from inventorylite import db
+from inventorylite.dialogs_stock_moves import open_stock_moves_dialog
 from inventorylite.ui_components import TableFrame
 from inventorylite.utils import Settings, show_error
 
@@ -36,6 +37,7 @@ class StockTab:
         ttk.Entry(top, textvariable=self.stock_search_var, width=30).pack(side=tk.LEFT, padx=4)
         ttk.Button(top, text="Оновити", command=self.on_search_stock).pack(side=tk.LEFT)
         ttk.Button(top, text="Перерахувати залишки", command=self.recalc_stock).pack(side=tk.LEFT, padx=6)
+        ttk.Button(top, text="Рух", command=self.open_stock_moves).pack(side=tk.LEFT)
 
         columns = [
             ("name", "Товар", 240),
@@ -54,6 +56,7 @@ class StockTab:
         self.stock_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
         self.stock_table.register_context_menu_actions(
             [
+                ("Рух товару…", self.open_stock_moves),
                 ("Друк етикеток…", self.print_stock_labels),
                 ("Масові дії з товарами…", self.bulk_actions_from_stock),
             ]
@@ -159,3 +162,18 @@ class StockTab:
             messagebox.showwarning("Етикетки", "Немає позицій з кількістю > 0 для друку.")
             return
         self.open_labels_dialog(self.frame.winfo_toplevel(), items, "Кількість із залишків")
+
+    def open_stock_moves(self) -> None:
+        if not self.stock_table:
+            return
+        selections = self.stock_table.tree.selection()
+        if not selections:
+            messagebox.showwarning("Рух товару", "Оберіть позицію.")
+            return
+        iid = selections[0]
+        meta = self._stock_row_meta.get(iid) if hasattr(self, "_stock_row_meta") else None
+        if not meta:
+            messagebox.showwarning("Рух товару", "Не вдалося визначити товар або склад.")
+            return
+        warehouse_id = int(meta.get("warehouse_id") or 0)
+        open_stock_moves_dialog(self.frame.winfo_toplevel(), self.settings, int(meta["product_id"]), warehouse_id or None)

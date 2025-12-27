@@ -416,11 +416,32 @@ class CalendarPopup(tk.Toplevel):
         self.focus_force()
 
     def _on_root_click(self, event: tk.Event) -> None:
+        if not self.winfo_exists():
+            return
         try:
-            if event.widget.winfo_toplevel() == self:
+            if not self.winfo_viewable():
                 return
         except Exception:
-            pass
+            return
+        try:
+            self.update_idletasks()
+        except tk.TclError:
+            return
+
+        px = self.winfo_rootx()
+        py = self.winfo_rooty()
+        pw = self.winfo_width()
+        ph = self.winfo_height()
+        if pw <= 1 or ph <= 1:
+            try:
+                self.update_idletasks()
+                pw = self.winfo_width()
+                ph = self.winfo_height()
+            except tk.TclError:
+                return
+
+        if px <= event.x_root <= px + pw and py <= event.y_root <= py + ph:
+            return
         self._close()
 
     def _close(self) -> None:
@@ -543,6 +564,7 @@ class DatePicker(ttk.Frame):
         initial_date = self._coerce_to_date(initial)
         self.selected_date = initial_date
         self.var = tk.StringVar(value=self._format_date(initial_date))
+        self._popup: CalendarPopup | None = None
 
         entry = ttk.Entry(self, textvariable=self.var, width=12, state=state)
         entry.grid(row=0, column=0, sticky="w")
@@ -597,6 +619,10 @@ class DatePicker(ttk.Frame):
     def _open_calendar(self) -> None:
         if self._state != "normal":
             return
+        if self._popup and self._popup.winfo_exists():
+            self._popup._close()
+            self._popup = None
+            return
 
         def on_select(selected: date) -> None:
             self.selected_date = selected
@@ -605,9 +631,22 @@ class DatePicker(ttk.Frame):
         x = self._entry.winfo_rootx()
         y = self._entry.winfo_rooty() + self._entry.winfo_height()
         popup = CalendarPopup(self, self.selected_date, on_select)
+        popup.update_idletasks()
+        width = popup.winfo_width()
+        height = popup.winfo_height()
+        screen_w = popup.winfo_screenwidth()
+        screen_h = popup.winfo_screenheight()
+        if x + width > screen_w:
+            x = max(0, screen_w - width)
+        if y + height > screen_h:
+            y = max(0, self._entry.winfo_rooty() - height)
         popup.geometry(f"+{x}+{y}")
         popup.focus_force()
-        popup.wait_window(popup)
+        self._popup = popup
+        try:
+            popup.wait_window(popup)
+        finally:
+            self._popup = None
 
 
 def simple_prompt(title: str, fields: List[str], initial: Optional[List[str]] = None) -> Optional[List[str]]:

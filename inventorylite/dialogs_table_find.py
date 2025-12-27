@@ -5,6 +5,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from inventorylite.ui_components import TableFrame
+from inventorylite.text_norm import norm_text
 
 
 def _find_parent_tableframe(widget: tk.Widget | None) -> TableFrame | None:
@@ -44,6 +45,7 @@ def open_table_find_dialog(root: tk.Tk) -> None:
     current_index = {"value": 0}
     pending = {"after_id": None}
     original_tags: dict[str, tuple[str, ...]] = {}
+    normalized_values: dict[str, str] = {}
 
     table.tree.tag_configure("find_match", background="#FFF3BF")
     table.tree.tag_configure("find_current", background="#FFD43B")
@@ -87,15 +89,20 @@ def open_table_find_dialog(root: tk.Tk) -> None:
     def rebuild_matches() -> None:
         query = query_var.get()
         matches.clear()
+        normalized_values.clear()
         for iid in table.tree.get_children(""):
             if iid not in original_tags:
                 original_tags[iid] = tuple(table.tree.item(iid, "tags") or ())
         if query:
+            use_case = case_var.get()
+            needle = query if use_case else norm_text(query)
             for iid in table.tree.get_children(""):
                 values = table.tree.item(iid, "values")
                 joined = " | ".join(str(v) for v in values)
-                haystack = joined if case_var.get() else joined.lower()
-                needle = query if case_var.get() else query.lower()
+                if use_case:
+                    haystack = joined
+                else:
+                    haystack = normalized_values.setdefault(iid, norm_text(joined))
                 if needle in haystack:
                     matches.append(iid)
         current_index["value"] = 0

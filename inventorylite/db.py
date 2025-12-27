@@ -26,6 +26,7 @@ from statistics import mean, pstdev
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from inventorylite import utils, dates
+from inventorylite.text_norm import norm_text
 from inventorylite.utils import get_db_path
 
 
@@ -522,6 +523,9 @@ def init_db() -> None:
                 related_doc_id INTEGER,
                 channel TEXT,
                 comment TEXT,
+                currency_code TEXT NOT NULL DEFAULT 'UAH',
+                exchange_rate REAL NOT NULL DEFAULT 1,
+                amount_doc REAL NOT NULL DEFAULT 0,
                 FOREIGN KEY(counterparty_id) REFERENCES Counterparties(id)
             );
             CREATE INDEX IF NOT EXISTS idx_cash_date ON CashTransactions(date);
@@ -628,6 +632,7 @@ def init_db() -> None:
             """
         )
         _apply_migrations(conn)
+        _migrate_schema(conn, commit=True)
         final = _get_user_version(conn)
         if final != LATEST_SCHEMA_VERSION:
             raise ValueError(f"Schema version mismatch: db={final}, app={LATEST_SCHEMA_VERSION}")
@@ -902,6 +907,9 @@ def _migrate_schema(conn: sqlite3.Connection, *, commit: bool = True) -> None:
 
     _ensure_column(conn, "CashTransactions", "type", "TEXT NOT NULL DEFAULT 'other_income'")
     _ensure_column(conn, "CashTransactions", "counterparty_id", "INTEGER")
+    _ensure_column(conn, "CashTransactions", "currency_code", "TEXT NOT NULL DEFAULT 'UAH'")
+    _ensure_column(conn, "CashTransactions", "exchange_rate", "REAL NOT NULL DEFAULT 1")
+    _ensure_column(conn, "CashTransactions", "amount_doc", "REAL NOT NULL DEFAULT 0")
 
     conn.executescript(
         """
@@ -1730,13 +1738,14 @@ def list_products(
 ) -> List[sqlite3.Row]:
     base_query = (
         "SELECT p.id, p.sku, p.supplier_sku, p.name, p.unit, p.is_active, b.name AS brand, c.name AS category, "
-        "p.brand_id, p.category_id, "
+        "p.brand_id, p.category_id, IFNULL(pb.barcodes, '') AS barcodes, "
         "REPLACE(GROUP_CONCAT(DISTINCT c2.name), ',', ', ') AS extra_categories "
         "FROM Products p "
         "JOIN Brands b ON p.brand_id = b.id "
         "JOIN Categories c ON p.category_id = c.id "
         "LEFT JOIN ProductCategoryLinks pcl ON pcl.product_id = p.id "
         "LEFT JOIN Categories c2 ON c2.id = pcl.category_id "
+        "LEFT JOIN (SELECT product_id, GROUP_CONCAT(code, ' ') AS barcodes FROM ProductBarcodes GROUP BY product_id) pb ON pb.product_id = p.id "
     )
     where_clauses = []
     params: List[int | str] = []
@@ -1752,14 +1761,6 @@ def list_products(
         params.extend(target_ids)
         params.extend(target_ids)
 
-    if search:
-        term = f"%{search.lower()}%"
-        where_clauses.append(
-            "(lower(p.sku) LIKE ? OR lower(p.name) LIKE ? OR lower(p.supplier_sku) LIKE ?"
-            " OR EXISTS (SELECT 1 FROM ProductBarcodes pb WHERE pb.product_id=p.id AND lower(pb.code) LIKE ?))"
-        )
-        params.extend([term, term, term, term])
-
     where = " WHERE " + " AND ".join(where_clauses) if where_clauses else ""
     query = (
         base_query
@@ -1769,7 +1770,26 @@ def list_products(
     )
 
     with get_connection() as conn:
-        return list(conn.execute(query, tuple(params)))
+        rows = list(conn.execute(query, tuple(params)))
+    if not search:
+        return rows
+
+    needle = norm_text(search)
+    filtered: list[sqlite3.Row] = []
+    for row in rows:
+        haystack_parts = [
+            row["sku"],
+            row["name"],
+            row["supplier_sku"] or "",
+            row["brand"],
+            row["category"],
+            row["extra_categories"] or "",
+            row["barcodes"] or "",
+        ]
+        haystack = norm_text(" ".join(haystack_parts))
+        if needle in haystack:
+            filtered.append(row)
+    return filtered
 
 
 def list_skus_by_prefix(prefix: str) -> List[sqlite3.Row]:
@@ -3864,13 +3884,49 @@ def list_stock(search: Optional[str] = None) -> List[sqlite3.Row]:
         "JOIN Warehouses w ON 1=1 "
         "LEFT JOIN StockBalances sb ON sb.product_id = p.id AND sb.warehouse_id = w.id"
     )
-    params: Tuple[str, ...] = ()
-    if search:
-        query += " WHERE lower(p.name) LIKE ?"
-        params = (f"%{search.lower()}%",)
     query += " ORDER BY p.name, w.name"
     with get_connection() as conn:
-        return list(conn.execute(query, params))
+        rows = list(conn.execute(query))
+    if not search:
+        return rows
+    needle = norm_text(search)
+    filtered: List[sqlite3.Row] = []
+    for row in rows:
+        haystack = norm_text(f"{row['name']} {row['sku']} {row['warehouse'] or ''}")
+        if needle in haystack:
+            filtered.append(row)
+    return filtered
+
+
+def list_stock_moves(
+    product_id: int,
+    warehouse_id: int | None = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+) -> List[sqlite3.Row]:
+    date_from = _normalize_optional_date(date_from, field_label="Дата з")
+    date_to = _normalize_optional_date(date_to, field_label="Дата по")
+    query = (
+        "SELECT sm.id, sm.move_date, w.name AS warehouse_name, sm.warehouse_id, sm.qty_in, sm.qty_out, sm.cost_per_unit, "
+        "sm.amount, sm.reference_type, sm.reference_id, sm.channel, cp.name AS counterparty_name "
+        "FROM StockMoves sm "
+        "LEFT JOIN Warehouses w ON w.id = sm.warehouse_id "
+        "LEFT JOIN Counterparties cp ON cp.id = sm.counterparty_id "
+        "WHERE sm.product_id=?"
+    )
+    params: list[object] = [product_id]
+    if warehouse_id:
+        query += " AND sm.warehouse_id=?"
+        params.append(warehouse_id)
+    if date_from:
+        query += " AND sm.move_date >= ?"
+        params.append(date_from)
+    if date_to:
+        query += " AND sm.move_date <= ?"
+        params.append(date_to)
+    query += " ORDER BY sm.move_date DESC, sm.id DESC"
+    with get_connection() as conn:
+        return list(conn.execute(query, tuple(params)))
 
 
 # Cash transactions
@@ -3884,13 +3940,29 @@ def add_cash_transaction(
     related_doc_id: Optional[int],
     channel: str = "",
     comment: str = "",
+    currency_code: str = "UAH",
+    exchange_rate: float = 1.0,
+    amount_doc: float | None = None,
 ) -> int:
     date = _normalize_date(date, field_label="Дата")
+    amount_doc = amount if amount_doc is None else amount_doc
     with get_connection() as conn:
         cur = conn.execute(
-            "INSERT INTO CashTransactions (date, amount, type, counterparty_id, related_doc_type, related_doc_id, channel, comment) "
-            "VALUES (?,?,?,?,?,?,?,?)",
-            (date, amount, ctype, counterparty_id, related_doc_type, related_doc_id, channel.strip(), comment.strip()),
+            "INSERT INTO CashTransactions (date, amount, type, counterparty_id, related_doc_type, related_doc_id, channel, comment, currency_code, exchange_rate, amount_doc) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                date,
+                amount,
+                ctype,
+                counterparty_id,
+                related_doc_type,
+                related_doc_id,
+                channel.strip(),
+                comment.strip(),
+                currency_code.strip() or "UAH",
+                float(exchange_rate or 1.0),
+                amount_doc,
+            ),
         )
         conn.commit()
         return cur.lastrowid
@@ -3900,7 +3972,7 @@ def list_cash(date_from: Optional[str] = None, date_to: Optional[str] = None) ->
     date_from = _normalize_optional_date(date_from, field_label="Дата з")
     date_to = _normalize_optional_date(date_to, field_label="Дата по")
     query = (
-        "SELECT ct.id, ct.date, ct.amount, ct.type, ct.counterparty_id, cp.name as counterparty, ct.related_doc_type, ct.related_doc_id, ct.channel, ct.comment "
+        "SELECT ct.id, ct.date, ct.amount, ct.amount_doc, ct.currency_code, ct.exchange_rate, ct.type, ct.counterparty_id, cp.name as counterparty, ct.related_doc_type, ct.related_doc_id, ct.channel, ct.comment "
         "FROM CashTransactions ct LEFT JOIN Counterparties cp ON cp.id = ct.counterparty_id"
     )
     clauses: List[str] = []

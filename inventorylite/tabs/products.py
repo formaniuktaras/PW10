@@ -21,6 +21,7 @@ from inventorylite.utils import (
     open_file,
 )
 from inventorylite.dialogs import product_prompt
+from inventorylite.dialogs_stock_moves import open_stock_moves_dialog
 from inventorylite.helpers import (
     PRODUCT_FIELDS,
     _sanitize_barcode_prefix,
@@ -85,7 +86,13 @@ class ProductsTab:
         )
         self.product_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
         self.product_table.on_double_click(self.edit_product)
-        self.product_table.register_context_menu(self.edit_product, self.delete_product)
+        self.product_table.register_context_menu_actions(
+            [
+                ("Рух товару…", self.open_product_stock_moves),
+                ("Редагувати", self.edit_product),
+                ("Видалити", self.delete_product),
+            ]
+        )
 
         btns = ttk.Frame(self.frame)
         btns.pack(pady=4)
@@ -98,6 +105,7 @@ class ProductsTab:
             text="Масові дії...",
             command=lambda: open_products_bulk_actions_dialog(self, db.get_connection(), self.product_table),
         ).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Рух", command=self.open_product_stock_moves).pack(side=tk.LEFT, padx=4)
 
     def set_category_filter_options(self, options: list[dict]) -> None:
         self.category_filter_options = list(options or [])
@@ -321,6 +329,13 @@ class ProductsTab:
 
         messagebox.showinfo("Імпорт товарів", summary)
         self.refresh_products()
+
+    def open_product_stock_moves(self) -> None:
+        product_id = self.product_table.selected_id()
+        if not product_id:
+            show_error("Рух товару", "Оберіть товар.")
+            return
+        open_stock_moves_dialog(self.frame.winfo_toplevel(), self.settings, int(product_id), None)
 
     def _process_product_import(self, rows: list[dict], options: dict) -> str:
         mode = options.get("mode", "create")

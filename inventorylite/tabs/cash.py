@@ -38,11 +38,14 @@ class CashTab:
         columns = [
             ("date", "Дата", 90),
             ("type", "Тип", 140),
-            ("amount", "Сума", 100),
+            ("amount_doc", "Сума (вал)", 110),
+            ("currency", "Валюта", 70),
+            ("rate", "Курс", 80),
+            ("amount", "Сума (база)", 110),
             ("counterparty", "Контрагент", 160),
             ("channel", "Канал", 120),
             ("related", "Документ", 120),
-            ("comment", "Коментар", 260),
+            ("comment", "Коментар", 220),
         ]
         self.cash_table = TableFrame(self.frame, columns)
         self.cash_table.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
@@ -73,6 +76,9 @@ class CashTab:
                     "id": r["id"],
                     "date": dates.format_iso_to_dmy(r["date"]),
                     "type": type_labels.get(r["type"], r["type"]),
+                    "amount_doc": f"{r['amount_doc']:.2f}",
+                    "currency": r["currency_code"],
+                    "rate": f"{r['exchange_rate']:.4f}",
                     "amount": f"{r['amount']:.2f}",
                     "counterparty": r["counterparty"] or "-",
                     "channel": r["channel"] or "-",

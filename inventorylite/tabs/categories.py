@@ -8,6 +8,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 
 from inventorylite import db
+from inventorylite.text_norm import norm_text
 from inventorylite.utils import show_error, Settings
 from inventorylite.dialogs import category_prompt, select_category_dialog
 
@@ -231,7 +232,7 @@ class CategoriesTab:
     def refresh_categories(self) -> None:
         rows = db.list_categories(include_hidden=True)
         self.categories_index = {int(r["id"]): dict(r) for r in rows}
-        search = self.category_search_var.get().lower().strip()
+        search = norm_text(self.category_search_var.get())
         category_products, product_quantities = db.category_inventory_data()
 
         children_map: dict[Optional[int], list[dict]] = {}
@@ -261,7 +262,7 @@ class CategoriesTab:
             if cid in match_cache:
                 return match_cache[cid]
             cat = self.categories_index.get(cid, {})
-            own_match = not search or search in cat.get("name", "").lower()
+            own_match = not search or search in norm_text(cat.get("name", ""))
             child_match = any(has_match(child["id"]) for child in children_map.get(cid, []))
             match_cache[cid] = bool(own_match or child_match)
             return match_cache[cid]

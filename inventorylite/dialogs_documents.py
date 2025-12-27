@@ -1271,13 +1271,14 @@ def document_prompt(
     return result
 
 
-def cash_prompt(counterparties, channels):
+def cash_prompt(counterparties, channels, *, defaults: dict | None = None):
+    defaults = defaults or {}
     dlg = tk.Toplevel()
     dlg.title("Рух коштів")
     dlg.grab_set()
 
     ttk.Label(dlg, text="Дата (ДД.ММ.РРРР)").grid(row=0, column=0, padx=6, pady=4, sticky="w")
-    date_picker = DatePicker(dlg, initial=datetime.now().strftime("%Y-%m-%d"))
+    date_picker = DatePicker(dlg, initial=defaults.get("date") or datetime.now().strftime("%Y-%m-%d"))
     date_picker.grid(row=0, column=1, padx=6, pady=4, sticky="w")
 
     ttk.Label(dlg, text="Тип").grid(row=1, column=0, padx=6, pady=4, sticky="w")
@@ -1291,38 +1292,76 @@ def cash_prompt(counterparties, channels):
     ]
     type_combo = ttk.Combobox(dlg, textvariable=type_var, values=[t[0] for t in types], state="readonly")
     type_combo.grid(row=1, column=1, padx=6, pady=4, sticky="w")
-    type_combo.current(0)
+    default_type = defaults.get("type")
+    default_type_idx = next((i for i, t in enumerate(types) if t[1] == default_type), 0)
+    type_combo.current(default_type_idx)
 
-    ttk.Label(dlg, text="Сума (+ вхід, - вихід)").grid(row=2, column=0, padx=6, pady=4, sticky="w")
-    amount_var = tk.StringVar(value="0")
-    ttk.Entry(dlg, textvariable=amount_var, width=15).grid(row=2, column=1, padx=6, pady=4, sticky="w")
+    ttk.Label(dlg, text="Валюта").grid(row=2, column=0, padx=6, pady=4, sticky="w")
+    currencies = db.list_currencies(active_only=True)
+    currency_codes = [c["code"] for c in currencies] or [get_base_currency_code()]
+    currency_var = tk.StringVar(value=defaults.get("currency_code") or currency_codes[0])
+    currency_combo = ttk.Combobox(dlg, textvariable=currency_var, values=currency_codes, state="readonly", width=8)
+    currency_combo.grid(row=2, column=1, padx=6, pady=4, sticky="w")
 
-    ttk.Label(dlg, text="Контрагент").grid(row=3, column=0, padx=6, pady=4, sticky="w")
+    ttk.Label(dlg, text="Курс").grid(row=3, column=0, padx=6, pady=4, sticky="w")
+    rate_var = tk.StringVar(value=str(defaults.get("exchange_rate", 1.0)))
+    ttk.Entry(dlg, textvariable=rate_var, width=12).grid(row=3, column=1, padx=6, pady=4, sticky="w")
+
+    ttk.Label(dlg, text="Сума (валюта)").grid(row=4, column=0, padx=6, pady=4, sticky="w")
+    amount_doc_var = tk.StringVar(value=str(defaults.get("amount_doc", 0)))
+    ttk.Entry(dlg, textvariable=amount_doc_var, width=15).grid(row=4, column=1, padx=6, pady=4, sticky="w")
+
+    ttk.Label(dlg, text="Сума (база)").grid(row=5, column=0, padx=6, pady=4, sticky="w")
+    amount_base_var = tk.StringVar(value=str(defaults.get("amount_base", 0)))
+    ttk.Entry(dlg, textvariable=amount_base_var, width=15, state="readonly").grid(
+        row=5, column=1, padx=6, pady=4, sticky="w"
+    )
+
+    ttk.Label(dlg, text="Контрагент").grid(row=6, column=0, padx=6, pady=4, sticky="w")
     cp_var = tk.StringVar()
     cp_names = ["-"] + [c["name"] for c in counterparties]
     cp_combo = ttk.Combobox(dlg, textvariable=cp_var, values=cp_names, state="readonly", width=30)
-    cp_combo.grid(row=3, column=1, padx=6, pady=4, sticky="w")
-    cp_combo.current(0)
+    cp_combo.grid(row=6, column=1, padx=6, pady=4, sticky="w")
+    default_cp = defaults.get("counterparty_id")
+    if default_cp:
+        idx = next((i + 1 for i, cp in enumerate(counterparties) if cp["id"] == default_cp), 0)
+        cp_combo.current(idx)
+    else:
+        cp_combo.current(0)
 
-    ttk.Label(dlg, text="Канал").grid(row=4, column=0, padx=6, pady=4, sticky="w")
+    ttk.Label(dlg, text="Канал").grid(row=7, column=0, padx=6, pady=4, sticky="w")
     ch_var = tk.StringVar()
     ch_names = [c["name"] for c in channels]
     ch_combo = ttk.Combobox(dlg, textvariable=ch_var, values=ch_names, state="readonly", width=20)
-    ch_combo.grid(row=4, column=1, padx=6, pady=4, sticky="w")
-    if channels:
+    ch_combo.grid(row=7, column=1, padx=6, pady=4, sticky="w")
+    if defaults.get("channel"):
+        ch_var.set(defaults.get("channel"))
+    elif channels:
         ch_combo.current(0)
 
-    ttk.Label(dlg, text="Коментар").grid(row=5, column=0, padx=6, pady=4, sticky="w")
-    comment_var = tk.StringVar()
-    ttk.Entry(dlg, textvariable=comment_var, width=40).grid(row=5, column=1, padx=6, pady=4, sticky="w")
+    ttk.Label(dlg, text="Коментар").grid(row=8, column=0, padx=6, pady=4, sticky="w")
+    comment_var = tk.StringVar(value=defaults.get("comment", ""))
+    ttk.Entry(dlg, textvariable=comment_var, width=40).grid(row=8, column=1, padx=6, pady=4, sticky="w")
 
     result: list[dict] | None = None
+
+    def recalc_base(*_args) -> None:
+        try:
+            rate = float(rate_var.get())
+            amount_doc = float(amount_doc_var.get())
+        except ValueError:
+            amount_base_var.set("")
+            return
+        current_type = next((t[1] for t in types if t[0] == type_var.get()), types[0][1])
+        sign = -1 if current_type in ("purchase_payment", "other_variable_expense", "fixed_expense") else 1
+        amount_base_var.set(f"{amount_doc * rate * sign:.2f}")
 
     def on_ok():
         nonlocal result
         try:
             normalized_date = dates.normalize_date_to_iso(date_picker.get(), field_label="Дата")
-            amount = float(amount_var.get())
+            rate = float(rate_var.get())
+            amount_doc = float(amount_doc_var.get())
         except ValueError:
             messagebox.showerror("Валідація", "Невірні значення дати або суми")
             return
@@ -1331,15 +1370,20 @@ def cash_prompt(counterparties, channels):
         cp_id = None
         if cp_name and cp_name != "-":
             cp_id = next((c["id"] for c in counterparties if c["name"] == cp_name), None)
-            channel = ch_var.get() if ch_var.get() else ""
-            result = [
-                {
-                    "date": normalized_date,
-                "amount": amount,
+        channel = ch_var.get() if ch_var.get() else ""
+        sign = -1 if ctype in ("purchase_payment", "other_variable_expense", "fixed_expense") else 1
+        amount_base = amount_doc * rate * sign
+        result = [
+            {
+                "date": normalized_date,
+                "amount": amount_base,
+                "amount_doc": amount_doc * sign,
+                "exchange_rate": rate,
+                "currency_code": currency_var.get().strip().upper() or get_base_currency_code(),
                 "ctype": ctype,
                 "counterparty_id": cp_id,
-                "related_doc_type": None,
-                "related_doc_id": None,
+                "related_doc_type": defaults.get("related_doc_type"),
+                "related_doc_id": defaults.get("related_doc_id"),
                 "channel": channel,
                 "comment": comment_var.get().strip(),
             }
@@ -1350,10 +1394,14 @@ def cash_prompt(counterparties, channels):
         dlg.destroy()
 
     btns = ttk.Frame(dlg)
-    btns.grid(row=6, column=0, columnspan=2, pady=8)
+    btns.grid(row=9, column=0, columnspan=2, pady=8)
     ttk.Button(btns, text="OK", command=on_ok).pack(side=tk.LEFT, padx=4)
     ttk.Button(btns, text="Скасувати", command=on_cancel).pack(side=tk.LEFT, padx=4)
     dlg.bind("<Return>", lambda e: on_ok())
     dlg.bind("<Escape>", lambda e: on_cancel())
+    rate_var.trace_add("write", recalc_base)
+    amount_doc_var.trace_add("write", recalc_base)
+    type_var.trace_add("write", recalc_base)
+    recalc_base()
     dlg.wait_window()
     return result

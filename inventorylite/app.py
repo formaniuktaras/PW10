@@ -16,6 +16,7 @@ import subprocess
 import time
 import traceback
 import webbrowser
+import os
 from datetime import date, datetime
 from pathlib import Path
 import sys
@@ -764,9 +765,23 @@ class InventoryApp(tk.Tk):
         try:
             archive = Path(archive_path).expanduser().resolve()
             if getattr(sys, "frozen", False):
-                cmd = [sys.executable, "--helper-restore", str(archive)]
+                cmd = [
+                    sys.executable,
+                    "--helper-restore",
+                    str(archive),
+                    "--wait-pid",
+                    str(os.getpid()),
+                ]
             else:
-                cmd = [sys.executable, "-m", "inventorylite.app", "--helper-restore", str(archive)]
+                cmd = [
+                    sys.executable,
+                    "-m",
+                    "inventorylite.app",
+                    "--helper-restore",
+                    str(archive),
+                    "--wait-pid",
+                    str(os.getpid()),
+                ]
             subprocess.Popen(cmd, close_fds=True)
         except Exception:
             logging.exception("Restore helper failed to start")
@@ -777,6 +792,10 @@ class InventoryApp(tk.Tk):
             "Відновлення даних",
             "Програма зараз закриється для відновлення і запуститься знову.",
         )
+        try:
+            self.quit()
+        except Exception:
+            pass
         self.after(50, self.destroy)
 
     def on_backup(self) -> None:
@@ -951,6 +970,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         default=60,
         help="Час очікування (сек.) на звільнення lock перед відновленням",
     )
+    parser.add_argument(
+        "--wait-pid",
+        type=int,
+        default=0,
+        help="PID процесу, завершення якого треба дочекатися",
+    )
     args = parser.parse_args(argv)
 
     if args.helper_restore:
@@ -958,6 +983,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             args.helper_restore,
             relaunch=not args.no_relaunch,
             timeout=args.wait_timeout,
+            wait_pid=args.wait_pid,
         )
 
     log_path = setup_logging(APP_NAME)

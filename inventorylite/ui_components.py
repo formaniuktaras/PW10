@@ -312,9 +312,13 @@ class CalendarPopup(tk.Toplevel):
 
     def __init__(self, master: tk.Widget, initial_date: date, on_select: Callable[[date], None]):
         super().__init__(master)
-        self.title("Оберіть дату")
+        self.withdraw()
+        self.overrideredirect(True)
+        try:
+            self.attributes("-topmost", True)
+        except Exception:
+            pass
         self.transient(master.winfo_toplevel())
-        self.attributes("-topmost", True)
         self.resizable(False, False)
         self.calendar = calendar.Calendar(firstweekday=0)
         self._on_select = on_select
@@ -334,15 +338,25 @@ class CalendarPopup(tk.Toplevel):
         self.bind("<Control-Next>", lambda _e: self.change_year(1))
         self.bind("<Return>", lambda _e: self._confirm_selection())
 
-        container = ttk.Frame(self, style="Calendar.TFrame", padding=12)
-        container.pack(fill=tk.BOTH, expand=True)
+        style = ttk.Style(self)
+        bg_candidates = [
+            style.lookup("Calendar.TFrame", "background"),
+            style.lookup("TFrame", "background"),
+        ]
+        try:
+            bg_candidates.append(master.cget("background"))
+        except Exception:
+            bg_candidates.append(None)
+        palette_bg_or_fallback = next((c for c in bg_candidates if c), None)
+        if not palette_bg_or_fallback:
+            theme = (style.theme_use() or "").lower()
+            palette_bg_or_fallback = "#2b2b2b" if "dark" in theme else "#f2f2f2"
 
-        header = ttk.Frame(container, style="Calendar.TFrame")
-        header.pack(fill=tk.X, pady=(0, 6))
-        ttk.Label(header, text="Оберіть дату", style="Calendar.Header.TLabel").pack(side=tk.LEFT)
-        ttk.Button(header, text="✕", width=3, style="Calendar.Close.TButton", command=self._close).pack(
-            side=tk.RIGHT
-        )
+        outer = tk.Frame(self, bg=palette_bg_or_fallback, bd=1, relief="solid")
+        outer.pack(fill="both", expand=True)
+
+        container = ttk.Frame(outer, style="Calendar.TFrame", padding=10)
+        container.pack(fill="both", expand=True)
 
         nav = ttk.Frame(container, style="Calendar.TFrame")
         nav.pack(fill=tk.X, pady=(0, 8))
@@ -395,12 +409,12 @@ class CalendarPopup(tk.Toplevel):
         self.days_container = ttk.Frame(container, style="Calendar.TFrame")
         self.days_container.pack()
         self.render()
-        self.after(0, self.focus_force)
+        self.update_idletasks()
+        self.deiconify()
+        self.focus_force()
 
     def _on_focus_out(self, _event: tk.Event) -> None:
-        new_focus = self.focus_get()
-        if new_focus is None or new_focus.winfo_toplevel() is not self:
-            self._close()
+        self._close()
 
     def _close(self) -> None:
         try:
@@ -571,12 +585,11 @@ class DatePicker(ttk.Frame):
             self.selected_date = selected
             self.var.set(self._format_date(selected))
 
-        popup = CalendarPopup(self, self.selected_date, on_select)
-        popup.update_idletasks()
         x = self._entry.winfo_rootx()
         y = self._entry.winfo_rooty() + self._entry.winfo_height()
+        popup = CalendarPopup(self, self.selected_date, on_select)
         popup.geometry(f"+{x}+{y}")
-        popup.focus_set()
+        popup.focus_force()
         popup.wait_window(popup)
 
 

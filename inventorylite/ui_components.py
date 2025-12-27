@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import calendar
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from functools import cmp_to_key
 from typing import TYPE_CHECKING, Any, Callable, List, Optional
 import tkinter as tk
@@ -314,7 +314,7 @@ class CalendarPopup(tk.Toplevel):
         super().__init__(master)
         self.title("Оберіть дату")
         self.transient(master.winfo_toplevel())
-        self.grab_set()
+        self.attributes("-topmost", True)
         self.resizable(False, False)
         self.calendar = calendar.Calendar(firstweekday=0)
         self._on_select = on_select
@@ -324,6 +324,15 @@ class CalendarPopup(tk.Toplevel):
 
         self.bind("<Escape>", lambda _e: self._close())
         self.bind("<FocusOut>", self._on_focus_out)
+        self.bind("<Left>", lambda _e: self.move_selected(-1))
+        self.bind("<Right>", lambda _e: self.move_selected(1))
+        self.bind("<Up>", lambda _e: self.move_selected(-7))
+        self.bind("<Down>", lambda _e: self.move_selected(7))
+        self.bind("<Prior>", lambda _e: self.change_month(-1))
+        self.bind("<Next>", lambda _e: self.change_month(1))
+        self.bind("<Control-Prior>", lambda _e: self.change_year(-1))
+        self.bind("<Control-Next>", lambda _e: self.change_year(1))
+        self.bind("<Return>", lambda _e: self._confirm_selection())
 
         container = ttk.Frame(self, style="Calendar.TFrame", padding=12)
         container.pack(fill=tk.BOTH, expand=True)
@@ -331,7 +340,7 @@ class CalendarPopup(tk.Toplevel):
         header = ttk.Frame(container, style="Calendar.TFrame")
         header.pack(fill=tk.X, pady=(0, 6))
         ttk.Label(header, text="Оберіть дату", style="Calendar.Header.TLabel").pack(side=tk.LEFT)
-        ttk.Button(header, text="✕", width=3, style="Calendar.Nav.TButton", command=self._close).pack(
+        ttk.Button(header, text="✕", width=3, style="Calendar.Close.TButton", command=self._close).pack(
             side=tk.RIGHT
         )
 
@@ -345,7 +354,7 @@ class CalendarPopup(tk.Toplevel):
             text="◀",
             width=3,
             style="Calendar.Nav.TButton",
-            command=lambda: self._change_month(-1),
+            command=lambda: self.change_month(-1),
         ).pack(side=tk.LEFT)
         self.month_label = ttk.Label(month_frame, text="", style="Calendar.Month.TLabel", width=12, anchor="center")
         self.month_label.pack(side=tk.LEFT, padx=4)
@@ -354,7 +363,7 @@ class CalendarPopup(tk.Toplevel):
             text="▶",
             width=3,
             style="Calendar.Nav.TButton",
-            command=lambda: self._change_month(1),
+            command=lambda: self.change_month(1),
         ).pack(side=tk.LEFT)
 
         year_frame = ttk.Frame(nav, style="Calendar.TFrame")
@@ -364,7 +373,7 @@ class CalendarPopup(tk.Toplevel):
             text="◀",
             width=3,
             style="Calendar.Nav.TButton",
-            command=lambda: self._change_year(-1),
+            command=lambda: self.change_year(-1),
         ).pack(side=tk.LEFT)
         self.year_label = ttk.Label(year_frame, text="", style="Calendar.Year.TLabel", width=6, anchor="center")
         self.year_label.pack(side=tk.LEFT, padx=4)
@@ -373,7 +382,7 @@ class CalendarPopup(tk.Toplevel):
             text="▶",
             width=3,
             style="Calendar.Nav.TButton",
-            command=lambda: self._change_year(1),
+            command=lambda: self.change_year(1),
         ).pack(side=tk.LEFT)
 
         dow_row = ttk.Frame(container, style="Calendar.TFrame")
@@ -386,6 +395,7 @@ class CalendarPopup(tk.Toplevel):
         self.days_container = ttk.Frame(container, style="Calendar.TFrame")
         self.days_container.pack()
         self.render()
+        self.after(0, self.focus_force)
 
     def _on_focus_out(self, _event: tk.Event) -> None:
         new_focus = self.focus_get()
@@ -399,7 +409,7 @@ class CalendarPopup(tk.Toplevel):
             pass
         self.destroy()
 
-    def _change_month(self, delta: int) -> None:
+    def change_month(self, delta: int) -> None:
         new_month = self.current_month + delta
         if new_month < 1:
             self.current_month = 12
@@ -411,7 +421,7 @@ class CalendarPopup(tk.Toplevel):
             self.current_month = new_month
         self.render()
 
-    def _change_year(self, delta: int) -> None:
+    def change_year(self, delta: int) -> None:
         self.current_year += delta
         self.render()
 
@@ -424,6 +434,10 @@ class CalendarPopup(tk.Toplevel):
 
         today = date.today()
         weeks = self.calendar.monthdayscalendar(self.current_year, self.current_month)
+        if len(weeks) < 6:
+            weeks += [[0, 0, 0, 0, 0, 0, 0]] * (6 - len(weeks))
+
+        selected_button: ttk.Button | None = None
         for row_idx, week in enumerate(weeks):
             for col_idx, day in enumerate(week):
                 if day == 0:
@@ -438,14 +452,19 @@ class CalendarPopup(tk.Toplevel):
                 day_date = date(self.current_year, self.current_month, day)
                 is_weekend = col_idx in (5, 6)
                 style = self._resolve_style(day_date, is_weekend, today)
-                btn = ttk.Button(
+                button = ttk.Button(
                     self.days_container,
                     text=f"{day:02d}",
                     width=4,
                     style=style,
                     command=lambda d=day: self._pick(d),
                 )
-                btn.grid(row=row_idx, column=col_idx, padx=1, pady=1)
+                button.grid(row=row_idx, column=col_idx, padx=1, pady=1)
+                if self.selected_date and day_date == self.selected_date:
+                    selected_button = button
+
+        if selected_button:
+            selected_button.focus_set()
 
     def _resolve_style(self, day_date: date, is_weekend: bool, today: date) -> str:
         if day_date == self.selected_date:
@@ -460,6 +479,21 @@ class CalendarPopup(tk.Toplevel):
         picked = date(self.current_year, self.current_month, day)
         self.selected_date = picked
         self._on_select(picked)
+        self._close()
+
+    def move_selected(self, delta_days: int) -> None:
+        base_date = self.selected_date or date(self.current_year, self.current_month, 1)
+        new_date = base_date + timedelta(days=delta_days)
+        if new_date.month != self.current_month or new_date.year != self.current_year:
+            self.current_year = new_date.year
+            self.current_month = new_date.month
+        self.selected_date = new_date
+        self.render()
+
+    def _confirm_selection(self) -> None:
+        if self.selected_date is None:
+            self.selected_date = date(self.current_year, self.current_month, 1)
+        self._on_select(self.selected_date)
         self._close()
 
 

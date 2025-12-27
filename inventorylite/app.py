@@ -440,6 +440,19 @@ class InventoryApp(tk.Tk):
                             ]
                         },
                     },
+                    "Calendar.Close.TButton": {
+                        "configure": {
+                            "background": palette["surface"],
+                            "foreground": palette["muted"],
+                            "padding": (6, 4),
+                        },
+                        "map": {
+                            "background": [
+                                ("pressed", palette["accent"]),
+                                ("active", palette["surface_alt"]),
+                            ]
+                        },
+                    },
                     "Calendar.Month.TLabel": {
                         "configure": {
                             "background": palette["surface_alt"],
@@ -678,6 +691,19 @@ class InventoryApp(tk.Tk):
                             "background": [
                                 ("pressed", palette["accent"]),
                                 ("active", palette["surface"]),
+                            ]
+                        },
+                    },
+                    "Calendar.Close.TButton": {
+                        "configure": {
+                            "background": palette["surface"],
+                            "foreground": palette["muted"],
+                            "padding": (6, 4),
+                        },
+                        "map": {
+                            "background": [
+                                ("pressed", palette["accent"]),
+                                ("active", palette["surface_alt"]),
                             ]
                         },
                     },

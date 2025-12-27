@@ -9,6 +9,7 @@ import sqlite3
 import shutil
 import sys
 import tempfile
+import time
 import zipfile
 from copy import deepcopy
 from logging.handlers import RotatingFileHandler
@@ -770,9 +771,9 @@ def restore_all_data(archive_path: Path) -> None:
                 continue
             try:
                 if item.is_dir():
-                    shutil.rmtree(item)
+                    _retry_io(lambda: shutil.rmtree(item))
                 else:
-                    item.unlink(missing_ok=True)
+                    _retry_io(lambda: item.unlink(missing_ok=True))
             except PermissionError as exc:
                 raise RuntimeError(f"{busy_file_hint}\nФайл: {item}") from exc
             except OSError as exc:
@@ -793,7 +794,7 @@ def restore_all_data(archive_path: Path) -> None:
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
             try:
-                shutil.copy2(source, target)
+                _retry_io(lambda: shutil.copy2(source, target))
             except PermissionError as exc:
                 raise RuntimeError(f"{busy_file_hint}\nФайл: {target}") from exc
             except OSError as exc:
@@ -806,6 +807,20 @@ def restore_all_data(archive_path: Path) -> None:
     logging.info("Pre-restore backup: %s", pre_restore_backup)
     prune_old_files(backups_dir, prefix=f"{APP_NAME}_pre_restore_", suffix=".zip", keep_last=10)
     logging.info("Data directory restored from: %s", archive_path)
+
+
+def _retry_io(action, *, attempts: int = 50, delay: float = 0.2):
+    last_exc = None
+    for _ in range(attempts):
+        try:
+            return action()
+        except (PermissionError, OSError) as exc:  # pragma: no cover - platform specific timing
+            last_exc = exc
+            if getattr(exc, "winerror", None) == 32:
+                time.sleep(delay)
+                continue
+            raise
+    raise last_exc
 
 
 def open_data_folder(path: Path) -> None:

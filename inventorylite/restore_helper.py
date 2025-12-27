@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 import sys
 import time
@@ -10,7 +11,7 @@ from pathlib import Path
 from inventorylite.utils import APP_NAME, SingleInstance, get_data_dir, get_lock_path, restore_all_data, setup_logging
 
 
-def helper_restore_main(zip_path: str, *, relaunch: bool = True, timeout: int = 60) -> int:
+def helper_restore_main(zip_path: str, *, relaunch: bool = True, timeout: int = 60, wait_pid: int = 0) -> int:
     log_path = setup_logging(APP_NAME + "_restore")
     archive = Path(zip_path).expanduser().resolve()
     if not archive.exists():
@@ -20,6 +21,15 @@ def helper_restore_main(zip_path: str, *, relaunch: bool = True, timeout: int = 
     deadline = time.time() + max(5, int(timeout))
     lock = SingleInstance(get_lock_path())
 
+    if wait_pid:
+        logging.info("Waiting for PID to exit: %s", wait_pid)
+        if not _wait_for_pid_exit(wait_pid, timeout=timeout):
+            _show_error(
+                "Відновлення",
+                "Не вдалося дочекатися закриття програми. Закрийте InventoryLite і повторіть.",
+            )
+            return 3
+
     while True:
         if lock.acquire():
             break
@@ -27,6 +37,8 @@ def helper_restore_main(zip_path: str, *, relaunch: bool = True, timeout: int = 
             _show_error("Відновлення", "Не вдалося дочекатися закриття програми. Закрийте InventoryLite і повторіть.")
             return 3
         time.sleep(0.2)
+
+    time.sleep(0.3)
 
     ok = False
     err = ""
@@ -86,3 +98,32 @@ def _write_restore_marker(*, ok: bool, archive: str, error: str, log_path: str) 
         "log_path": log_path,
     }
     marker.write_text(json.dumps(marker_data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _wait_for_pid_exit(pid: int, timeout: int) -> bool:
+    if pid <= 0:
+        return True
+    deadline = time.time() + max(5, int(timeout))
+    if sys.platform.startswith("win"):
+        import ctypes
+
+        SYNCHRONIZE = 0x00100000
+        WAIT_OBJECT_0 = 0x00000000
+        WAIT_TIMEOUT = 0x00000102
+        h = ctypes.windll.kernel32.OpenProcess(SYNCHRONIZE, 0, pid)
+        if not h:
+            return True
+        try:
+            remaining_ms = int(max(0, deadline - time.time()) * 1000)
+            res = ctypes.windll.kernel32.WaitForSingleObject(h, remaining_ms)
+            return res == WAIT_OBJECT_0
+        finally:
+            ctypes.windll.kernel32.CloseHandle(h)
+    else:
+        while time.time() < deadline:
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                return True
+            time.sleep(0.2)
+        return False

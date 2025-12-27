@@ -419,6 +419,101 @@ class InventoryApp(tk.Tk):
                             "foreground": palette["text"],
                         }
                     },
+                    "Calendar.TFrame": {"configure": {"background": palette["surface"]}},
+                    "Calendar.Header.TLabel": {
+                        "configure": {
+                            "background": palette["surface"],
+                            "foreground": palette["text"],
+                            "font": ("TkDefaultFont", 10, "bold"),
+                        }
+                    },
+                    "Calendar.Nav.TButton": {
+                        "configure": {
+                            "background": palette["surface_alt"],
+                            "foreground": palette["text"],
+                            "padding": (6, 4),
+                        },
+                        "map": {
+                            "background": [
+                                ("pressed", palette["accent"]),
+                                ("active", palette["surface"]),
+                            ]
+                        },
+                    },
+                    "Calendar.Month.TLabel": {
+                        "configure": {
+                            "background": palette["surface_alt"],
+                            "foreground": palette["text"],
+                            "padding": (8, 4),
+                        }
+                    },
+                    "Calendar.Year.TLabel": {
+                        "configure": {
+                            "background": palette["surface_alt"],
+                            "foreground": palette["text"],
+                            "padding": (8, 4),
+                        }
+                    },
+                    "Calendar.Dow.TLabel": {
+                        "configure": {
+                            "background": palette["surface"],
+                            "foreground": palette["muted"],
+                            "padding": (2, 2),
+                        }
+                    },
+                    "Calendar.Day.TButton": {
+                        "configure": {
+                            "background": palette["surface_alt"],
+                            "foreground": palette["text"],
+                            "padding": (6, 4),
+                        },
+                        "map": {
+                            "background": [
+                                ("pressed", palette["accent"]),
+                                ("active", palette["surface"]),
+                            ]
+                        },
+                    },
+                    "Calendar.Weekend.TButton": {
+                        "configure": {
+                            "background": palette["surface_alt"],
+                            "foreground": palette["accent"],
+                            "padding": (6, 4),
+                        },
+                        "map": {
+                            "background": [
+                                ("pressed", palette["accent"]),
+                                ("active", palette["surface"]),
+                            ]
+                        },
+                    },
+                    "Calendar.Selected.TButton": {
+                        "configure": {
+                            "background": palette["accent"],
+                            "foreground": "#ffffff",
+                            "padding": (6, 4),
+                        },
+                        "map": {
+                            "background": [
+                                ("pressed", palette["accent"]),
+                                ("active", palette["accent"]),
+                            ]
+                        },
+                    },
+                    "Calendar.Today.TButton": {
+                        "configure": {
+                            "background": palette["surface"],
+                            "foreground": palette["accent"],
+                            "padding": (6, 4),
+                            "relief": "ridge",
+                        },
+                        "map": {
+                            "background": [
+                                ("pressed", palette["accent"]),
+                                ("active", palette["surface_alt"]),
+                            ]
+                        },
+                    },
                     "TButton": {
                         "configure": {
                             "background": palette["surface_alt"],
@@ -564,6 +659,101 @@ class InventoryApp(tk.Tk):
                             "background": palette["bg"],
                             "foreground": palette["text"],
                         }
+                    },
+                    "Calendar.TFrame": {"configure": {"background": palette["surface"]}},
+                    "Calendar.Header.TLabel": {
+                        "configure": {
+                            "background": palette["surface"],
+                            "foreground": palette["text"],
+                            "font": ("TkDefaultFont", 10, "bold"),
+                        }
+                    },
+                    "Calendar.Nav.TButton": {
+                        "configure": {
+                            "background": palette["surface_alt"],
+                            "foreground": palette["text"],
+                            "padding": (6, 4),
+                        },
+                        "map": {
+                            "background": [
+                                ("pressed", palette["accent"]),
+                                ("active", palette["surface"]),
+                            ]
+                        },
+                    },
+                    "Calendar.Month.TLabel": {
+                        "configure": {
+                            "background": palette["surface_alt"],
+                            "foreground": palette["text"],
+                            "padding": (8, 4),
+                        }
+                    },
+                    "Calendar.Year.TLabel": {
+                        "configure": {
+                            "background": palette["surface_alt"],
+                            "foreground": palette["text"],
+                            "padding": (8, 4),
+                        }
+                    },
+                    "Calendar.Dow.TLabel": {
+                        "configure": {
+                            "background": palette["surface"],
+                            "foreground": palette["muted"],
+                            "padding": (2, 2),
+                        }
+                    },
+                    "Calendar.Day.TButton": {
+                        "configure": {
+                            "background": palette["surface_alt"],
+                            "foreground": palette["text"],
+                            "padding": (6, 4),
+                        },
+                        "map": {
+                            "background": [
+                                ("pressed", palette["accent"]),
+                                ("active", palette["surface"]),
+                            ]
+                        },
+                    },
+                    "Calendar.Weekend.TButton": {
+                        "configure": {
+                            "background": palette["surface_alt"],
+                            "foreground": palette["accent"],
+                            "padding": (6, 4),
+                        },
+                        "map": {
+                            "background": [
+                                ("pressed", palette["accent"]),
+                                ("active", palette["surface"]),
+                            ]
+                        },
+                    },
+                    "Calendar.Selected.TButton": {
+                        "configure": {
+                            "background": palette["accent"],
+                            "foreground": "#ffffff",
+                            "padding": (6, 4),
+                        },
+                        "map": {
+                            "background": [
+                                ("pressed", palette["accent"]),
+                                ("active", palette["accent"]),
+                            ]
+                        },
+                    },
+                    "Calendar.Today.TButton": {
+                        "configure": {
+                            "background": palette["surface"],
+                            "foreground": palette["accent"],
+                            "padding": (6, 4),
+                            "relief": "ridge",
+                        },
+                        "map": {
+                            "background": [
+                                ("pressed", palette["accent"]),
+                                ("active", palette["surface_alt"]),
+                            ]
+                        },
                     },
                     "TButton": {
                         "configure": {

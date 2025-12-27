@@ -293,6 +293,176 @@ class TableFrame(ttk.Frame):
         return False, (2, raw_text.casefold())
 
 
+class CalendarPopup(tk.Toplevel):
+    MONTH_NAMES = [
+        "СІЧЕНЬ",
+        "ЛЮТИЙ",
+        "БЕРЕЗЕНЬ",
+        "КВІТЕНЬ",
+        "ТРАВЕНЬ",
+        "ЧЕРВЕНЬ",
+        "ЛИПЕНЬ",
+        "СЕРПЕНЬ",
+        "ВЕРЕСЕНЬ",
+        "ЖОВТЕНЬ",
+        "ЛИСТОПАД",
+        "ГРУДЕНЬ",
+    ]
+    DOW_NAMES = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Нд"]
+
+    def __init__(self, master: tk.Widget, initial_date: date, on_select: Callable[[date], None]):
+        super().__init__(master)
+        self.title("Оберіть дату")
+        self.transient(master.winfo_toplevel())
+        self.grab_set()
+        self.resizable(False, False)
+        self.calendar = calendar.Calendar(firstweekday=0)
+        self._on_select = on_select
+        self.selected_date = initial_date
+        self.current_year = initial_date.year
+        self.current_month = initial_date.month
+
+        self.bind("<Escape>", lambda _e: self._close())
+        self.bind("<FocusOut>", self._on_focus_out)
+
+        container = ttk.Frame(self, style="Calendar.TFrame", padding=12)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        header = ttk.Frame(container, style="Calendar.TFrame")
+        header.pack(fill=tk.X, pady=(0, 6))
+        ttk.Label(header, text="Оберіть дату", style="Calendar.Header.TLabel").pack(side=tk.LEFT)
+        ttk.Button(header, text="✕", width=3, style="Calendar.Nav.TButton", command=self._close).pack(
+            side=tk.RIGHT
+        )
+
+        nav = ttk.Frame(container, style="Calendar.TFrame")
+        nav.pack(fill=tk.X, pady=(0, 8))
+
+        month_frame = ttk.Frame(nav, style="Calendar.TFrame")
+        month_frame.pack(side=tk.LEFT)
+        ttk.Button(
+            month_frame,
+            text="◀",
+            width=3,
+            style="Calendar.Nav.TButton",
+            command=lambda: self._change_month(-1),
+        ).pack(side=tk.LEFT)
+        self.month_label = ttk.Label(month_frame, text="", style="Calendar.Month.TLabel", width=12, anchor="center")
+        self.month_label.pack(side=tk.LEFT, padx=4)
+        ttk.Button(
+            month_frame,
+            text="▶",
+            width=3,
+            style="Calendar.Nav.TButton",
+            command=lambda: self._change_month(1),
+        ).pack(side=tk.LEFT)
+
+        year_frame = ttk.Frame(nav, style="Calendar.TFrame")
+        year_frame.pack(side=tk.RIGHT)
+        ttk.Button(
+            year_frame,
+            text="◀",
+            width=3,
+            style="Calendar.Nav.TButton",
+            command=lambda: self._change_year(-1),
+        ).pack(side=tk.LEFT)
+        self.year_label = ttk.Label(year_frame, text="", style="Calendar.Year.TLabel", width=6, anchor="center")
+        self.year_label.pack(side=tk.LEFT, padx=4)
+        ttk.Button(
+            year_frame,
+            text="▶",
+            width=3,
+            style="Calendar.Nav.TButton",
+            command=lambda: self._change_year(1),
+        ).pack(side=tk.LEFT)
+
+        dow_row = ttk.Frame(container, style="Calendar.TFrame")
+        dow_row.pack(fill=tk.X)
+        for idx, name in enumerate(self.DOW_NAMES):
+            ttk.Label(dow_row, text=name, style="Calendar.Dow.TLabel", width=4, anchor="center").grid(
+                row=0, column=idx, padx=1, pady=(0, 4)
+            )
+
+        self.days_container = ttk.Frame(container, style="Calendar.TFrame")
+        self.days_container.pack()
+        self.render()
+
+    def _on_focus_out(self, _event: tk.Event) -> None:
+        new_focus = self.focus_get()
+        if new_focus is None or new_focus.winfo_toplevel() is not self:
+            self._close()
+
+    def _close(self) -> None:
+        try:
+            self.grab_release()
+        except tk.TclError:
+            pass
+        self.destroy()
+
+    def _change_month(self, delta: int) -> None:
+        new_month = self.current_month + delta
+        if new_month < 1:
+            self.current_month = 12
+            self.current_year -= 1
+        elif new_month > 12:
+            self.current_month = 1
+            self.current_year += 1
+        else:
+            self.current_month = new_month
+        self.render()
+
+    def _change_year(self, delta: int) -> None:
+        self.current_year += delta
+        self.render()
+
+    def render(self) -> None:
+        self.month_label.configure(text=self.MONTH_NAMES[self.current_month - 1])
+        self.year_label.configure(text=str(self.current_year))
+
+        for widget in self.days_container.winfo_children():
+            widget.destroy()
+
+        today = date.today()
+        weeks = self.calendar.monthdayscalendar(self.current_year, self.current_month)
+        for row_idx, week in enumerate(weeks):
+            for col_idx, day in enumerate(week):
+                if day == 0:
+                    ttk.Label(
+                        self.days_container,
+                        text="",
+                        width=4,
+                        style="Calendar.Dow.TLabel",
+                    ).grid(row=row_idx, column=col_idx, padx=1, pady=1)
+                    continue
+
+                day_date = date(self.current_year, self.current_month, day)
+                is_weekend = col_idx in (5, 6)
+                style = self._resolve_style(day_date, is_weekend, today)
+                btn = ttk.Button(
+                    self.days_container,
+                    text=f"{day:02d}",
+                    width=4,
+                    style=style,
+                    command=lambda d=day: self._pick(d),
+                )
+                btn.grid(row=row_idx, column=col_idx, padx=1, pady=1)
+
+    def _resolve_style(self, day_date: date, is_weekend: bool, today: date) -> str:
+        if day_date == self.selected_date:
+            return "Calendar.Selected.TButton"
+        if day_date == today:
+            return "Calendar.Today.TButton"
+        if is_weekend:
+            return "Calendar.Weekend.TButton"
+        return "Calendar.Day.TButton"
+
+    def _pick(self, day: int) -> None:
+        picked = date(self.current_year, self.current_month, day)
+        self.selected_date = picked
+        self._on_select(picked)
+        self._close()
+
+
 class DatePicker(ttk.Frame):
     """Date picker with a popup calendar."""
 
@@ -362,63 +532,18 @@ class DatePicker(ttk.Frame):
     def _open_calendar(self) -> None:
         if self._state != "normal":
             return
-        top = tk.Toplevel(self)
-        top.title("Оберіть дату")
-        top.grab_set()
-        top.resizable(False, False)
 
-        header = ttk.Frame(top)
-        header.pack(fill=tk.X, padx=8, pady=6)
+        def on_select(selected: date) -> None:
+            self.selected_date = selected
+            self.var.set(self._format_date(selected))
 
-        current = [self.selected_date.year, self.selected_date.month]
-
-        month_label = ttk.Label(header, text="")
-        month_label.pack(side=tk.LEFT, expand=True)
-
-        def refresh_calendar() -> None:
-            year, month = current
-            month_label.configure(text=f"{year}-{month:02d}")
-            for widget in body.winfo_children():
-                widget.destroy()
-            cal = calendar.Calendar().monthdayscalendar(year, month)
-            days_header = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Нд"]
-            for idx, name in enumerate(days_header):
-                ttk.Label(body, text=name, width=4).grid(row=0, column=idx)
-            for row_idx, week in enumerate(cal, start=1):
-                for col_idx, day in enumerate(week):
-                    if day == 0:
-                        ttk.Label(body, text="", width=4).grid(row=row_idx, column=col_idx)
-                        continue
-                    btn = ttk.Button(body, text=f"{day:02d}", width=4)
-                    btn.grid(row=row_idx, column=col_idx, padx=1, pady=1)
-                    btn.configure(command=lambda d=day: on_pick(d))
-
-        def shift_month(delta: int) -> None:
-            year, month = current
-            month += delta
-            if month < 1:
-                month = 12
-                year -= 1
-            elif month > 12:
-                month = 1
-                year += 1
-            current[0], current[1] = year, month
-            refresh_calendar()
-
-        ttk.Button(header, text="<", width=3, command=lambda: shift_month(-1)).pack(side=tk.LEFT)
-        ttk.Button(header, text=">", width=3, command=lambda: shift_month(1)).pack(side=tk.RIGHT)
-
-        body = ttk.Frame(top)
-        body.pack(padx=8, pady=(0, 8))
-
-        def on_pick(day: int) -> None:
-            year, month = current
-            self.selected_date = date(year, month, day)
-            self.var.set(self._format_date(self.selected_date))
-            top.destroy()
-
-        refresh_calendar()
-        top.wait_window(top)
+        popup = CalendarPopup(self, self.selected_date, on_select)
+        popup.update_idletasks()
+        x = self._entry.winfo_rootx()
+        y = self._entry.winfo_rooty() + self._entry.winfo_height()
+        popup.geometry(f"+{x}+{y}")
+        popup.focus_set()
+        popup.wait_window(popup)
 
 
 def simple_prompt(title: str, fields: List[str], initial: Optional[List[str]] = None) -> Optional[List[str]]:

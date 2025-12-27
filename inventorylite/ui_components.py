@@ -325,9 +325,11 @@ class CalendarPopup(tk.Toplevel):
         self.selected_date = initial_date
         self.current_year = initial_date.year
         self.current_month = initial_date.month
+        self._root = master.winfo_toplevel()
+        self._bind_id_click = self._root.bind("<Button-1>", self._on_root_click, add="+")
+        self._bind_id_click2 = self._root.bind("<Button-3>", self._on_root_click, add="+")
 
         self.bind("<Escape>", lambda _e: self._close())
-        self.bind("<FocusOut>", self._on_focus_out)
         self.bind("<Left>", lambda _e: self.move_selected(-1))
         self.bind("<Right>", lambda _e: self.move_selected(1))
         self.bind("<Up>", lambda _e: self.move_selected(-7))
@@ -413,15 +415,30 @@ class CalendarPopup(tk.Toplevel):
         self.deiconify()
         self.focus_force()
 
-    def _on_focus_out(self, _event: tk.Event) -> None:
+    def _on_root_click(self, event: tk.Event) -> None:
+        try:
+            if event.widget.winfo_toplevel() == self:
+                return
+        except Exception:
+            pass
         self._close()
 
     def _close(self) -> None:
         try:
+            if hasattr(self, "_root") and getattr(self, "_bind_id_click", None):
+                self._root.unbind("<Button-1>", self._bind_id_click)
+            if hasattr(self, "_root") and getattr(self, "_bind_id_click2", None):
+                self._root.unbind("<Button-3>", self._bind_id_click2)
+        except Exception:
+            pass
+        try:
             self.grab_release()
         except tk.TclError:
             pass
-        self.destroy()
+        try:
+            self.destroy()
+        except Exception:
+            pass
 
     def change_month(self, delta: int) -> None:
         new_month = self.current_month + delta

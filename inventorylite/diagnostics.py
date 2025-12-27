@@ -25,43 +25,18 @@ def open_in_os(path: Path) -> None:
 
 
 def run_db_healthcheck() -> dict:
+    base = db.db_health_check()
     conn = db.get_connection()
     try:
-        integrity_row = conn.execute("PRAGMA integrity_check;").fetchone()
-        integrity = integrity_row[0] if integrity_row else "unknown"
-
-        foreign_key_issues = conn.execute("PRAGMA foreign_key_check;").fetchall()
-        foreign_key_count = len(foreign_key_issues)
-
         schema_version_row = conn.execute("PRAGMA user_version").fetchone()
         schema_version = int(schema_version_row[0]) if schema_version_row else 0
-
-        tables = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-        ).fetchall()
-        table_names = {row[0] for row in tables}
-
-        key_tables = [
-            "Products",
-            "PurchaseDocuments",
-            "SalesDocuments",
-            "StockBalances",
-            "CashTransactions",
-        ]
-        counts: dict[str, int] = {}
-        for table in key_tables:
-            if table in table_names:
-                count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-            else:
-                count = 0
-            counts[table] = count
     finally:
         conn.close()
 
     return {
-        "integrity": "ok" if integrity == "ok" else str(integrity),
-        "foreign_key_issues": foreign_key_count,
-        "counts": counts,
+        "integrity": base["integrity_check"],
+        "foreign_key_issues": base["foreign_key_issues"],
+        "counts": base["counts"],
         "db_path": str(get_db_path()),
         "schema_version": schema_version,
     }

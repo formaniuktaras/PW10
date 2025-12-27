@@ -84,6 +84,58 @@ def apply_connection_pragmas(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA temp_store = MEMORY")
 
 
+def db_health_check() -> dict:
+    conn = get_connection()
+    try:
+        integrity_row = conn.execute("PRAGMA integrity_check;").fetchone()
+        integrity_value = integrity_row[0] if integrity_row else "unknown"
+        foreign_key_rows = conn.execute("PRAGMA foreign_key_check;").fetchall()
+        foreign_key_issues = len(foreign_key_rows)
+
+        counts = {
+            "Products": int(conn.execute("SELECT COUNT(*) FROM Products").fetchone()[0]),
+            "PurchaseDocuments": int(
+                conn.execute("SELECT COUNT(*) FROM PurchaseDocuments").fetchone()[0]
+            ),
+            "SalesDocuments": int(conn.execute("SELECT COUNT(*) FROM SalesDocuments").fetchone()[0]),
+            "StockBalances": int(conn.execute("SELECT COUNT(*) FROM StockBalances").fetchone()[0]),
+            "CashTransactions": int(conn.execute("SELECT COUNT(*) FROM CashTransactions").fetchone()[0]),
+        }
+    finally:
+        conn.close()
+
+    return {
+        "integrity_check": "ok" if integrity_value == "ok" else str(integrity_value),
+        "foreign_key_issues": foreign_key_issues,
+        "counts": counts,
+    }
+
+
+def db_quick_repair() -> dict:
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(get_db_path(), timeout=5.0)
+        conn.isolation_level = None
+        apply_connection_pragmas(conn)
+        conn.execute("PRAGMA optimize;")
+        conn.execute("REINDEX;")
+        conn.execute("VACUUM;")
+        return {"ok": True}
+    except sqlite3.OperationalError as exc:
+        message = str(exc)
+        if "locked" in message.lower():
+            return {"ok": False, "error": "База даних зайнята. Закрийте інші вікна та повторіть."}
+        return {"ok": False, "error": message}
+    except Exception as exc:  # pragma: no cover - defensive path
+        return {"ok": False, "error": str(exc)}
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 @contextmanager
 def transaction(conn: sqlite3.Connection) -> Iterable[None]:
     conn.execute("BEGIN IMMEDIATE")

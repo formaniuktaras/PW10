@@ -210,7 +210,8 @@ class InventoryApp(tk.Tk):
         diagnostics_menu.add_command(label="Відкрити папку логів", command=self.open_log_folder)
         diagnostics_menu.add_command(label="Відкрити поточний лог", command=self.open_log_file)
         diagnostics_menu.add_separator()
-        diagnostics_menu.add_command(label="Швидка перевірка БД", command=self.show_db_healthcheck)
+        diagnostics_menu.add_command(label="Перевірка БД", command=self.on_db_check)
+        diagnostics_menu.add_command(label="Швидкий ремонт БД", command=self.on_db_repair)
         menubar.add_cascade(label="Діагностика", menu=diagnostics_menu)
         self.config(menu=menubar)
 
@@ -265,46 +266,46 @@ class InventoryApp(tk.Tk):
             return
         diagnostics.open_in_os(self.log_path)
 
-    def show_db_healthcheck(self) -> None:
-        results = diagnostics.run_db_healthcheck()
+    def on_db_check(self) -> None:
+        try:
+            results = db.db_health_check()
+        except Exception:
+            logging.exception("DB health check failed")
+            show_error("Діагностика", "Не вдалося виконати перевірку БД. Деталі у логах.")
+            return
+
         lines = [
-            f"DB: {results['db_path']}",
-            f"schema_version: {results['schema_version']}",
-            f"integrity_check: {results['integrity']}",
-            f"foreign_key_check: {results['foreign_key_issues']} issues",
+            f"integrity_check: {results['integrity_check']}",
+            f"foreign_key_issues: {results['foreign_key_issues']}",
             "counts:",
         ]
         for table, count in results["counts"].items():
             lines.append(f"  {table}: {count}")
         content = "\n".join(lines)
 
-        window = tk.Toplevel(self)
-        window.title("Швидка перевірка БД")
-        window.transient(self)
-        window.grab_set()
-        window.geometry("520x360")
+        if results["integrity_check"] != "ok" or results["foreign_key_issues"] > 0:
+            messagebox.showwarning("Перевірка БД", content)
+        else:
+            messagebox.showinfo("Перевірка БД", content)
 
-        frame = ttk.Frame(window, padding=12)
-        frame.pack(fill=tk.BOTH, expand=True)
+    def on_db_repair(self) -> None:
+        proceed = messagebox.askyesno(
+            "Швидкий ремонт БД", "VACUUM може зайняти час. Продовжити?"
+        )
+        if not proceed:
+            return
 
-        text = tk.Text(frame, wrap="word", height=12)
-        text.insert("1.0", content)
-        text.configure(state="disabled")
-        text.pack(fill=tk.BOTH, expand=True)
+        try:
+            result = db.db_quick_repair()
+        except Exception:
+            logging.exception("DB quick repair failed")
+            show_error("Швидкий ремонт БД", "Не вдалося виконати ремонт. Деталі у логах.")
+            return
 
-        actions = ttk.Frame(frame)
-        actions.pack(fill=tk.X, pady=(10, 0))
-        ttk.Button(
-            actions,
-            text="Копіювати",
-            command=lambda: self._copy_healthcheck_result(content),
-        ).pack(side=tk.RIGHT, padx=(4, 0))
-        ttk.Button(actions, text="Закрити", command=window.destroy).pack(side=tk.RIGHT)
-
-    def _copy_healthcheck_result(self, content: str) -> None:
-        self.clipboard_clear()
-        self.clipboard_append(content)
-        self.update_idletasks()
+        if result.get("ok"):
+            messagebox.showinfo("Швидкий ремонт БД", "Готово")
+        else:
+            messagebox.showerror("Швидкий ремонт БД", result.get("error", "Невідома помилка"))
 
     def default_workdir(self) -> Path:
         path = self.settings.get("files", "working_dir") or str(get_data_dir())
@@ -1044,7 +1045,23 @@ def main(argv: Optional[list[str]] = None) -> int:
                 log_hint = content.get("log_path") or ""
                 error = content.get("error", "") or ""
                 if ok:
-                    messagebox.showinfo("Відновлення", "Дані успішно відновлено.")
+                    try:
+                        health = db.db_health_check()
+                        if health["integrity_check"] == "ok" and health["foreign_key_issues"] == 0:
+                            messagebox.showinfo("Відновлення", "Дані успішно відновлено.\nПеревірка БД: OK")
+                        else:
+                            lines = [
+                                "Дані успішно відновлено, але перевірка БД знайшла проблеми:",
+                                f"integrity_check: {health['integrity_check']}",
+                                f"foreign_key_issues: {health['foreign_key_issues']}",
+                                "counts:",
+                            ]
+                            for table, count in health["counts"].items():
+                                lines.append(f"  {table}: {count}")
+                            messagebox.showwarning("Відновлення", "\n".join(lines))
+                    except Exception:
+                        logging.exception("Failed to run post-restore health check")
+                        messagebox.showinfo("Відновлення", "Дані успішно відновлено.")
                 else:
                     details = (
                         f"Помилка відновлення.\n{error}\n理解. логи: {log_hint}"

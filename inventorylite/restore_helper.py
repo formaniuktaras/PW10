@@ -31,10 +31,12 @@ def helper_restore_main(zip_path: str, *, relaunch: bool = True, timeout: int = 
     ok = False
     err = ""
     try:
+        logging.info("Restore archive: %s", archive)
+        logging.info("Target data_dir: %s", get_data_dir())
         restore_all_data(archive)
         ok = True
     except Exception as exc:
-        err = str(exc)
+        err = f"{type(exc).__name__}: {exc}"
         logging.exception("Helper restore failed")
     finally:
         try:
@@ -48,7 +50,7 @@ def helper_restore_main(zip_path: str, *, relaunch: bool = True, timeout: int = 
         logging.exception("Failed to write restore marker")
 
     if not ok:
-        _show_error("Відновлення", f"Помилка відновлення.\nДеталі у логах: {log_path}")
+        _show_error("Відновлення", f"Помилка відновлення.\nПричина: {err}\nЛоги: {log_path}")
         return 4
 
     if relaunch:

@@ -532,12 +532,24 @@ class SingleInstance:
             elif fcntl:
                 fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             else:
+                try:
+                    if self.handle:
+                        self.handle.close()
+                except Exception:
+                    pass
+                self.handle = None
                 return False
             self.handle.seek(0)
             self.handle.write(str(os.getpid()))
             self.handle.truncate()
             return True
         except OSError:
+            try:
+                if self.handle:
+                    self.handle.close()
+            except Exception:
+                pass
+            self.handle = None
             return False
 
     def release(self) -> None:
@@ -734,7 +746,10 @@ def restore_all_data(archive_path: Path) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         temp_dir = Path(tmp)
         with zipfile.ZipFile(archive_path, "r") as archive:
+            logging.info("Extracting backup: %s", archive_path)
             archive.extractall(temp_dir)
+        count_files = sum(1 for p in temp_dir.rglob("*") if p.is_file())
+        logging.info("Extracted files: %s", count_files)
 
         # Remove existing data files except for the archive itself if it is stored under data_dir.
         skip_path = archive_path if _is_relative_to(archive_path, data_dir) else None
@@ -759,10 +774,10 @@ def restore_all_data(archive_path: Path) -> None:
                 else:
                     item.unlink(missing_ok=True)
             except PermissionError as exc:
-                raise RuntimeError(busy_file_hint) from exc
+                raise RuntimeError(f"{busy_file_hint}\nФайл: {item}") from exc
             except OSError as exc:
                 if getattr(exc, "winerror", None) == 32:
-                    raise RuntimeError(busy_file_hint) from exc
+                    raise RuntimeError(f"{busy_file_hint}\nФайл: {item}") from exc
                 raise
 
         _remove_wal_shm_files(data_dir)
@@ -780,10 +795,10 @@ def restore_all_data(archive_path: Path) -> None:
             try:
                 shutil.copy2(source, target)
             except PermissionError as exc:
-                raise RuntimeError(busy_file_hint) from exc
+                raise RuntimeError(f"{busy_file_hint}\nФайл: {target}") from exc
             except OSError as exc:
                 if getattr(exc, "winerror", None) == 32:
-                    raise RuntimeError(busy_file_hint) from exc
+                    raise RuntimeError(f"{busy_file_hint}\nФайл: {target}") from exc
                 raise
 
     _remove_wal_shm_files(data_dir)

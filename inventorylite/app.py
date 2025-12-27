@@ -1016,11 +1016,16 @@ def main(argv: Optional[list[str]] = None) -> int:
 
                 ok = bool(content.get("ok"))
                 log_hint = content.get("log_path") or ""
+                error = content.get("error", "") or ""
                 if ok:
                     messagebox.showinfo("Відновлення", "Дані успішно відновлено.")
                 else:
-                    details = f" Див. логи: {log_hint}" if log_hint else ""
-                    messagebox.showerror("Відновлення", f"Помилка відновлення.{details}")
+                    details = (
+                        f"Помилка відновлення.\n{error}\n理解. логи: {log_hint}"
+                        if error
+                        else f"Помилка відновлення. Див. логи: {log_hint}"
+                    )
+                    messagebox.showerror("Відновлення", details)
 
             app.report_callback_exception = _tk_report_callback_exception  # type: ignore[attr-defined]
             app.after(250, check_restore_marker)

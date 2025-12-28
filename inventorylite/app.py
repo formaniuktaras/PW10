@@ -64,6 +64,7 @@ from inventorylite.utils import (
     Settings,
     apply_base_currency_settings,
     open_data_folder,
+    sanitize_geometry,
     show_error,
     backup_database,
     bind_common_shortcuts,
@@ -75,15 +76,15 @@ from inventorylite.restore_helper import helper_restore_main
 class InventoryApp(tk.Tk):
     def __init__(self, settings: Settings | None = None, log_path: Path | None = None) -> None:
         super().__init__()
+        logging.info("Startup: InventoryApp super().__init__ completed")
         self.title(APP_NAME)
         self.settings = settings or Settings()
-        saved_geometry = self.settings.get("ui_state", "window_geometry") or ""
-        if saved_geometry:
-            self.geometry(saved_geometry)
-        else:
-            self.geometry("1180x720")
-        self.iconbitmap(default="icons/app.ico") if Path("icons/app.ico").exists() else None
         self.log_path = log_path
+        self._last_normal_geometry: str | None = None
+        saved_geometry = self.settings.get("ui_state", "window_geometry") or ""
+        self._apply_initial_geometry(saved_geometry)
+        logging.info("Startup: geometry applied %s", self.geometry())
+        self.iconbitmap(default="icons/app.ico") if Path("icons/app.ico").exists() else None
         apply_base_currency_settings(self.settings)
         self.status_var = tk.StringVar(value="Готово")
         self.status_bar: ttk.Label | None = None
@@ -92,6 +93,7 @@ class InventoryApp(tk.Tk):
         self.apply_settings()
         self.protocol("WM_DELETE_WINDOW", self.on_exit)
 
+        logging.info("Startup: building tabs begin")
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill=tk.BOTH, expand=True)
 
@@ -181,9 +183,12 @@ class InventoryApp(tk.Tk):
         )
         self.notebook.add(self.sales_tab.frame, text="Продажі")
         # "Про програму" is opened from the File menu
+        logging.info("Startup: building tabs end")
 
+        self.bind("<Configure>", self._on_configure)
         self.after_idle(self._restore_last_tab)
-        self.refresh_all()
+        logging.info("Startup: scheduling refresh_all")
+        self.after(0, self._startup_refresh_all_safe)
 
     # Menu
     def create_menu(self) -> None:
@@ -209,11 +214,93 @@ class InventoryApp(tk.Tk):
         )
         diagnostics_menu.add_command(label="Відкрити папку логів", command=self.open_log_folder)
         diagnostics_menu.add_command(label="Відкрити поточний лог", command=self.open_log_file)
+        diagnostics_menu.add_command(
+            label="Скинути позицію вікна", command=self.reset_window_position
+        )
         diagnostics_menu.add_separator()
         diagnostics_menu.add_command(label="Перевірка БД", command=self.on_db_check)
         diagnostics_menu.add_command(label="Швидкий ремонт БД", command=self.on_db_repair)
         menubar.add_cascade(label="Діагностика", menu=diagnostics_menu)
         self.config(menu=menubar)
+
+    def _centered_geometry(self, base: str) -> str:
+        try:
+            width, height = (int(x) for x in base.lower().split("x", 1))
+        except Exception:
+            width, height = 1180, 720
+        screen_w = max(self.winfo_screenwidth(), width)
+        screen_h = max(self.winfo_screenheight(), height)
+        x = max((screen_w - width) // 2, 0)
+        y = max((screen_h - height) // 2, 0)
+        return f"{width}x{height}+{x}+{y}"
+
+    def _apply_default_geometry(self) -> None:
+        default_geometry = self._centered_geometry("1180x720")
+        try:
+            self.geometry(default_geometry)
+            self._last_normal_geometry = default_geometry
+        except Exception:
+            logging.exception("Failed to apply default geometry")
+
+    def _apply_initial_geometry(self, saved_geometry: str) -> None:
+        sanitized = sanitize_geometry(self, saved_geometry) if saved_geometry else None
+        if sanitized:
+            try:
+                self.geometry(sanitized)
+                self._last_normal_geometry = sanitized
+                return
+            except Exception:
+                logging.exception("Failed to apply saved geometry")
+        self._apply_default_geometry()
+
+    def _on_configure(self, event: tk.Event) -> None:  # type: ignore[type-arg]
+        try:
+            if self.state() == "normal":
+                geometry = self.geometry()
+                sanitized = sanitize_geometry(self, geometry)
+                if sanitized:
+                    self._last_normal_geometry = sanitized
+        except Exception:
+            logging.debug("Configure handler failed", exc_info=True)
+
+    def reset_window_position(self) -> None:
+        self.settings.set("", "ui_state", "window_geometry")
+        self.settings.set("", "ui_state", "last_tab")
+        self.settings.save()
+        self._apply_default_geometry()
+        try:
+            self.deiconify()
+            self.lift()
+            self.focus_force()
+        except Exception:
+            logging.debug("Could not focus after reset", exc_info=True)
+        messagebox.showinfo("Позиція вікна", "Позицію та вкладку скинуто. Вікно відцентровано.")
+
+    def _startup_watchdog(self) -> None:
+        try:
+            mapped = bool(self.winfo_ismapped())
+            state = self.state()
+        except Exception:
+            logging.debug("Startup watchdog could not inspect window", exc_info=True)
+            return
+        if mapped and state != "withdrawn":
+            return
+        logging.warning("Startup watchdog triggered: window not mapped (state=%s, mapped=%s)", state, mapped)
+        try:
+            self.deiconify()
+            self.lift()
+            self.focus_force()
+        except Exception:
+            logging.exception("Startup watchdog failed to unhide window")
+        sanitized = sanitize_geometry(self, self.geometry())
+        if not sanitized:
+            logging.info("Startup watchdog resetting geometry to default")
+            self._apply_default_geometry()
+        else:
+            try:
+                self.geometry(sanitized)
+            except Exception:
+                logging.exception("Startup watchdog failed to apply geometry")
 
     def _restore_last_tab(self) -> None:
         name = (self.settings.get("ui_state", "last_tab") or "").strip()
@@ -226,7 +313,14 @@ class InventoryApp(tk.Tk):
 
     def _persist_ui_state(self) -> None:
         try:
-            self.settings.set(self.geometry(), "ui_state", "window_geometry")
+            state = self.state()
+            if state != "iconic":
+                geometry = self.geometry()
+                sanitized = sanitize_geometry(self, geometry)
+                if sanitized:
+                    self.settings.set(sanitized, "ui_state", "window_geometry")
+                elif self._last_normal_geometry:
+                    self.settings.set(self._last_normal_geometry, "ui_state", "window_geometry")
         except Exception:
             pass
         try:
@@ -1159,6 +1253,55 @@ class InventoryApp(tk.Tk):
         if hasattr(self, "channels_tab"):
             self.channels_tab.refresh_channels()
 
+    def _startup_refresh_all_safe(self) -> None:
+        logging.info("Startup refresh_all begin")
+        self.status_var.set("Завантаження...")
+        try:
+            self.update_idletasks()
+        except Exception:
+            logging.debug("update_idletasks failed before refresh", exc_info=True)
+
+        steps: list[tuple[str, callable]] = [
+            ("brands", self.refresh_brands),
+            ("categories", self.refresh_categories),
+            ("products", self.refresh_products),
+            ("counterparties", self.refresh_counterparties),
+            ("warehouses", self.refresh_warehouses),
+            ("channels", self.refresh_channels),
+            ("currencies", self.refresh_currencies),
+            ("purchases", self.refresh_purchases),
+            ("extra_costs", self.refresh_extra_costs),
+            ("sales", self.refresh_sales),
+            ("inventory_documents", self.refresh_inventory_documents),
+            ("cash", self.refresh_cash),
+            ("stock", self.refresh_stock),
+            ("reports", self.reports_tab.refresh_all),
+        ]
+        error_shown = False
+        for name, func in steps:
+            try:
+                logging.info("Startup refresh step begin: %s", name)
+                func()
+                logging.info("Startup refresh step end: %s", name)
+            except Exception:
+                logging.exception("Startup refresh failed on step %s", name)
+                if not error_shown:
+                    error_shown = True
+                    try:
+                        log_hint = self.log_path.parent if self.log_path else "лог"
+                        messagebox.showerror(
+                            "Помилка старту",
+                            f"Не вдалося завантажити дані ({name}). Деталі у логах: {log_hint}",
+                        )
+                    except Exception:
+                        logging.debug("Could not show startup error dialog", exc_info=True)
+            try:
+                self.update_idletasks()
+            except Exception:
+                logging.debug("update_idletasks failed after %s", name, exc_info=True)
+        self.status_var.set("Готово")
+        logging.info("Startup refresh_all end")
+
     def refresh_all(self) -> None:
         self.refresh_brands()
         self.refresh_categories()
@@ -1178,6 +1321,7 @@ class InventoryApp(tk.Tk):
 
 def main(argv: Optional[list[str]] = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    start_time = time.monotonic()
     parser = argparse.ArgumentParser(prog="inventorylite.app")
     parser.add_argument("--helper-restore", dest="helper_restore", help="Запустити режим відновлення")
     parser.add_argument("--no-relaunch", action="store_true", help="Не перезапускати після відновлення")
@@ -1204,6 +1348,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
 
     log_path = setup_logging(APP_NAME)
+    logging.info("Startup: settings load begin")
+
+    def _log_stage(label: str) -> None:
+        logging.info("%s (%.3fs)", label, time.monotonic() - start_time)
 
     def _sys_hook(exc, val, tb):
         logging.critical("Unhandled exception", exc_info=(exc, val, tb))
@@ -1213,14 +1361,20 @@ def main(argv: Optional[list[str]] = None) -> int:
     try:
         with SingleInstance(get_lock_path()):
             settings = Settings()
+            _log_stage("Startup: settings loaded")
             apply_base_currency_settings(settings)
             try:
+                _log_stage("Startup: init_db begin")
                 db.init_db()
+                _log_stage("Startup: init_db end")
             except ValueError as exc:
                 logging.exception("Database schema version is incompatible")
                 messagebox.showerror("Несумісна база даних", str(exc))
                 return 1
+            logging.info("Startup: tk root begin")
             app = InventoryApp(settings, log_path=log_path)
+            _log_stage("Startup: tk root end")
+            app.after(800, app._startup_watchdog)
 
             def _tk_report_callback_exception(exc, val, tb):
                 logging.exception("Unhandled Tk exception", exc_info=(exc, val, tb))
@@ -1288,6 +1442,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
             app.report_callback_exception = _tk_report_callback_exception  # type: ignore[attr-defined]
             app.after(250, check_restore_marker)
+            _log_stage("Startup: entering mainloop")
             app.mainloop()
     except RuntimeError:
         messagebox.showwarning(APP_NAME, "Програма вже запущена.")

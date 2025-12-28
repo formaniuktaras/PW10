@@ -11,6 +11,7 @@ import sys
 import tempfile
 import time
 import zipfile
+import re
 from copy import deepcopy
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -234,6 +235,46 @@ def set_base_currency(code: str, name: str, decimals: int) -> None:
     BASE_CURRENCY = code.strip().upper()
     BASE_CURRENCY_NAME = name.strip() or BASE_CURRENCY
     BASE_CURRENCY_DECIMALS = max(int(decimals), 0)
+
+
+def sanitize_geometry(root: tk.Tk, geom: str) -> str | None:  # type: ignore[type-arg]
+    """Validate and clamp a Tk geometry string to keep the window visible."""
+    if not geom or tk is None:
+        return None
+    match = re.match(
+        r"^(?P<w>\\d+)x(?P<h>\\d+)(?P<xsign>[+-])(?P<x>\\d+)(?P<ysign>[+-])(?P<y>\\d+)$",
+        geom.strip(),
+    )
+    if not match:
+        return None
+
+    width = int(match.group("w"))
+    height = int(match.group("h"))
+    x = int(match.group("x")) * (-1 if match.group("xsign") == "-" else 1)
+    y = int(match.group("y")) * (-1 if match.group("ysign") == "-" else 1)
+
+    if width < 200 or height < 200:
+        return None
+    if x <= -10000 or y <= -10000:
+        return None
+
+    try:
+        screen_w = root.winfo_screenwidth()
+        screen_h = root.winfo_screenheight()
+    except Exception:
+        return None
+
+    max_x = max(screen_w - width, 0)
+    max_y = max(screen_h - height, 0)
+
+    if x < 0 or y < 0 or x > screen_w or y > screen_h:
+        x = min(max(x, 0), max_x)
+        y = min(max(y, 0), max_y)
+
+    if width > screen_w or height > screen_h:
+        return None
+
+    return f"{width}x{height}+{x}+{y}"
 
 def configure_logging() -> None:
     log_path = get_log_path()
